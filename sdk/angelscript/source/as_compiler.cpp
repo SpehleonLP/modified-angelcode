@@ -95,6 +95,14 @@ asCCompiler::asCCompiler(asCScriptEngine *engine) : byteCode(engine)
 
 asCCompiler::~asCCompiler()
 {
+	// Reset() pointed builder->m_accessMaskAccumulator at our m_usedAccessMask
+	// member. Clear it before the member's storage disappears, or the builder
+	// will dereference a dangling stack address on its next access check.
+	if( builder && builder->m_accessMaskAccumulator == &m_usedAccessMask )
+	{
+		builder->m_accessMaskAccumulator = nullptr;
+	}
+
 	while( variables )
 	{
 		asCVariableScope *var = variables;
@@ -122,6 +130,12 @@ void asCCompiler::Reset(asCBuilder *in_builder, asCScriptCode *in_script, asCScr
 	this->outFunc = in_outFunc;
 
 	hasCompileErrors = false;
+
+	m_usedAccessMask = 0;
+	if (builder)
+	{
+		builder->m_accessMaskAccumulator = &m_usedAccessMask;
+	}
 
 	m_isConstructor       = false;
 	m_isConstructorCalled = false;
@@ -394,6 +408,203 @@ int asCCompiler::CompileFactory(asCBuilder *in_builder, asCScriptCode *in_script
 	return 0;
 }
 
+// --- Counted-loop prover (halting-analysis helper) ---------------------------
+// Returns true if the instruction at bc[n] may write variable slot v or take
+// its address. Unknown layouts conservatively return true. Reads are fine:
+// the prover only needs "v changes solely via its IncVi" and "the bound is
+// invariant"; aliasing (PSF/VAR/LDV of the slot) counts as a potential write
+// because a callee or deferred store could then modify it.
+static bool asInstrMayWriteOrAliasVar(asDWORD *bc, asUINT n, short v)
+{
+	asBYTE op = *(asBYTE*)&bc[n];
+
+	if (op == asBC_PSF || op == asBC_VAR || op == asBC_LDV)
+		return asBC_SWORDARG0(&bc[n]) == v;
+
+	switch (asBCInfo[op].type)
+	{
+	// no variable operands
+	case asBCTYPE_INFO:
+	case asBCTYPE_NO_ARG:
+	case asBCTYPE_W_ARG:
+	case asBCTYPE_DW_ARG:
+	case asBCTYPE_QW_ARG:
+	case asBCTYPE_DW_DW_ARG:
+	case asBCTYPE_QW_DW_ARG:
+	case asBCTYPE_W_DW_ARG:
+		return false;
+
+	// first operand is read-only... except the read-modify-write pair
+	case asBCTYPE_rW_ARG:
+		if (op == asBC_IncVi || op == asBC_DecVi)
+			return asBC_SWORDARG0(&bc[n]) == v;
+		return false;
+	case asBCTYPE_rW_DW_ARG:
+	case asBCTYPE_rW_QW_ARG:
+	case asBCTYPE_rW_W_DW_ARG:
+	case asBCTYPE_rW_DW_DW_ARG:
+	case asBCTYPE_rW_rW_ARG:
+		return false;
+
+	// first operand is written
+	case asBCTYPE_wW_ARG:
+	case asBCTYPE_wW_W_ARG:
+	case asBCTYPE_wW_DW_ARG:
+	case asBCTYPE_wW_QW_ARG:
+	case asBCTYPE_wW_rW_ARG:
+	case asBCTYPE_wW_rW_DW_ARG:
+	case asBCTYPE_wW_rW_rW_ARG:
+		return asBC_SWORDARG0(&bc[n]) == v;
+
+	default:
+		return true; // unknown layout: assume the worst
+	}
+}
+
+// Attempts to prove the back edge at offset `backJump` (jumping to `target`)
+// is the sole back edge of a bounded counted loop. Shapes accepted:
+//   top-test:    target: CMP* v,(w|imm) ; Jexit(forward, > backJump) ;
+//                ... body ... ; IncVi v ; backJump: JMP -> target
+//   bottom-test: target < backJump ; ... ; IncVi v ; CMP* v,(w|imm) ;
+//                backJump: JS -> target
+// plus, over the whole span [target, backJump]:
+//   - v written only by that one IncVi, never aliased,
+//   - w (when a variable) never written or aliased,
+//   - no OTHER back edge targets inside [target, backJump] (checked by caller);
+//   - increment dominance, both flavors: top-test uses the GLOBAL
+//     isJumpTarget set (nothing anywhere may jump into (incAt, backJump]);
+//     bottom-test instead uses a SPAN-INTERNAL source check (only a jump
+//     whose SOURCE is inside [target, backJump] and whose destination is in
+//     (incAt, backJump] counts) — legitimate for-loop entry rotation jumps
+//     from OUTSIDE the span onto the bottom-test condition, which sits after
+//     the IncVi, so the global check would false-reject every counted
+//     for-loop if reused here.
+// Only IncVi is a sanctioned mutator of v; DecVi is never matched by either
+// branch and so falls through the span scan's write/alias check like any
+// other write, refusing the proof.
+static bool asProveCountedLoop(asDWORD *bc, asUINT bcLen, asUINT target, asUINT backJump,
+                               const asCArray<bool> &isJumpTarget)
+{
+	// Collect instruction starts inside the span so "previous instruction"
+	// queries are well-defined.
+	asCArray<asUINT> starts;
+	for (asUINT n = target; n <= backJump && n < bcLen; )
+	{
+		asBYTE op = *(asBYTE*)&bc[n];
+		int sz = asBCTypeSize[asBCInfo[op].type];
+		if (sz == 0) return false;
+		starts.PushLast(n);
+		n += (asUINT)sz;
+	}
+	if (starts.GetLength() < 3) return false;
+	if (starts[starts.GetLength()-1] != backJump) return false;
+
+	asBYTE backOp = *(asBYTE*)&bc[backJump];
+	short v = 0;
+	bool haveShape = false;
+	asUINT incAt = (asUINT)-1;        // offset of the sanctioned IncVi
+	bool boundIsVar = false;
+	short w = 0;
+
+	// Debug builds interleave a per-statement asBC_SUSPEND marker (a NO_ARG
+	// no-op the alias scan already treats as harmless) between the
+	// increment and the comparison, and again before the back edge itself.
+	// Walk backward over those when locating the "previous real instruction"
+	// so the shape checks below see IncVi/CMP* adjacency regardless.
+	asUINT idx = starts.GetLength() - 1; // starts[idx] == backJump
+	while (idx > 0 && *(asBYTE*)&bc[starts[idx-1]] == asBC_SUSPEND) idx--;
+
+	if (backOp == asBC_JMP)
+	{
+		// Top-test: target must hold CMP* v,(w|imm), followed by a forward
+		// conditional exit jumping past backJump; IncVi v immediately
+		// precedes the back JMP (modulo SUSPEND markers).
+		asBYTE cmpOp = *(asBYTE*)&bc[target];
+		if (cmpOp != asBC_CMPi && cmpOp != asBC_CMPu &&
+		    cmpOp != asBC_CMPIi && cmpOp != asBC_CMPIu) return false;
+		asUINT condAt = target + (asUINT)asBCTypeSize[asBCInfo[cmpOp].type];
+		asBYTE condOp = *(asBYTE*)&bc[condAt];
+		if (condOp != asBC_JNS) return false;   // exit when !(v < w)
+		int exitTarget = (int)condAt + asBCTypeSize[asBCInfo[condOp].type]
+		               + asBC_INTARG(&bc[condAt]);
+		if (exitTarget <= (int)backJump) return false;
+
+		if (idx == 0) return false;
+		asUINT prev = starts[idx-1];
+		if (*(asBYTE*)&bc[prev] != asBC_IncVi) return false;
+
+		v = asBC_SWORDARG0(&bc[target]);
+		boundIsVar = (cmpOp == asBC_CMPi || cmpOp == asBC_CMPu);
+		if (boundIsVar) w = asBC_SWORDARG1(&bc[target]);
+		if (asBC_SWORDARG0(&bc[prev]) != v) return false;
+		incAt = prev;
+
+		// Increment dominance: nothing may jump into (incAt, backJump] —
+		// a forward branch landing there (while(i<n){ if(b) i++; }) skips
+		// the increment, so the loop would not be bounded by v's count.
+		for (asUINT s = 0; s < starts.GetLength(); s++)
+			if (starts[s] > incAt && isJumpTarget[starts[s]])
+				return false;
+
+		haveShape = true;
+	}
+	else if (backOp == asBC_JS)
+	{
+		// Bottom-test: ... IncVi v ; CMP* v,(w|imm) ; JS back  (stay while v < w)
+		if (idx == 0) return false;
+		asUINT cmpIdx = idx - 1;
+		asUINT cmpAt = starts[cmpIdx];
+		asBYTE cmpOp = *(asBYTE*)&bc[cmpAt];
+		if (cmpOp != asBC_CMPi && cmpOp != asBC_CMPu &&
+		    cmpOp != asBC_CMPIi && cmpOp != asBC_CMPIu) return false;
+
+		while (cmpIdx > 0 && *(asBYTE*)&bc[starts[cmpIdx-1]] == asBC_SUSPEND) cmpIdx--;
+		if (cmpIdx == 0) return false;
+		asUINT incPrev = starts[cmpIdx-1];
+		if (*(asBYTE*)&bc[incPrev] != asBC_IncVi) return false;
+
+		v = asBC_SWORDARG0(&bc[cmpAt]);
+		boundIsVar = (cmpOp == asBC_CMPi || cmpOp == asBC_CMPu);
+		if (boundIsVar) w = asBC_SWORDARG1(&bc[cmpAt]);
+		if (asBC_SWORDARG0(&bc[incPrev]) != v) return false;
+		incAt = incPrev;
+
+		// Increment dominance, bottom-test flavor: an IN-SPAN jump landing
+		// after the IncVi (do { if (b) continue; i++; } while (i < n); —
+		// the continue lands on the condition) bypasses the increment.
+		// The global isJumpTarget set cannot be used here: legitimate loop
+		// entry (for-loop rotation) jumps from OUTSIDE the span onto the
+		// condition. Only in-span sources are increment-bypasses. JMPP in
+		// the span computes its landing dynamically — refuse outright.
+		for (asUINT s = 0; s < starts.GetLength(); s++)
+		{
+			asBYTE sop = *(asBYTE*)&bc[starts[s]];
+			if (sop == asBC_JMPP) return false;
+			bool sIsJump = sop == asBC_JMP ||
+			               (sop >= asBC_JZ && sop <= asBC_JNP) ||
+			               sop == asBC_JLowZ || sop == asBC_JLowNZ;
+			if (!sIsJump) continue;
+			int dest = (int)starts[s] + asBCTypeSize[asBCInfo[sop].type]
+			         + asBC_INTARG(&bc[starts[s]]);
+			if (dest > (int)incAt && dest <= (int)backJump)
+				return false;
+		}
+
+		haveShape = true;
+	}
+	if (!haveShape) return false;
+
+	// Span scan: v untouched except at incAt; w (if a variable) untouched.
+	for (asUINT s = 0; s < starts.GetLength(); s++)
+	{
+		asUINT n = starts[s];
+		if (n == incAt) continue;
+		if (asInstrMayWriteOrAliasVar(bc, n, v)) return false;
+		if (boundIsVar && asInstrMayWriteOrAliasVar(bc, n, w)) return false;
+	}
+	return true;
+}
+
 void asCCompiler::FinalizeFunction()
 {
 	TimeIt("asCCompiler::FinalizeFunction");
@@ -454,6 +665,198 @@ void asCCompiler::FinalizeFunction()
 	outFunc->scriptData->byteCode.SetLength(byteCode.GetSize());
 	byteCode.Output(outFunc->scriptData->byteCode.AddressOf());
 	outFunc->AddReferences();
+	outFunc->minLocalAccessMask = m_usedAccessMask;
+
+	// --- Halting analysis ---
+	// Classify the finalized bytecode by its control-flow graph:
+	//   YES     - no cycle, or every cycle proven bounded (allCyclesBounded)
+	//   NO      - has a cycle, no try/catch, and no RET reachable from entry
+	//   UNKNOWN - everything else, including anything the decoder can't parse
+	// Conditional jumps include asBC_JLowZ/asBC_JLowNZ (the optimizer rewrites
+	// ClrHi+JZ/JNZ into these) and asBC_JMPP (switch dispatch into the run of
+	// JMP instructions that follows it). A funcdef/delegate call site caps the
+	// result at UNKNOWN: the callee is unknown, so YES cannot be promised.
+	// Literal loop guards are not constant-folded by this compiler: while(true)
+	// emits SetV1(const) -> CpyVtoR4 -> JLowZ whose exit edge is statically
+	// dead. Exactly that adjacent triple (no jump entering mid-pattern) has its
+	// dead edge elided from the reachability walk; any other conditional keeps
+	// both edges. Elision only when the register value is provably the
+	// immediate constant — never on doubt.
+	{
+		asDWORD *bc  = outFunc->scriptData->byteCode.AddressOf();
+		asUINT bcLen = (asUINT)outFunc->scriptData->byteCode.GetLength();
+
+		bool decodeOk = true;
+		bool hasCycle = false;
+		asCArray<asUINT> backEdgeFrom, backEdgeTo;
+
+		// Pass 1: decode, detect cycles, check the JMPP table shape, and mark
+		// every address any jump can enter at (JMPP marks its whole JMP table;
+		// each table JMP's own target is marked by the plain-JMP case when the
+		// linear scan reaches it).
+		asCArray<bool> isJumpTarget;
+		isJumpTarget.SetLength(bcLen);
+		for (asUINT v = 0; v < bcLen; v++) isJumpTarget[v] = false;
+
+		for (asUINT n = 0; n < bcLen; )
+		{
+			asBYTE op = *(asBYTE*)&bc[n];
+			int instrSize = asBCTypeSize[asBCInfo[op].type];
+			if (instrSize == 0) { decodeOk = false; break; }
+
+			bool isCondJump = (op >= asBC_JZ && op <= asBC_JNP) ||
+			                  op == asBC_JLowZ || op == asBC_JLowNZ;
+			if (op == asBC_JMP || isCondJump)
+			{
+				int target = (int)n + instrSize + asBC_INTARG(&bc[n]);
+				if (target <= (int)n)
+				{
+					hasCycle = true;
+					backEdgeFrom.PushLast(n);
+					backEdgeTo.PushLast((asUINT)target);
+				}
+				if (target >= 0 && target < (int)bcLen)
+					isJumpTarget[target] = true;
+			}
+			else if (op == asBC_JMPP)
+			{
+				// Switch dispatch always jumps forward into the JMP table
+				// that follows. The reachability walk below relies on that
+				// shape; anything else is out of contract.
+				asUINT next = n + (asUINT)instrSize;
+				if (next >= bcLen || *(asBYTE*)&bc[next] != asBC_JMP)
+					decodeOk = false;
+				else
+					for (asUINT t = next;
+					     t < bcLen && *(asBYTE*)&bc[t] == asBC_JMP;
+					     t += (asUINT)asBCTypeSize[asBCInfo[asBC_JMP].type])
+						isJumpTarget[t] = true;
+			}
+			n += (asUINT)instrSize;
+		}
+
+		// Pass 2: resolve statically-constant guards. forced[n] for a
+		// conditional jump at n: 0 = both edges live, 1 = fall-through only,
+		// 2 = jump-target only. Elision requires the exact adjacent triple
+		// SetV1/SetV2/SetV4(var, imm) -> CpyVtoR4(same var) -> JLowZ/JLowNZ
+		// with no jump entering at the CpyVtoR4 or the jump itself (a jump
+		// into the SetV is fine — the constant still gets written). Anything
+		// else leaves forced[n] == 0.
+		asCArray<asBYTE> forced;
+		forced.SetLength(bcLen);
+		for (asUINT v = 0; v < bcLen; v++) forced[v] = 0;
+
+		if (decodeOk)
+		{
+			asUINT p2 = bcLen, p1 = bcLen; // the two preceding instruction addresses
+			for (asUINT n = 0; n < bcLen; )
+			{
+				asBYTE op = *(asBYTE*)&bc[n];
+				int instrSize = asBCTypeSize[asBCInfo[op].type];
+
+				if ((op == asBC_JLowZ || op == asBC_JLowNZ) &&
+				    p1 < bcLen && p2 < bcLen &&
+				    !isJumpTarget[p1] && !isJumpTarget[n])
+				{
+					asBYTE op1 = *(asBYTE*)&bc[p1];
+					asBYTE op2 = *(asBYTE*)&bc[p2];
+					if (op1 == asBC_CpyVtoR4 &&
+					    (op2 == asBC_SetV1 || op2 == asBC_SetV2 || op2 == asBC_SetV4) &&
+					    asBC_SWORDARG0(&bc[p1]) == asBC_SWORDARG0(&bc[p2]))
+					{
+						// JLowZ/JLowNZ test only the low byte of the value
+						// register, which CpyVtoR4 loaded from the var the
+						// SetV wrote — so the outcome is the constant's.
+						asDWORD c = asBC_DWORDARG(&bc[p2]);
+						bool jumpTaken = (op == asBC_JLowZ) ? ((c & 0xFF) == 0)
+						                                    : ((c & 0xFF) != 0);
+						forced[n] = jumpTaken ? (asBYTE)2 : (asBYTE)1;
+					}
+				}
+				p2 = p1; p1 = n;
+				n += (asUINT)instrSize;
+			}
+		}
+
+		// Counted-loop prover: YES survives cycles when every back edge is a
+		// proven-bounded counted loop and no two back edges share a target
+		// (a shared target means a continue-style edge can bypass the
+		// increment — refuse).
+		bool allCyclesBounded = decodeOk && backEdgeFrom.GetLength() > 0;
+		for (asUINT e = 0; allCyclesBounded && e < backEdgeFrom.GetLength(); e++)
+		{
+			for (asUINT e2 = 0; e2 < backEdgeFrom.GetLength(); e2++)
+				if (e2 != e && backEdgeTo[e2] == backEdgeTo[e])
+					allCyclesBounded = false;
+			if (allCyclesBounded)
+				allCyclesBounded = asProveCountedLoop(bc, bcLen, backEdgeTo[e], backEdgeFrom[e], isJumpTarget);
+		}
+
+		if (!decodeOk)
+			outFunc->localHalts = asHALTS_UNKNOWN;
+		else if (!hasCycle || allCyclesBounded)
+			outFunc->localHalts = asHALTS_YES;
+		else if (outFunc->scriptData->tryCatchInfo.GetLength() > 0)
+		{
+			// Catch handlers are CFG edges from every potentially-throwing
+			// instruction in the try range; those edges are not modeled
+			// here, so NO must never be claimed for such a function.
+			outFunc->localHalts = asHALTS_UNKNOWN;
+		}
+		else
+		{
+			// RET-reachability from entry over the real CFG. If no RET can
+			// be reached the function cannot return normally: NO.
+			asCArray<bool> visited;
+			visited.SetLength(bcLen);
+			for (asUINT v = 0; v < bcLen; v++) visited[v] = false;
+
+			asCArray<asUINT> work;
+			work.PushLast(0);
+			bool retReachable = false;
+
+			while (work.GetLength() > 0 && !retReachable)
+			{
+				asUINT n = work[work.GetLength() - 1];
+				work.PopLast();
+				if (n >= bcLen || visited[n]) continue;
+				visited[n] = true;
+
+				asBYTE op = *(asBYTE*)&bc[n];
+				int instrSize = asBCTypeSize[asBCInfo[op].type];
+
+				if (op == asBC_RET)
+					retReachable = true;
+				else if (op == asBC_JMP)
+					work.PushLast((asUINT)((int)n + instrSize + asBC_INTARG(&bc[n])));
+				else if ((op >= asBC_JZ && op <= asBC_JNP) ||
+				         op == asBC_JLowZ || op == asBC_JLowNZ)
+				{
+					// A guard pass 2 proved constant contributes only its
+					// live edge; forced == 0 means both edges are live.
+					if (forced[n] != 1)
+						work.PushLast((asUINT)((int)n + instrSize + asBC_INTARG(&bc[n])));
+					if (forced[n] != 2)
+						work.PushLast(n + (asUINT)instrSize);
+				}
+				else if (op == asBC_JMPP)
+				{
+					for (asUINT t = n + (asUINT)instrSize;
+					     t < bcLen && *(asBYTE*)&bc[t] == asBC_JMP;
+					     t += (asUINT)asBCTypeSize[asBCInfo[asBC_JMP].type])
+						work.PushLast(t);
+				}
+				else
+					work.PushLast(n + (asUINT)instrSize);
+			}
+
+			outFunc->localHalts = retReachable ? asHALTS_UNKNOWN : asHALTS_NO;
+		}
+
+		if (outFunc->localCallsDelegate && outFunc->localHalts == asHALTS_YES)
+			outFunc->localHalts = asHALTS_UNKNOWN;
+	}
+
 	outFunc->scriptData->stackNeeded = byteCode.largestStackUsed + outFunc->scriptData->variableSpace;
 	outFunc->scriptData->lineNumbers = byteCode.lineNumbers;
 
@@ -3023,24 +3426,21 @@ bool asCCompiler::CompileAutoType(asCDataType &type, asCExprContext &compiledCtx
 			// Must not have unused ambiguous names
 			if (compiledCtx.IsClassMethod() || compiledCtx.IsGlobalFunc())
 			{
-				// TODO: Should mention that the problem is the ambiguous name
-				Error(TXT_CANNOT_RESOLVE_AUTO, errNode);
+				Error(TXT_CANNOT_RESOLVE_AUTO_AMBIGUOUS, errNode);
 				return false;
 			}
 
 			// Must not have unused anonymous functions
 			if (compiledCtx.IsLambda())
 			{
-				// TODO: Should mention that the problem is the anonymous function
-				Error(TXT_CANNOT_RESOLVE_AUTO, errNode);
+				Error(TXT_CANNOT_RESOLVE_AUTO_LAMBDA, errNode);
 				return false;
 			}
 
 			// Must not be a null handle
 			if (compiledCtx.type.dataType.IsNullHandle())
 			{
-				// TODO: Should mention that the problem is the null pointer
-				Error(TXT_CANNOT_RESOLVE_AUTO, errNode);
+				Error(TXT_CANNOT_RESOLVE_AUTO_NULL, errNode);
 				return false;
 			}
 
@@ -4857,7 +5257,7 @@ void asCCompiler::CompileIfStatement(asCScriptNode *inode, bool *hasReturn, asCB
 				// Jump to the else case
 				bc->InstrINT(asBC_JMP, afterLabel);
 
-				// TODO: Should we warn that the expression will always go to the else?
+				Warning(TXT_UNREACHABLE_CODE, inode->firstChild->next);
 			}
 		}
 	}
@@ -7808,6 +8208,11 @@ asUINT asCCompiler::ImplicitConvObjectToPrimitive(asCExprContext *ctx, const asC
 		if( generateCode )
 		{
 			Dereference(ctx, true);
+			if( ot && ot->resolveHandle )                                                                                               
+			{                                                                                                                           
+				ctx->bc.InstrPTR(asBC_ResolveHandleV, ot);                                                                                
+				ctx->bc.Instr(asBC_CHKREF);                                                                                               
+			}    
 			PerformFunctionCall(funcId, ctx);
 		}
 		else
@@ -8085,7 +8490,13 @@ asUINT asCCompiler::ImplicitConvObjectValue(asCExprContext *ctx, const asCDataTy
 			if( generateCode )
 			{
 				Dereference(ctx, true);
-
+				
+				if( ot && ot->resolveHandle )                                                                                               
+				{                                                                                                                           
+					ctx->bc.InstrPTR(asBC_ResolveHandleV, ot);                                                                                
+					ctx->bc.Instr(asBC_CHKREF);                                                                                               
+				}    
+				
 				bool useVariable = false;
 				int  stackOffset = 0;
 
@@ -8364,6 +8775,11 @@ asUINT asCCompiler::ImplicitConvObjectToObject(asCExprContext *ctx, const asCDat
 					e.bc.InstrSHORT(asBC_VAR, (short)tempObj.stackOffset);
 
 				PrepareFunctionCall(funcs[0], &e.bc, args);
+				if (builder->GetFunctionDescription(funcs[0])->IsVariadic())
+				{
+					// Argument count
+					e.bc.InstrDWORD(asBC_PshC4, (asDWORD)args.GetLength());
+				}
 				MoveArgsToStack(funcs[0], &e.bc, args, false);
 
 				// If the object is allocated on the stack, then call the constructor as a normal function
@@ -8887,6 +9303,11 @@ asUINT asCCompiler::ImplicitConvPrimitiveToObject(asCExprContext *ctx, const asC
 	}
 
 	PrepareFunctionCall(funcs[0], &ctx->bc, args);
+	if (builder->GetFunctionDescription(funcs[0])->IsVariadic())
+	{
+		// Argument count
+		ctx->bc.InstrDWORD(asBC_PshC4, (asDWORD)args.GetLength());
+	}
 	MoveArgsToStack(funcs[0], &ctx->bc, args, false);
 
 	if( !(objType->flags & asOBJ_REF) )
@@ -10589,14 +11010,26 @@ asCCompiler::SYMBOLTYPE asCCompiler::SymbolLookupMember(const asCString &name, a
 
 	// If it is not a property, it may still be the name of a method
 	asCObjectType *ot = objType;
+	asCScriptFunction * candidate = 0L;
 	for (asUINT n = 0; n < ot->methods.GetLength(); n++)
 	{
 		asCScriptFunction *f = engine->scriptFunctions[ot->methods[n]];
-		if (f->name == name &&
-			(builder->module->m_accessMask & f->accessMask))
+		if (f->name == name)
 		{
-			outResult->type.dataType.SetTypeInfo(objType);
-			return SL_CLASSMETHOD;
+			if((builder->module->m_accessMask & f->accessMask) == false)
+				candidate = f;
+			else
+			{
+				// Skip accumulating for methods on script-defined classes — those inherit the
+				// module's default accessMask (0xFFFFFFFF), which is visibility metadata, not a
+				// runtime category. Their real usage flows via call-graph transitive propagation.
+				if (objType->module == nullptr && !(objType->flags & asOBJ_SCRIPT_OBJECT))
+				{
+					m_usedAccessMask |= f->accessMask;
+				}
+				outResult->type.dataType.SetTypeInfo(objType);
+				return SL_CLASSMETHOD;
+			}
 		}
 	}
 
@@ -10608,6 +11041,16 @@ asCCompiler::SYMBOLTYPE asCCompiler::SymbolLookupMember(const asCString &name, a
 			outResult->type.dataType.SetTypeInfo(objType);
 			return SL_CLASSTYPE;
 		}
+	}
+	
+	
+	if(candidate)
+	{
+		asCString msg;
+		asCString smbl;
+		
+		msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, name.AddressOf(), candidate->accessMask, builder->module ? builder->module->m_accessMask : 0);
+		builder->WriteError(script->name, msg, 0, 0);
 	}
 
 	return SL_NOMATCH;
@@ -11000,8 +11443,12 @@ asCCompiler::SYMBOLTYPE asCCompiler::SymbolLookup(const asCString &name, const a
 
 int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &scope, asCExprContext *ctx, asCScriptNode *errNode, bool isOptional, asCObjectType *objType)
 {
+	asDWORD missedAccessMask = 0;
+	asDWORD *prevMissedAccumulator = builder->m_missedAccessMaskAccumulator;
+	builder->m_missedAccessMaskAccumulator = &missedAccessMask;
 	asCExprContext lookupResult(engine);
 	SYMBOLTYPE symbolType = SymbolLookup(name, scope, objType, &lookupResult, errNode);
+	builder->m_missedAccessMaskAccumulator = prevMissedAccumulator;
 	if (symbolType < 0)
 	{
 		// Give dummy value
@@ -11024,7 +11471,10 @@ int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &s
 			else if (scope != "")
 				smbl = scope + "::";
 			smbl += name;
-			msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
+			if (missedAccessMask)
+				msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->module ? builder->module->m_accessMask : 0);
+			else
+				msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
 			Error(msg, errNode);
 		}
 		return -1;
@@ -11598,10 +12048,10 @@ int asCCompiler::CompileExpressionValue(asCScriptNode *node, asCExprContext *ctx
 		{
 			asCString value(&script->code[vnode->tokenPos], vnode->tokenLength);
 
-			// TODO: Check for overflow
-
 			size_t numScanned;
 			float v = float(asStringScanDouble(value.AddressOf(), &numScanned));
+			if( isinf(v) )
+				Warning(TXT_VALUE_TOO_LARGE_FOR_TYPE, vnode);
 			ctx->type.SetConstantF(asCDataType::CreatePrimitive(ttFloat, true), v);
 #ifndef AS_USE_DOUBLE_AS_FLOAT
 			// Don't check this if we have double as float, because then the whole token would be scanned (i.e. no f suffix)
@@ -11612,10 +12062,10 @@ int asCCompiler::CompileExpressionValue(asCScriptNode *node, asCExprContext *ctx
 		{
 			asCString value(&script->code[vnode->tokenPos], vnode->tokenLength);
 
-			// TODO: Check for overflow
-
 			size_t numScanned;
 			double v = asStringScanDouble(value.AddressOf(), &numScanned);
+			if( isinf(v) )
+				Warning(TXT_VALUE_TOO_LARGE_FOR_TYPE, vnode);
 			ctx->type.SetConstantD(asCDataType::CreatePrimitive(ttDouble, true), v);
 			asASSERT(numScanned == vnode->tokenLength);
 		}
@@ -11701,8 +12151,7 @@ int asCCompiler::CompileExpressionValue(asCScriptNode *node, asCExprContext *ctx
 					void *strPtr = const_cast<void*>(engine->stringFactory->GetStringConstant(str.AddressOf(), (asUINT)str.GetLength()));
 					if (strPtr == 0)
 					{
-						// TODO: A better message is needed
-						Error(TXT_NULL_POINTER_ACCESS, vnode);
+						Error(TXT_FAILED_TO_CREATE_STRING_CONSTANT, vnode);
 						ctx->type.SetDummy();
 						return -1;
 					}
@@ -11907,6 +12356,8 @@ asUINT asCCompiler::ProcessStringConstant(asCString &cstr, asCScriptNode *node, 
 					val = '\0';
 				else if( cstr[n] == '\\' )
 					val = '\\';
+				else if( cstr[n] == 'e' )
+					val = '\e';
 				else
 				{
 					// Invalid escape sequence
@@ -12754,12 +13205,17 @@ int asCCompiler::CompileFunctionCall(asCScriptNode *node, asCExprContext *ctx, a
 
 	// Find the matching entities
 	// If objectType is set then this is a post op expression and we shouldn't look for local variables
+	asDWORD missedAccessMask = 0;
+	asDWORD *prevMissedAccumulator = builder->m_missedAccessMaskAccumulator;
+	builder->m_missedAccessMaskAccumulator = &missedAccessMask;
 	asCExprContext lookupResult(engine);
 	SYMBOLTYPE symbolType = SymbolLookup(name, scope, objectType, &lookupResult, node);
+	builder->m_missedAccessMaskAccumulator = prevMissedAccumulator;
 	if (symbolType < 0)
 		return -1;
 	if (symbolType == SL_NOMATCH)
 	{
+//		symbolType = SymbolLookup(name, scope, objectType, &lookupResult, node);
 		// No matching symbol
 		asCString msg;
 		asCString smbl;
@@ -12768,7 +13224,10 @@ int asCCompiler::CompileFunctionCall(asCScriptNode *node, asCExprContext *ctx, a
 		else if (scope != "")
 			smbl = scope + "::";
 		smbl += name;
-		msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
+		if (missedAccessMask)
+			msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->module ? builder->module->m_accessMask : 0);
+		else
+			msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
 		Error(msg, node);
 		return -1;
 	}
@@ -14315,11 +14774,24 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 
 				if( ctx->type.dataType.IsObjectHandle() )
 				{
-					// Convert the handle to a normal object
-					asCDataType dt = ctx->type.dataType;
-					dt.MakeHandle(false);
+					// Flip the type from handle to object so property lookup succeeds.
+					// The actual bytecode resolve (for RegisterHandle types) is emitted
+					// just before the ADDSi below, so both this path and the path where
+					// the handle bit was already stripped earlier (e.g. class members
+					// declared without '@') get a single, consistent resolve site.
+					if( ctx->type.dataType.GetTypeInfo() &&
+						ctx->type.dataType.GetTypeInfo()->resolveHandle )
+					{
+						ctx->type.dataType.MakeHandle(false);
+					}
+					else
+					{
+						// Convert the handle to a normal object
+						asCDataType dt = ctx->type.dataType;
+						dt.MakeHandle(false);
 
-					ImplicitConversion(ctx, dt, node, asIC_IMPLICIT_CONV);
+						ImplicitConversion(ctx, dt, node, asIC_IMPLICIT_CONV);
+					}
 
 					// The handle may not have been an lvalue, but the dereferenced object is
 					ctx->type.isLValue = true;
@@ -14327,7 +14799,8 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 
 				bool isConst = ctx->type.dataType.IsObjectConst();
 
-				asCObjectProperty *prop = builder->GetObjectProperty(ctx->type.dataType, name.AddressOf());
+				asDWORD maskedPropAccessMask = 0;
+				asCObjectProperty *prop = builder->GetObjectProperty(ctx->type.dataType, name.AddressOf(), &maskedPropAccessMask);
 				if( prop )
 				{
 					// Is the property access allowed?
@@ -14339,6 +14812,20 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 						else
 							msg.Format(TXT_PROTECTED_PROP_ACCESS_s, name.AddressOf());
 						Error(msg, node);
+					}
+
+					// For RegisterHandle types, the value on the stack is a packed
+					// handle word (e.g. {generation, slot}), not a raw pointer.
+					// Resolve it before any ADDSi so the offset is applied to the
+					// real object pointer. This covers both handle-typed ctx
+					// (converged via the flip above) and class members declared
+					// without '@' (where the handle bit was stripped in
+					// CompileVariableAccess).
+					if( ctx->type.dataType.GetTypeInfo() &&
+						ctx->type.dataType.GetTypeInfo()->resolveHandle )
+					{
+						ctx->bc.InstrPTR(asBC_ResolveHandleV, ctx->type.dataType.GetTypeInfo());
+						ctx->bc.Instr(asBC_CHKREF);
 					}
 
 					// Adjust the pointer for composite member
@@ -14419,7 +14906,10 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 					else
 					{
 						asCString str;
-						str.Format(TXT_s_NOT_MEMBER_OF_s, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
+						if( maskedPropAccessMask )
+							str.Format(TXT_s_NOT_MEMBER_OF_s_MASK_x_vs_x, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf(), maskedPropAccessMask, builder->module ? builder->module->m_accessMask : 0);
+						else
+							str.Format(TXT_s_NOT_MEMBER_OF_s, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
 						Error(str, node);
 						return -1;
 					}
@@ -15174,6 +15664,13 @@ int asCCompiler::CompileOverloadedDualOperator2(asCScriptNode *node, const char 
 				// Make sure the method is accessible by the module
 				if( builder->module->m_accessMask & func->accessMask )
 				{
+					// Skip script-defined-class methods (owning type is asOBJ_SCRIPT_OBJECT).
+					// Their accessMask is module-default 0xFFFFFFFF visibility noise; real usage
+					// flows via the call-graph transitive propagation.
+					if (ot->module == nullptr && !(ot->flags & asOBJ_SCRIPT_OBJECT))
+					{
+						m_usedAccessMask |= func->accessMask;
+					}
 					funcs.PushLast(func->id);
 				}
 			}
@@ -15337,6 +15834,13 @@ int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType
 {
 	if( objectType )
 		Dereference(ctx, true);
+
+	// Resolve handle bits to real pointer for handle-resolve types
+	if( objectType && objectType->resolveHandle )
+	{
+		ctx->bc.InstrPTR(asBC_ResolveHandleV, objectType);
+		ctx->bc.Instr(asBC_CHKREF);
+	}
 
 	asCScriptFunction* descr = builder->GetFunctionDescription(funcId);
 
@@ -16010,9 +16514,16 @@ void asCCompiler::CompileMathOperator(asCScriptNode *node, asCExprContext *lctx,
 					v = int(lctx->type.GetConstantDW()) * int(rctx->type.GetConstantDW());
 				else if( op == ttSlash )
 				{
-					// TODO: Should probably report an error, rather than silently convert the value to 0
-					if( rctx->type.GetConstantDW() == 0 || (int(rctx->type.GetConstantDW()) == -1 && lctx->type.GetConstantDW() == 0x80000000) )
+					if( rctx->type.GetConstantDW() == 0 )
+					{
+						Warning(TXT_DIVIDE_BY_ZERO, node);
 						v = 0;
+					}
+					else if( int(rctx->type.GetConstantDW()) == -1 && lctx->type.GetConstantDW() == 0x80000000 )
+					{
+						Warning(TXT_DIVIDE_OVERFLOW, node);
+						v = 0;
+					}
 					else
 						if( lctx->type.dataType.IsIntegerType() )
 							v = int(lctx->type.GetConstantDW()) / int(rctx->type.GetConstantDW());
@@ -16021,9 +16532,16 @@ void asCCompiler::CompileMathOperator(asCScriptNode *node, asCExprContext *lctx,
 				}
 				else if( op == ttPercent )
 				{
-					// TODO: Should probably report an error, rather than silently convert the value to 0
-					if( rctx->type.GetConstantDW() == 0 || (int(rctx->type.GetConstantDW()) == -1 && lctx->type.GetConstantDW() == 0x80000000) )
+					if( rctx->type.GetConstantDW() == 0 )
+					{
+						Warning(TXT_DIVIDE_BY_ZERO, node);
 						v = 0;
+					}
+					else if( int(rctx->type.GetConstantDW()) == -1 && lctx->type.GetConstantDW() == 0x80000000 )
+					{
+						Warning(TXT_DIVIDE_OVERFLOW, node);
+						v = 0;
+					}
 					else
 						if( lctx->type.dataType.IsIntegerType() )
 							v = int(lctx->type.GetConstantDW()) % int(rctx->type.GetConstantDW());
@@ -16059,9 +16577,16 @@ void asCCompiler::CompileMathOperator(asCScriptNode *node, asCExprContext *lctx,
 					v = asINT64(lctx->type.GetConstantQW()) * asINT64(rctx->type.GetConstantQW());
 				else if( op == ttSlash )
 				{
-					// TODO: Should probably report an error, rather than silently convert the value to 0
-					if( rctx->type.GetConstantQW() == 0 || (rctx->type.GetConstantQW() == asQWORD(-1) && lctx->type.GetConstantQW() == (asQWORD(1)<<63)) )
+					if( rctx->type.GetConstantQW() == 0 )
+					{
+						Warning(TXT_DIVIDE_BY_ZERO, node);
 						v = 0;
+					}
+					else if( rctx->type.GetConstantQW() == asQWORD(-1) && lctx->type.GetConstantQW() == (asQWORD(1)<<63) )
+					{
+						Warning(TXT_DIVIDE_OVERFLOW, node);
+						v = 0;
+					}
 					else
 						if( lctx->type.dataType.IsIntegerType() )
 							v = asINT64(lctx->type.GetConstantQW()) / asINT64(rctx->type.GetConstantQW());
@@ -16070,9 +16595,16 @@ void asCCompiler::CompileMathOperator(asCScriptNode *node, asCExprContext *lctx,
 				}
 				else if( op == ttPercent )
 				{
-				    // TODO: Should probably report an error, rather than silently convert the value to 0
-					if( rctx->type.GetConstantQW() == 0 || (rctx->type.GetConstantQW() == asQWORD(-1) && lctx->type.GetConstantQW() == (asQWORD(1)<<63)) )
+					if( rctx->type.GetConstantQW() == 0 )
+					{
+						Warning(TXT_DIVIDE_BY_ZERO, node);
 						v = 0;
+					}
+					else if( rctx->type.GetConstantQW() == asQWORD(-1) && lctx->type.GetConstantQW() == (asQWORD(1)<<63) )
+					{
+						Warning(TXT_DIVIDE_OVERFLOW, node);
+						v = 0;
+					}
 					else
 						if( lctx->type.dataType.IsIntegerType() )
 							v = asINT64(lctx->type.GetConstantQW()) % asINT64(rctx->type.GetConstantQW());
@@ -16694,8 +17226,9 @@ void asCCompiler::CompileComparisonOperator(asCScriptNode *node, asCExprContext 
 			}
 			else
 			{
-				// TODO: Use TXT_ILLEGAL_OPERATION_ON
-				Error(TXT_ILLEGAL_OPERATION, node);
+				asCString str;
+				str.Format(TXT_ILLEGAL_OPERATION_ON_s, lctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
+				Error(str, node);
 #if AS_SIZEOF_BOOL == 1
 				ctx->type.SetConstantB(asCDataType::CreatePrimitive(ttBool, true), 0);
 #else
@@ -16788,8 +17321,9 @@ void asCCompiler::CompileComparisonOperator(asCScriptNode *node, asCExprContext 
 			}
 			else
 			{
-				// TODO: Use TXT_ILLEGAL_OPERATION_ON
-				Error(TXT_ILLEGAL_OPERATION, node);
+				asCString str;
+				str.Format(TXT_ILLEGAL_OPERATION_ON_s, lctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
+				Error(str, node);
 			}
 		}
 		else
@@ -17081,6 +17615,12 @@ void asCCompiler::CompileOperatorOnHandles(asCScriptNode *node, asCExprContext *
 	if( opToken == ttUnrecognizedToken )
 		opToken = node->tokenType;
 
+	// Save null-comparison state before implicit conversions destroy it.
+	// For ==/ !=, the implicit conversions below may convert null to the handle type,
+	// making IsNullConstant() return false later.  We need to know which side was null.
+	bool earlyComparingWithNull = lctx->type.IsNullConstant() || rctx->type.IsNullConstant();
+	bool earlyLhsIsNull = lctx->type.IsNullConstant();
+
 	// Warn if not both operands are explicit handles or null handles
 	if( (opToken == ttEqual || opToken == ttNotEqual) &&
 		((!(lctx->type.isExplicitHandle || lctx->type.IsNullConstant()) && !(lctx->type.dataType.GetTypeInfo() && (lctx->type.dataType.GetTypeInfo()->flags & asOBJ_IMPLICIT_HANDLE))) ||
@@ -17224,16 +17764,54 @@ void asCCompiler::CompileOperatorOnHandles(asCScriptNode *node, asCExprContext *
 		int b = lctx->type.stackOffset;
 		int c = rctx->type.stackOffset;
 
-		ctx->bc.InstrW_W(asBC_CmpPtr, b, c);
+		// Check if this is a handle-resolve type comparing with null
+		asCTypeInfo *lhsTypeInfo = lctx->type.dataType.GetTypeInfo();
+		asCTypeInfo *rhsTypeInfo = rctx->type.dataType.GetTypeInfo();
+		bool lhsIsHandleResolve = lhsTypeInfo && lhsTypeInfo->resolveHandle;
+		bool rhsIsHandleResolve = rhsTypeInfo && rhsTypeInfo->resolveHandle;
+		bool comparingWithNull  = lctx->type.IsNullConstant() || rctx->type.IsNullConstant();
+		// ConvertToVariable above may have destroyed the null constant state for all four operators
+		if( !comparingWithNull )
+			comparingWithNull = earlyComparingWithNull;
 
-		if( opToken == ttEqual || opToken == ttIs )
-			ctx->bc.Instr(asBC_TZ);
-		else if( opToken == ttNotEqual || opToken == ttNotIs )
-			ctx->bc.Instr(asBC_TNZ);
+		if( (lhsIsHandleResolve || rhsIsHandleResolve) && comparingWithNull &&
+			(opToken == ttIs || opToken == ttNotIs || opToken == ttEqual || opToken == ttNotEqual) )
+		{
+			// Determine which side is the handle (non-null) and which is null.
+			bool lhsIsHandle;
+			if( (opToken == ttEqual || opToken == ttNotEqual) && earlyComparingWithNull )
+				lhsIsHandle = !earlyLhsIsNull;
+			else
+				lhsIsHandle = lhsIsHandleResolve;
+			int handleVar = lhsIsHandle ? b : c;
+			asCTypeInfo *ti = lhsIsHandle ? lhsTypeInfo : rhsTypeInfo;
 
-		ctx->bc.InstrSHORT(asBC_CpyRtoV4, (short)a);
+			// IsHandleNull reads handle bits, resolves, checks null+dead.
+			// Writes 0 (null/dead) or 1 (alive) to temp register.
+			ctx->bc.InstrW_PTR(asBC_IsHandleNull, (short)handleVar, ti);
 
-		ctx->type.SetVariable(asCDataType::CreatePrimitive(ttBool, true), a, true);
+			if( opToken == ttIs || opToken == ttEqual )
+				ctx->bc.Instr(asBC_TZ);
+			else
+				ctx->bc.Instr(asBC_TNZ);
+
+			ctx->bc.InstrSHORT(asBC_CpyRtoV4, (short)a);
+
+			ctx->type.SetVariable(asCDataType::CreatePrimitive(ttBool, true), a, true);
+		}
+		else
+		{
+			ctx->bc.InstrW_W(asBC_CmpPtr, b, c);
+
+			if( opToken == ttEqual || opToken == ttIs )
+				ctx->bc.Instr(asBC_TZ);
+			else if( opToken == ttNotEqual || opToken == ttNotIs )
+				ctx->bc.Instr(asBC_TNZ);
+
+			ctx->bc.InstrSHORT(asBC_CpyRtoV4, (short)a);
+
+			ctx->type.SetVariable(asCDataType::CreatePrimitive(ttBool, true), a, true);
+		}
 
 		ReleaseTemporaryVariable(lctx->type, &ctx->bc);
 		ReleaseTemporaryVariable(rctx->type, &ctx->bc);
@@ -17241,8 +17819,9 @@ void asCCompiler::CompileOperatorOnHandles(asCScriptNode *node, asCExprContext *
 	}
 	else
 	{
-		// TODO: Use TXT_ILLEGAL_OPERATION_ON
-		Error(TXT_ILLEGAL_OPERATION, node);
+		asCString str;
+		str.Format(TXT_ILLEGAL_OPERATION_ON_s, lctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
+		Error(str, node);
 	}
 }
 
@@ -17443,7 +18022,17 @@ void asCCompiler::PerformFunctionCall(int funcId, asCExprContext *ctx, bool isCo
 				ctx->bc.Call(asBC_CALLSYS , descr->id, argSize);
 		}
 		else if( descr->funcType == asFUNC_FUNCDEF )
+		{
 			ctx->bc.CallPtr(asBC_CallPtr, funcPtrVar, argSize);
+			outFunc->localCallsDelegate = true;
+		}
+	}
+
+	// Accumulate access mask for registered functions
+	if (descr->funcType == asFUNC_SYSTEM ||
+	    descr->funcType == asFUNC_IMPORTED)
+	{
+		m_usedAccessMask |= descr->accessMask;
 	}
 
 	if( (descr->returnType.IsObject() || descr->returnType.IsFuncdef()) && !descr->returnType.IsReference() )

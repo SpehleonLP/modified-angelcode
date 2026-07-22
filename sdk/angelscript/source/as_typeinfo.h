@@ -172,6 +172,11 @@ public:
 	asCModule        *module;
 	asCArray<asPWORD> userData;
 
+	// Handle resolution
+	asRESOLVEHANDLEFUNC_t resolveHandle;
+	void                 *handleUserData;
+	void                 *deadHandle;
+
 protected:
 	friend class asCScriptEngine;
 	friend class asCConfigGroup;

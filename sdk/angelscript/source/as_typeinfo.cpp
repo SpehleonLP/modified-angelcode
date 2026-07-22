@@ -55,6 +55,10 @@ asCTypeInfo::asCTypeInfo()
 
 	accessMask = 0xFFFFFFFF;
 	nameSpace = 0;
+
+	resolveHandle = 0;
+	handleUserData = 0;
+	deadHandle = 0;
 }
 
 asCTypeInfo::asCTypeInfo(asCScriptEngine *in_engine)
@@ -72,6 +76,10 @@ asCTypeInfo::asCTypeInfo(asCScriptEngine *in_engine)
 
 	accessMask = 0xFFFFFFFF;
 	nameSpace = engine->nameSpaces[0];
+
+	resolveHandle = 0;
+	handleUserData = 0;
+	deadHandle = 0;
 }
 
 asCTypeInfo::~asCTypeInfo()

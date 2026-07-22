@@ -398,6 +398,15 @@ enum asEFuncType
 	asFUNC_TEMPLATE  = 7
 };
 
+// Ordered as a lattice for propagation: higher value = worse guarantee.
+// The transitive pass takes max() across callees, so NO > UNKNOWN > YES.
+enum asEHalts
+{
+	asHALTS_YES     = 0,
+	asHALTS_UNKNOWN = 1,
+	asHALTS_NO      = 2
+};
+
 // Is the target a 64bit system?
 #if defined(__LP64__) || defined(__amd64__) || defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 	#ifndef AS_64BIT_PTR
@@ -418,6 +427,7 @@ typedef void (*asCLEANSCRIPTOBJECTFUNC_t)(asIScriptObject *);
 typedef asIScriptContext *(*asREQUESTCONTEXTFUNC_t)(asIScriptEngine *, void *);
 typedef void (*asRETURNCONTEXTFUNC_t)(asIScriptEngine *, asIScriptContext *, void *);
 typedef void (*asCIRCULARREFFUNC_t)(asITypeInfo *, const void *, void *);
+typedef void *(*asRESOLVEHANDLEFUNC_t)(asPWORD, void *);
 
 struct asSVMRegisters;
 typedef void (*asJITFunction)(asSVMRegisters* registers, asPWORD jitArg);
@@ -703,6 +713,7 @@ public:
 	virtual int            RegisterObjectProperty(const char *obj, const char *declaration, int byteOffset, int compositeOffset = 0, bool isCompositeIndirect = false) = 0;
 	virtual int            RegisterObjectMethod(const char *obj, const char *declaration, const asSFuncPtr &funcPointer, asDWORD callConv, void *auxiliary = 0, int compositeOffset = 0, bool isCompositeIndirect = false) = 0;
 	virtual int            RegisterObjectBehaviour(const char *obj, asEBehaviours behaviour, const char *declaration, const asSFuncPtr &funcPointer, asDWORD callConv, void *auxiliary = 0, int compositeOffset = 0, bool isCompositeIndirect = false) = 0;
+	virtual int            RegisterHandle(const char *typeName, asRESOLVEHANDLEFUNC_t resolveFunc, void *userData, void *dead = 0) = 0;
 	virtual int            RegisterInterface(const char *name) = 0;
 	virtual int            RegisterInterfaceMethod(const char *intf, const char *declaration) = 0;
 	virtual asUINT         GetObjectTypeCount() const = 0;
@@ -741,6 +752,7 @@ public:
 	virtual int         EndConfigGroup() = 0;
 	virtual int         RemoveConfigGroup(const char *groupName) = 0;
 	virtual asDWORD     SetDefaultAccessMask(asDWORD defaultMask) = 0;
+	virtual asDWORD     GetDefaultAccessMask() const = 0;
 	virtual int         SetDefaultNamespace(const char *nameSpace) = 0;
 	virtual const char *GetDefaultNamespace() const = 0;
 
@@ -1159,6 +1171,12 @@ public:
 #endif
 	virtual const char      *GetConfigGroup() const = 0;
 	virtual asDWORD          GetAccessMask() const = 0;
+	virtual asDWORD          GetMinLocalAccessMask() const = 0;
+	virtual asDWORD          GetMinTransitiveAccessMask() const = 0;
+	virtual bool             GetLocalCallsDelegate() const = 0;
+	virtual bool             GetTransitiveCallsDelegate() const = 0;
+	virtual asEHalts         GetLocalHalts() const = 0;
+	virtual asEHalts         GetTransitiveHalts() const = 0;
 	virtual void            *GetAuxiliary() const = 0;
 
 	// Function signature
@@ -1652,7 +1670,11 @@ enum asEBCInstr
 	asBC_POWi64			= 198,
 	asBC_POWu64			= 199,
 	asBC_Thiscall1		= 200,
-	asBC_MAXBYTECODE	= 201,
+	asBC_ResolveHandleV	= 201,
+	asBC_PshHandlePtr	= 202,
+	asBC_LoadHRObjR		= 203,
+	asBC_IsHandleNull	= 204,
+	asBC_MAXBYTECODE	= 205,
 
 	// Temporary tokens. Can't be output to the final program
 	asBC_TryBlock		= 250,
@@ -1948,11 +1970,11 @@ const asSBCInfo asBCInfo[256] =
 	asBCINFO(POWi64,	wW_rW_rW_ARG,	0),
 	asBCINFO(POWu64,	wW_rW_rW_ARG,	0),
 	asBCINFO(Thiscall1, DW_ARG,			-AS_PTR_SIZE-1),
+	asBCINFO(ResolveHandleV, PTR_ARG,	0),
+	asBCINFO(PshHandlePtr, rW_PTR_ARG,	AS_PTR_SIZE),
+	asBCINFO(LoadHRObjR,   rW_W_DW_ARG,	-AS_PTR_SIZE),
+	asBCINFO(IsHandleNull, rW_PTR_ARG, 0),
 
-	asBCINFO_DUMMY(201),
-	asBCINFO_DUMMY(202),
-	asBCINFO_DUMMY(203),
-	asBCINFO_DUMMY(204),
 	asBCINFO_DUMMY(205),
 	asBCINFO_DUMMY(206),
 	asBCINFO_DUMMY(207),

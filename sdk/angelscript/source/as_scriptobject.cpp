@@ -1087,7 +1087,11 @@ void asCScriptObject::FreeObject(void *ptr, asCObjectType *in_objType, asCScript
 	{
 		asASSERT( (in_objType->flags & asOBJ_NOCOUNT) || in_objType->beh.release );
 		if(in_objType->beh.release )
-			engine->CallObjectMethod(ptr, in_objType->beh.release);
+		{
+			void *refObj = engine->ResolveForRefCount(ptr, in_objType);
+			if (refObj)
+				engine->CallObjectMethod(refObj, in_objType->beh.release);
+		}
 	}
 	else
 	{
@@ -1123,10 +1127,18 @@ void asCScriptObject::CopyHandle(asPWORD *src, asPWORD *dst, asCObjectType *in_o
 	asASSERT( (in_objType->flags & asOBJ_NOCOUNT) || (in_objType->beh.release && in_objType->beh.addref) );
 
 	if( *dst && in_objType->beh.release )
-		engine->CallObjectMethod(*(void**)dst, in_objType->beh.release);
+	{
+		void *refObj = engine->ResolveForRefCount(*(void**)dst, in_objType);
+		if (refObj)
+			engine->CallObjectMethod(refObj, in_objType->beh.release);
+	}
 	*dst = *src;
 	if( *dst && in_objType->beh.addref )
-		engine->CallObjectMethod(*(void**)dst, in_objType->beh.addref);
+	{
+		void *refObj = engine->ResolveForRefCount(*(void**)dst, in_objType);
+		if (refObj)
+			engine->CallObjectMethod(refObj, in_objType->beh.addref);
+	}
 }
 
 // TODO: weak: Should move to its own file

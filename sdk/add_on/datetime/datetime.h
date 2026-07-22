@@ -21,6 +21,7 @@ public:
 	CDateTime();
 	CDateTime(const CDateTime &other);
 	CDateTime(asUINT year, asUINT month, asUINT day, asUINT hour, asUINT minute, asUINT second);
+	CDateTime(const std::chrono::system_clock::time_point &other) : tp(other) {};
 
 	// Copy the stored value from another any object
 	CDateTime &operator=(const CDateTime &other);

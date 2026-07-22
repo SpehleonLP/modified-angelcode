@@ -187,6 +187,16 @@ public:
 	void JITCompile();
 
 #ifndef AS_NO_COMPILER
+	// Called after Build() completes, so all class types and function bodies are finalized.
+	// Metadata is stored in function fields and persists through serialization,
+	// so this is not needed in compiler-free (load-only) builds.
+	void ComputeTransitiveFunctionMetadata();
+	// Scans func's bytecode, appending indices into m_scriptFunctions (via funcIdToIndex)
+	// for each CALL/CALLINTF/ALLOC target, and sets func->localCallsDelegate for
+	// CALLBND / unresolvable-CALLINTF cases. Caller must dedup outCallees if desired.
+	void BuildCalleeList(asCScriptFunction *func,
+	                     const asCMap<int, asUINT> &funcIdToIndex,
+	                     asCArray<asUINT> &outCallees);
 	int  AddScriptFunction(int sectionIdx, int declaredAt, int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asCString> &paramNames, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, bool isInterface, asCObjectType *objType = 0, bool isGlobalFunction = false, asSFunctionTraits funcTraits = asSFunctionTraits(), asSNameSpace *ns = 0);
 	int  AddScriptFunction(asCScriptFunction *func);
 	int  AddImportedFunction(int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, asSFunctionTraits funcTraits, asSNameSpace *ns, const asCString &moduleName);

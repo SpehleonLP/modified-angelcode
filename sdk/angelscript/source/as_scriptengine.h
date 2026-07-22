@@ -105,6 +105,7 @@ public:
 	virtual int            RegisterObjectProperty(const char *obj, const char *declaration, int byteOffset, int compositeOffset = 0, bool isCompositeIndirect = false);
 	virtual int            RegisterObjectMethod(const char *obj, const char *declaration, const asSFuncPtr &funcPointer, asDWORD callConv, void *auxiliary = 0, int compositeOffset = 0, bool isCompositeIndirect = false);
 	virtual int            RegisterObjectBehaviour(const char *obj, asEBehaviours behaviour, const char *declaration, const asSFuncPtr &funcPointer, asDWORD callConv, void *auxiliary = 0, int compositeOffset = 0, bool isCompositeIndirect = false);
+	virtual int            RegisterHandle(const char *typeName, asRESOLVEHANDLEFUNC_t resolveFunc, void *userData, void *dead = 0);
 	virtual int            RegisterInterface(const char *name);
 	virtual int            RegisterInterfaceMethod(const char *intf, const char *declaration);
 	virtual asUINT         GetObjectTypeCount() const;
@@ -144,6 +145,7 @@ public:
 	virtual int         EndConfigGroup();
 	virtual int         RemoveConfigGroup(const char *groupName);
 	virtual asDWORD     SetDefaultAccessMask(asDWORD defaultMask);
+	virtual asDWORD     GetDefaultAccessMask() const { return defaultAccessMask; }
 	virtual int         SetDefaultNamespace(const char *nameSpace);
 	virtual const char *GetDefaultNamespace() const;
 
@@ -237,6 +239,10 @@ public:
 	void *CallGlobalFunctionRetPtr(int func, void *param1) const;
 	void *CallGlobalFunctionRetPtr(asSSystemFunctionInterface *func, asCScriptFunction *desc) const;
 	void *CallGlobalFunctionRetPtr(asSSystemFunctionInterface *i, asCScriptFunction *s, void *param1) const;
+	// Resolve handle bits to real pointer for handle-resolve types before calling AddRef/Release.
+	// Returns the resolved pointer to call on, or 0 if the call should be skipped (dead handle).
+	void *ResolveForRefCount(void *obj, const asCTypeInfo *ti) const;
+
 	void  CallObjectMethod(void *obj, int func) const;
 	void  CallObjectMethod(void *obj, void *param, int func) const;
 	void  CallObjectMethod(void *obj, asSSystemFunctionInterface *func, asCScriptFunction *desc) const;

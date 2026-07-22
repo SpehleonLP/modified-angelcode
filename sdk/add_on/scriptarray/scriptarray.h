@@ -24,8 +24,27 @@
 
 BEGIN_AS_NAMESPACE
 
-struct SArrayBuffer;
 struct SArrayCache;
+class asCScriptFunction;
+class CScriptArray;
+struct ArrayHelper;
+
+struct SArrayBuffer
+{
+	asQWORD userData;
+	asDWORD maxElements;
+	asDWORD numElements;
+//todo: garuntee this is 16 byte aligned
+	asBYTE  data[1];
+};
+
+
+asUINT CScriptArray_FilterObj(void * obj, asUINT startAt, asUINT count, CScriptArray * array);
+asUINT CScriptArray_FilterObjInternal(void * obj, asUINT startAt, asUINT count, CScriptArray * array);
+asUINT CScriptArray_Filter(asIScriptFunction * obj, asUINT startAt, asUINT count, CScriptArray * array);
+asUINT CScriptArray_Unique(asUINT startAt, asUINT count, CScriptArray * array);
+asUINT CScriptArray_UniqueRef(asUINT startAt, asUINT count, CScriptArray * array);
+asUINT CScriptArray_UniqueInternal(asUINT startAt, asUINT count, CScriptArray * array, bool);
 
 class CScriptArray
 {
@@ -105,12 +124,23 @@ public:
 	void EnumReferences(asIScriptEngine *engine);
 	void ReleaseAllHandles(asIScriptEngine *engine);
 
+	bool TryOpConv(void *value, int typeId);
+	void Swap(CScriptArray* it);
+	void setUserData(uint64_t user_data) { buffer->userData = user_data; }
+	uint64_t getUserData() const { return buffer->userData; }
+	auto GetElementSize() const { return elementSize; }
+	
 protected:
+friend asUINT CScriptArray_FilterObjInternal(void * obj, asUINT startAt, asUINT count, CScriptArray * array);
+friend asUINT CScriptArray_Filter(asIScriptFunction * obj, asUINT startAt, asUINT count, CScriptArray * array);
+friend asUINT CScriptArray_UniqueInternal(asUINT startAt, asUINT count, CScriptArray * array, bool);
+friend struct ArrayHelper;
 	mutable int     refCount;
 	mutable bool    gcFlag;
+	bool			isValueType;
+	int16_t		    elementSize;
 	asITypeInfo    *objType;
 	SArrayBuffer   *buffer;
-	int             elementSize;
 	int             subTypeId;
 
 	// Constructors
@@ -134,6 +164,12 @@ protected:
 	void  Construct(SArrayBuffer *buf, asUINT start, asUINT end);
 	void  Destruct(SArrayBuffer *buf, asUINT start, asUINT end);
 	bool  Equals(const void *a, const void *b, asIScriptContext *ctx, SArrayCache *cache) const;
+	
+	bool TryNormalConstructor(asCScriptFunction * function, void *value, asITypeInfo * typeInfo, bool isHandle);
+	bool TryListConstructor(asCScriptFunction * function, void *value, asITypeInfo * typeInfo, bool isHandle);
+
+	template<typename T>
+	asUINT UniqueT(asUINT start, asUINT end);	
 };
 
 void RegisterScriptArray(asIScriptEngine *engine, bool defaultArray);

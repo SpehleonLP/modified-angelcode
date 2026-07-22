@@ -168,6 +168,12 @@ public:
 #endif
 	const char          *GetConfigGroup() const;
 	asDWORD              GetAccessMask() const;
+	asDWORD              GetMinLocalAccessMask() const override;
+	asDWORD              GetMinTransitiveAccessMask() const override;
+	bool                 GetLocalCallsDelegate() const override;
+	bool                 GetTransitiveCallsDelegate() const override;
+	asEHalts             GetLocalHalts() const override;
+	asEHalts             GetTransitiveHalts() const override;
 	void                *GetAuxiliary() const;
 
 	// Function signature
@@ -328,6 +334,12 @@ public:
 
 	asEFuncType                  funcType;
 	asDWORD                      accessMask;
+	asDWORD                      minLocalAccessMask;
+	asDWORD                      minTransitiveAccessMask;
+	bool                         localCallsDelegate;
+	bool                         transitiveCallsDelegate;
+	int8_t                       localHalts;      // asEHalts
+	int8_t                       transitiveHalts; // asEHalts
 
 	// Namespace will be null for funcdefs that are declared as child funcdefs
 	// of a class. In this case the namespace shall be taken from the parentClass

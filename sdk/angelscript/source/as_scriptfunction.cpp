@@ -370,6 +370,17 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	gcFlag                 = false;
 	id                     = 0;
 	accessMask             = 0xFFFFFFFF;
+	minLocalAccessMask     = 0;
+	minTransitiveAccessMask = 0;
+	localCallsDelegate     = false;
+	transitiveCallsDelegate = false;
+	// Registered natives are trusted to halt (the application vouches for
+	// them). Everything else rests at UNKNOWN until the compiler/module
+	// analysis writes a real verdict — a function whose analysis never runs
+	// (e.g. a CompileFunction product, where the transitive pass is dormant)
+	// must not claim YES.
+	localHalts             = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
+	transitiveHalts        = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
 	nameSpace              = engine->nameSpaces[0];
 	objForDelegate         = 0;
 	funcForDelegate        = 0;
@@ -1554,6 +1565,14 @@ asDWORD asCScriptFunction::GetAccessMask() const
 {
 	return accessMask;
 }
+
+// interface
+asDWORD asCScriptFunction::GetMinLocalAccessMask() const { return minLocalAccessMask; }
+asDWORD asCScriptFunction::GetMinTransitiveAccessMask() const { return minTransitiveAccessMask; }
+bool    asCScriptFunction::GetLocalCallsDelegate() const { return localCallsDelegate; }
+bool    asCScriptFunction::GetTransitiveCallsDelegate() const { return transitiveCallsDelegate; }
+asEHalts asCScriptFunction::GetLocalHalts() const { return (asEHalts)localHalts; }
+asEHalts asCScriptFunction::GetTransitiveHalts() const { return (asEHalts)transitiveHalts; }
 
 // interface
 int asCScriptFunction::SetJITFunction(asJITFunction jitFunc)

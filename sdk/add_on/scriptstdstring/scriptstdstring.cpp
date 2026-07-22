@@ -1,3 +1,4 @@
+#pragma GCC diagnostic ignored "-Wtype-limits"
 #include "scriptstdstring.h"
 #include <assert.h> // assert()
 #include <sstream>  // std::stringstream
@@ -394,7 +395,7 @@ static int StringRegexFind(const string& rex, asUINT start, asUINT& outLengthOfM
 	// https://www.regular-expressions.info/stdregex.html
 	// 
 	//  std::wregex pattern(L"[[:alpha:]]+");
-	//  bool result = std::regex_match(std::wstring(L"abcdéfg"), pattern);
+	//  bool result = std::regex_match(std::wstring(L"abcdefg"), pattern);
 	//
 	// The solution from stack overflow doesn't work with MSVC
 	// https://stackoverflow.com/questions/11254232/do-c11-regular-expressions-work-with-utf-8-strings
@@ -402,7 +403,7 @@ static int StringRegexFind(const string& rex, asUINT start, asUINT& outLengthOfM
 	//  std::locale old;
 	//  std::locale::global(std::locale("en_US.UTF-8"));
 	//  std::regex pattern("[[:alpha:]]+", std::regex_constants::extended);
-	//  bool result = std::regex_match(std::string(u8"abcdéfg"), pattern);
+	//  bool result = std::regex_match(std::string(u8"abcdefg"), pattern);
 	//
 	// I've tried setting the manifest to use utf8 code page but it also doesn't work with MSVC
 	// https://learn.microsoft.com/en-us/windows/apps/design/globalizing/use-utf8-code-page
@@ -1065,8 +1066,8 @@ void RegisterStdString_Native(asIScriptEngine *engine)
 	r = engine->RegisterObjectMethod("string", "void erase(uint pos, int count = -1)", asFUNCTION(StringErase), asCALL_CDECL_OBJLAST); assert(r >= 0);
 	r = engine->RegisterObjectMethod("string", "int regexFind(const string  &in regex, uint start = 0, uint &out lengthOfMatch = void) const", asFUNCTION(StringRegexFind), asCALL_CDECL_OBJLAST); assert(r >= 0);
 
-	r = engine->RegisterGlobalFunction("uint scan(const string&in str, ?&out ...)", asFUNCTION(StringScan), asCALL_GENERIC); assert(r >= 0);
-	r = engine->RegisterGlobalFunction("string format(const string&in fmt, const ?&in ...)", asFUNCTION(StringFormat), asCALL_GENERIC); assert(r >= 0);
+//	r = engine->RegisterGlobalFunction("uint scan(const string&in str, ?&out ...)", asFUNCTION(StringScan), asCALL_GENERIC); assert(r >= 0);
+//	r = engine->RegisterGlobalFunction("string format(const string&in fmt, const ?&in ...)", asFUNCTION(StringFormat), asCALL_GENERIC); assert(r >= 0);
 	r = engine->RegisterGlobalFunction("string formatInt(int64 val, const string &in options = \"\", uint width = 0)", asFUNCTION(formatInt), asCALL_CDECL); assert(r >= 0);
 	r = engine->RegisterGlobalFunction("string formatUInt(uint64 val, const string &in options = \"\", uint width = 0)", asFUNCTION(formatUInt), asCALL_CDECL); assert(r >= 0);
 	r = engine->RegisterGlobalFunction("string formatFloat(double val, const string &in options = \"\", uint width = 0, uint precision = 0)", asFUNCTION(formatFloat), asCALL_CDECL); assert(r >= 0);
@@ -1513,18 +1514,6 @@ static void StringSubString_Generic(asIScriptGeneric *gen)
 	new(gen->GetAddressOfReturnLocation()) string(StringSubString(start, count, *str));
 }
 
-// static int StringRegexFind(const string& rex, asUINT start, asUINT& outLengthOfMatch, const string& str)
-static void StringRegexFind_Generic(asIScriptGeneric* gen)
-{
-	// Get the arguments
-	string* str = (string*)gen->GetObject();
-	string *rex = *(string**)gen->GetAddressOfArg(0);
-	asUINT start = *(asUINT*)gen->GetAddressOfArg(1);
-	asUINT* outLen = *(asUINT**)gen->GetAddressOfArg(2);
-
-	*(int*)(gen->GetAddressOfReturnLocation()) = StringRegexFind(*rex, start, *outLen, *str);
-}
-
 void RegisterStdString_Generic(asIScriptEngine *engine)
 {
 	int r = 0;
@@ -1598,10 +1587,9 @@ void RegisterStdString_Generic(asIScriptEngine *engine)
 	r = engine->RegisterObjectMethod("string", "int findLastNotOf(const string &in, int start = -1) const", asFUNCTION(StringFindLastNotOf_Generic), asCALL_GENERIC); assert(r >= 0);
 	r = engine->RegisterObjectMethod("string", "void insert(uint pos, const string &in other)", asFUNCTION(StringInsert_Generic), asCALL_GENERIC); assert(r >= 0);
 	r = engine->RegisterObjectMethod("string", "void erase(uint pos, int count = -1)", asFUNCTION(StringErase_Generic), asCALL_GENERIC); assert(r >= 0);
-	r = engine->RegisterObjectMethod("string", "int regexFind(const string  &in regex, uint start = 0, uint &out lengthOfMatch = void) const", asFUNCTION(StringRegexFind_Generic), asCALL_GENERIC); assert(r >= 0);
 
-	r = engine->RegisterGlobalFunction("uint scan(const string&in str, ?&out ...)", asFUNCTION(StringScan), asCALL_GENERIC); assert(r >= 0);
-	r = engine->RegisterGlobalFunction("string format(const string&in fmt, const ?&in ...)", asFUNCTION(StringFormat), asCALL_GENERIC); assert(r >= 0);
+//	r = engine->RegisterGlobalFunction("uint scan(const string&in str, ?&out ...)", asFUNCTION(StringScan), asCALL_GENERIC); assert(r >= 0);
+//	r = engine->RegisterGlobalFunction("string format(const string&in fmt, const ?&in ...)", asFUNCTION(StringFormat), asCALL_GENERIC); assert(r >= 0);
 	r = engine->RegisterGlobalFunction("string formatInt(int64 val, const string &in options = \"\", uint width = 0)", asFUNCTION(formatInt_Generic), asCALL_GENERIC); assert(r >= 0);
 	r = engine->RegisterGlobalFunction("string formatUInt(uint64 val, const string &in options = \"\", uint width = 0)", asFUNCTION(formatUInt_Generic), asCALL_GENERIC); assert(r >= 0);
 	r = engine->RegisterGlobalFunction("string formatFloat(double val, const string &in options = \"\", uint width = 0, uint precision = 0)", asFUNCTION(formatFloat_Generic), asCALL_GENERIC); assert(r >= 0);
