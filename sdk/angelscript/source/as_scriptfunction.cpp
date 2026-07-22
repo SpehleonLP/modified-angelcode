@@ -374,8 +374,13 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	minTransitiveAccessMask = 0;
 	localCallsDelegate     = false;
 	transitiveCallsDelegate = false;
-	localHalts             = asHALTS_YES;
-	transitiveHalts        = asHALTS_YES;
+	// Registered natives are trusted to halt (the application vouches for
+	// them). Everything else rests at UNKNOWN until the compiler/module
+	// analysis writes a real verdict — a function whose analysis never runs
+	// (e.g. a CompileFunction product, where the transitive pass is dormant)
+	// must not claim YES.
+	localHalts             = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
+	transitiveHalts        = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
 	nameSpace              = engine->nameSpaces[0];
 	objForDelegate         = 0;
 	funcForDelegate        = 0;

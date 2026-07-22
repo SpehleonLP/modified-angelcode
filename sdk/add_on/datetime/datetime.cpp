@@ -11,7 +11,7 @@ BEGIN_AS_NAMESPACE
 
 // TODO: Allow setting the timezone to use
 
-static tm time_point_to_tm(const std::chrono::time_point<std::chrono::system_clock> &tp)
+tm time_point_to_tm(const std::chrono::time_point<std::chrono::system_clock> &tp)
 {
 	time_t t = system_clock::to_time_t(tp);
 	tm local;

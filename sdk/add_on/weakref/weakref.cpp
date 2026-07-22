@@ -205,6 +205,11 @@ void *CScriptWeakRef::Get() const
 
 bool CScriptWeakRef::Equals(void *ref) const
 {
+	if(ref == nullptr && m_weakRefFlag)
+	{
+		return m_weakRefFlag->Get();
+	}
+
 	if( m_ref != ref )
 		return false;
 

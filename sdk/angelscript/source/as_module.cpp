@@ -1887,6 +1887,8 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			asSMapNode<int, asUINT> *cursor = 0;
 			if (funcIdToIndex.MoveTo(&cursor, funcId))
 				outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+			else
+				func->localCallsDelegate = true; // Unmapped target: no edge can be recorded, so the site must poison.
 		}
 		else if (op == asBC_CALLINTF)
 		{
@@ -1897,7 +1899,7 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 				// Shared interface - implementations may come from other modules
 				func->localCallsDelegate = true;
 			}
-			else if (calledFunc && calledFunc->objectType)
+			else if (calledFunc && calledFunc->objectType && calledFunc->objectType->IsInterface())
 			{
 				// Non-shared interface - find all implementations in this module.
 				// Safe because ComputeTransitiveFunctionMetadata runs after Build() completes,
@@ -1931,6 +1933,38 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 					}
 				}
 			}
+			else if (calledFunc && calledFunc->objectType)
+			{
+				// Virtual class method - asBC_CALLINTF is emitted for
+				// asFUNC_VIRTUAL too. Dispatch can land on the class's own
+				// implementation or any override in a derived class; all of
+				// them share vtable slot vfTableIdx. Non-shared classes can
+				// only be derived from within this module, so m_classTypes
+				// is the complete set of candidates.
+				asCObjectType *baseType = calledFunc->objectType;
+				int vfIdx = calledFunc->vfTableIdx;
+
+				for (asUINT c = 0; c < m_classTypes.GetLength(); c++)
+				{
+					asCObjectType *classType = m_classTypes[c];
+					if (!classType) continue;
+					if (classType != baseType && !classType->DerivesFrom(baseType)) continue;
+
+					if (vfIdx < 0 || (asUINT)vfIdx >= classType->virtualFunctionTable.GetLength())
+					{
+						func->localCallsDelegate = true; // out of contract - stay conservative
+						continue;
+					}
+					asCScriptFunction *implFunc = classType->virtualFunctionTable[vfIdx];
+					if (!implFunc) continue;
+
+					asSMapNode<int, asUINT> *cursor = 0;
+					if (funcIdToIndex.MoveTo(&cursor, implFunc->id))
+						outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+					else
+						func->localCallsDelegate = true; // impl not in this module's map
+				}
+			}
 			else
 			{
 				// Can't resolve - treat as delegate
@@ -1951,7 +1985,11 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 				asSMapNode<int, asUINT> *cursor = 0;
 				if (funcIdToIndex.MoveTo(&cursor, funcId))
 					outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+				else
+					func->localCallsDelegate = true; // Unmapped target: no edge can be recorded, so the site must poison.
 			}
+			else
+				func->localCallsDelegate = true; // Unmapped target: no edge can be recorded, so the site must poison.
 		}
 
 		n += instrSize;
@@ -1998,6 +2036,13 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		func->minTransitiveAccessMask = func->minLocalAccessMask;
 		func->transitiveCallsDelegate = func->localCallsDelegate;
 		func->transitiveHalts = func->localHalts;
+
+		// BuildCalleeList's poisonings (shared targets, imports,
+		// unresolvable dispatch) contribute no call edges, so an
+		// unresolved site must cost precision, not soundness: a
+		// function whose calls are not all modeled cannot promise YES.
+		if (func->transitiveCallsDelegate && func->transitiveHalts == asHALTS_YES)
+			func->transitiveHalts = asHALTS_UNKNOWN;
 	}
 
 	// Phase 3: recursion check - any regular function that can reach itself in the
@@ -2037,6 +2082,9 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 
 	// Phase 4: Fixed-point iteration - propagate transitive metadata along the
 	// call graph for regular funcs.
+	// Terminates: each field only ever moves up its finite lattice (mask
+	// bits set, delegate flag false->true, halts YES<UNKNOWN<NO) per pass,
+	// never back down, so a pass with no field movement is a true fixpoint.
 	bool changed = true;
 	while (changed)
 	{
@@ -2062,11 +2110,22 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 				if (!func->transitiveCallsDelegate && callee->transitiveCallsDelegate)
 				{
 					func->transitiveCallsDelegate = true;
+					// The flag can newly appear on a caller already settled
+					// at YES from an earlier iteration; cap it here so no
+					// propagation ordering leaves a flagged function at YES.
+					if (func->transitiveHalts == asHALTS_YES)
+						func->transitiveHalts = asHALTS_UNKNOWN;
 					changed = true;
 				}
 
-				int newHalts = func->transitiveHalts > callee->transitiveHalts
-					? func->transitiveHalts : callee->transitiveHalts;
+				// NO must not cross a call edge: whether the caller halts then
+				// depends on whether this call site is reached, which the
+				// graph doesn't track. A never-halting callee contributes
+				// UNKNOWN; a function is NO only by its own control flow.
+				int calleeHalts = callee->transitiveHalts == asHALTS_NO
+					? (int)asHALTS_UNKNOWN : (int)callee->transitiveHalts;
+				int newHalts = func->transitiveHalts > calleeHalts
+					? func->transitiveHalts : calleeHalts;
 				if (newHalts != func->transitiveHalts)
 				{
 					func->transitiveHalts = newHalts;
@@ -2094,6 +2153,13 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		initFunc->transitiveCallsDelegate = initFunc->localCallsDelegate;
 		initFunc->transitiveHalts = initFunc->localHalts;
 
+		// BuildCalleeList's poisonings (shared targets, imports,
+		// unresolvable dispatch) contribute no call edges, so an
+		// unresolved site must cost precision, not soundness: a
+		// function whose calls are not all modeled cannot promise YES.
+		if (initFunc->transitiveCallsDelegate && initFunc->transitiveHalts == asHALTS_YES)
+			initFunc->transitiveHalts = asHALTS_UNKNOWN;
+
 		for (asUINT j = 0; j < initCallees.GetLength(); j++)
 		{
 			asCScriptFunction *callee = m_scriptFunctions[initCallees[j]];
@@ -2101,9 +2167,16 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 
 			initFunc->minTransitiveAccessMask |= callee->minTransitiveAccessMask;
 			if (callee->transitiveCallsDelegate)
+			{
 				initFunc->transitiveCallsDelegate = true;
-			if (callee->transitiveHalts > initFunc->transitiveHalts)
-				initFunc->transitiveHalts = callee->transitiveHalts;
+				if (initFunc->transitiveHalts == asHALTS_YES)
+					initFunc->transitiveHalts = asHALTS_UNKNOWN;
+			}
+			// Same NO-doesn't-cross-a-call-edge rule as phase 4.
+			int calleeHalts = callee->transitiveHalts == asHALTS_NO
+				? (int)asHALTS_UNKNOWN : (int)callee->transitiveHalts;
+			if (calleeHalts > initFunc->transitiveHalts)
+				initFunc->transitiveHalts = calleeHalts;
 		}
 	}
 }

@@ -58,6 +58,7 @@ BEGIN_AS_NAMESPACE
 
 class CScriptArray;
 class CScriptDictionary;
+void CScriptDictionary_OpConvInner(void * ref, int typeId, CScriptDictionary* This);
 
 class CScriptDictValue
 {
@@ -219,7 +220,7 @@ public:
 	bool opForEnd(const CScriptDictIter &iter) const;
 	CScriptDictIter* opForNext(CScriptDictIter& iter) const;
 	const CScriptDictValue& opForValue0(const CScriptDictIter& iter) const;
-	const dictKey_t& opForValue1(const CScriptDictIter& iter) const;
+	const std::string& opForValue1(const CScriptDictIter& iter) const;
 
 	// Garbage collections behaviours
 	int GetRefCount();
@@ -227,8 +228,11 @@ public:
 	bool GetGCFlag();
 	void EnumReferences(asIScriptEngine *engine);
 	void ReleaseAllReferences(asIScriptEngine *engine);
+	
+	asIScriptEngine * GetEngine() const { return engine; }
 
 protected:
+friend void CScriptDictionary_OpConvInner(void * ref, int typeId, CScriptDictionary* This);
 	// Since the dictionary uses the asAllocMem and asFreeMem functions to allocate memory
 	// the constructors are made protected so that the application cannot allocate it
 	// manually in a different way

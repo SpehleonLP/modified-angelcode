@@ -408,6 +408,203 @@ int asCCompiler::CompileFactory(asCBuilder *in_builder, asCScriptCode *in_script
 	return 0;
 }
 
+// --- Counted-loop prover (halting-analysis helper) ---------------------------
+// Returns true if the instruction at bc[n] may write variable slot v or take
+// its address. Unknown layouts conservatively return true. Reads are fine:
+// the prover only needs "v changes solely via its IncVi" and "the bound is
+// invariant"; aliasing (PSF/VAR/LDV of the slot) counts as a potential write
+// because a callee or deferred store could then modify it.
+static bool asInstrMayWriteOrAliasVar(asDWORD *bc, asUINT n, short v)
+{
+	asBYTE op = *(asBYTE*)&bc[n];
+
+	if (op == asBC_PSF || op == asBC_VAR || op == asBC_LDV)
+		return asBC_SWORDARG0(&bc[n]) == v;
+
+	switch (asBCInfo[op].type)
+	{
+	// no variable operands
+	case asBCTYPE_INFO:
+	case asBCTYPE_NO_ARG:
+	case asBCTYPE_W_ARG:
+	case asBCTYPE_DW_ARG:
+	case asBCTYPE_QW_ARG:
+	case asBCTYPE_DW_DW_ARG:
+	case asBCTYPE_QW_DW_ARG:
+	case asBCTYPE_W_DW_ARG:
+		return false;
+
+	// first operand is read-only... except the read-modify-write pair
+	case asBCTYPE_rW_ARG:
+		if (op == asBC_IncVi || op == asBC_DecVi)
+			return asBC_SWORDARG0(&bc[n]) == v;
+		return false;
+	case asBCTYPE_rW_DW_ARG:
+	case asBCTYPE_rW_QW_ARG:
+	case asBCTYPE_rW_W_DW_ARG:
+	case asBCTYPE_rW_DW_DW_ARG:
+	case asBCTYPE_rW_rW_ARG:
+		return false;
+
+	// first operand is written
+	case asBCTYPE_wW_ARG:
+	case asBCTYPE_wW_W_ARG:
+	case asBCTYPE_wW_DW_ARG:
+	case asBCTYPE_wW_QW_ARG:
+	case asBCTYPE_wW_rW_ARG:
+	case asBCTYPE_wW_rW_DW_ARG:
+	case asBCTYPE_wW_rW_rW_ARG:
+		return asBC_SWORDARG0(&bc[n]) == v;
+
+	default:
+		return true; // unknown layout: assume the worst
+	}
+}
+
+// Attempts to prove the back edge at offset `backJump` (jumping to `target`)
+// is the sole back edge of a bounded counted loop. Shapes accepted:
+//   top-test:    target: CMP* v,(w|imm) ; Jexit(forward, > backJump) ;
+//                ... body ... ; IncVi v ; backJump: JMP -> target
+//   bottom-test: target < backJump ; ... ; IncVi v ; CMP* v,(w|imm) ;
+//                backJump: JS -> target
+// plus, over the whole span [target, backJump]:
+//   - v written only by that one IncVi, never aliased,
+//   - w (when a variable) never written or aliased,
+//   - no OTHER back edge targets inside [target, backJump] (checked by caller);
+//   - increment dominance, both flavors: top-test uses the GLOBAL
+//     isJumpTarget set (nothing anywhere may jump into (incAt, backJump]);
+//     bottom-test instead uses a SPAN-INTERNAL source check (only a jump
+//     whose SOURCE is inside [target, backJump] and whose destination is in
+//     (incAt, backJump] counts) — legitimate for-loop entry rotation jumps
+//     from OUTSIDE the span onto the bottom-test condition, which sits after
+//     the IncVi, so the global check would false-reject every counted
+//     for-loop if reused here.
+// Only IncVi is a sanctioned mutator of v; DecVi is never matched by either
+// branch and so falls through the span scan's write/alias check like any
+// other write, refusing the proof.
+static bool asProveCountedLoop(asDWORD *bc, asUINT bcLen, asUINT target, asUINT backJump,
+                               const asCArray<bool> &isJumpTarget)
+{
+	// Collect instruction starts inside the span so "previous instruction"
+	// queries are well-defined.
+	asCArray<asUINT> starts;
+	for (asUINT n = target; n <= backJump && n < bcLen; )
+	{
+		asBYTE op = *(asBYTE*)&bc[n];
+		int sz = asBCTypeSize[asBCInfo[op].type];
+		if (sz == 0) return false;
+		starts.PushLast(n);
+		n += (asUINT)sz;
+	}
+	if (starts.GetLength() < 3) return false;
+	if (starts[starts.GetLength()-1] != backJump) return false;
+
+	asBYTE backOp = *(asBYTE*)&bc[backJump];
+	short v = 0;
+	bool haveShape = false;
+	asUINT incAt = (asUINT)-1;        // offset of the sanctioned IncVi
+	bool boundIsVar = false;
+	short w = 0;
+
+	// Debug builds interleave a per-statement asBC_SUSPEND marker (a NO_ARG
+	// no-op the alias scan already treats as harmless) between the
+	// increment and the comparison, and again before the back edge itself.
+	// Walk backward over those when locating the "previous real instruction"
+	// so the shape checks below see IncVi/CMP* adjacency regardless.
+	asUINT idx = starts.GetLength() - 1; // starts[idx] == backJump
+	while (idx > 0 && *(asBYTE*)&bc[starts[idx-1]] == asBC_SUSPEND) idx--;
+
+	if (backOp == asBC_JMP)
+	{
+		// Top-test: target must hold CMP* v,(w|imm), followed by a forward
+		// conditional exit jumping past backJump; IncVi v immediately
+		// precedes the back JMP (modulo SUSPEND markers).
+		asBYTE cmpOp = *(asBYTE*)&bc[target];
+		if (cmpOp != asBC_CMPi && cmpOp != asBC_CMPu &&
+		    cmpOp != asBC_CMPIi && cmpOp != asBC_CMPIu) return false;
+		asUINT condAt = target + (asUINT)asBCTypeSize[asBCInfo[cmpOp].type];
+		asBYTE condOp = *(asBYTE*)&bc[condAt];
+		if (condOp != asBC_JNS) return false;   // exit when !(v < w)
+		int exitTarget = (int)condAt + asBCTypeSize[asBCInfo[condOp].type]
+		               + asBC_INTARG(&bc[condAt]);
+		if (exitTarget <= (int)backJump) return false;
+
+		if (idx == 0) return false;
+		asUINT prev = starts[idx-1];
+		if (*(asBYTE*)&bc[prev] != asBC_IncVi) return false;
+
+		v = asBC_SWORDARG0(&bc[target]);
+		boundIsVar = (cmpOp == asBC_CMPi || cmpOp == asBC_CMPu);
+		if (boundIsVar) w = asBC_SWORDARG1(&bc[target]);
+		if (asBC_SWORDARG0(&bc[prev]) != v) return false;
+		incAt = prev;
+
+		// Increment dominance: nothing may jump into (incAt, backJump] —
+		// a forward branch landing there (while(i<n){ if(b) i++; }) skips
+		// the increment, so the loop would not be bounded by v's count.
+		for (asUINT s = 0; s < starts.GetLength(); s++)
+			if (starts[s] > incAt && isJumpTarget[starts[s]])
+				return false;
+
+		haveShape = true;
+	}
+	else if (backOp == asBC_JS)
+	{
+		// Bottom-test: ... IncVi v ; CMP* v,(w|imm) ; JS back  (stay while v < w)
+		if (idx == 0) return false;
+		asUINT cmpIdx = idx - 1;
+		asUINT cmpAt = starts[cmpIdx];
+		asBYTE cmpOp = *(asBYTE*)&bc[cmpAt];
+		if (cmpOp != asBC_CMPi && cmpOp != asBC_CMPu &&
+		    cmpOp != asBC_CMPIi && cmpOp != asBC_CMPIu) return false;
+
+		while (cmpIdx > 0 && *(asBYTE*)&bc[starts[cmpIdx-1]] == asBC_SUSPEND) cmpIdx--;
+		if (cmpIdx == 0) return false;
+		asUINT incPrev = starts[cmpIdx-1];
+		if (*(asBYTE*)&bc[incPrev] != asBC_IncVi) return false;
+
+		v = asBC_SWORDARG0(&bc[cmpAt]);
+		boundIsVar = (cmpOp == asBC_CMPi || cmpOp == asBC_CMPu);
+		if (boundIsVar) w = asBC_SWORDARG1(&bc[cmpAt]);
+		if (asBC_SWORDARG0(&bc[incPrev]) != v) return false;
+		incAt = incPrev;
+
+		// Increment dominance, bottom-test flavor: an IN-SPAN jump landing
+		// after the IncVi (do { if (b) continue; i++; } while (i < n); —
+		// the continue lands on the condition) bypasses the increment.
+		// The global isJumpTarget set cannot be used here: legitimate loop
+		// entry (for-loop rotation) jumps from OUTSIDE the span onto the
+		// condition. Only in-span sources are increment-bypasses. JMPP in
+		// the span computes its landing dynamically — refuse outright.
+		for (asUINT s = 0; s < starts.GetLength(); s++)
+		{
+			asBYTE sop = *(asBYTE*)&bc[starts[s]];
+			if (sop == asBC_JMPP) return false;
+			bool sIsJump = sop == asBC_JMP ||
+			               (sop >= asBC_JZ && sop <= asBC_JNP) ||
+			               sop == asBC_JLowZ || sop == asBC_JLowNZ;
+			if (!sIsJump) continue;
+			int dest = (int)starts[s] + asBCTypeSize[asBCInfo[sop].type]
+			         + asBC_INTARG(&bc[starts[s]]);
+			if (dest > (int)incAt && dest <= (int)backJump)
+				return false;
+		}
+
+		haveShape = true;
+	}
+	if (!haveShape) return false;
+
+	// Span scan: v untouched except at incAt; w (if a variable) untouched.
+	for (asUINT s = 0; s < starts.GetLength(); s++)
+	{
+		asUINT n = starts[s];
+		if (n == incAt) continue;
+		if (asInstrMayWriteOrAliasVar(bc, n, v)) return false;
+		if (boundIsVar && asInstrMayWriteOrAliasVar(bc, n, w)) return false;
+	}
+	return true;
+}
+
 void asCCompiler::FinalizeFunction()
 {
 	TimeIt("asCCompiler::FinalizeFunction");
@@ -471,50 +668,192 @@ void asCCompiler::FinalizeFunction()
 	outFunc->minLocalAccessMask = m_usedAccessMask;
 
 	// --- Halting analysis ---
+	// Classify the finalized bytecode by its control-flow graph:
+	//   YES     - no cycle, or every cycle proven bounded (allCyclesBounded)
+	//   NO      - has a cycle, no try/catch, and no RET reachable from entry
+	//   UNKNOWN - everything else, including anything the decoder can't parse
+	// Conditional jumps include asBC_JLowZ/asBC_JLowNZ (the optimizer rewrites
+	// ClrHi+JZ/JNZ into these) and asBC_JMPP (switch dispatch into the run of
+	// JMP instructions that follows it). A funcdef/delegate call site caps the
+	// result at UNKNOWN: the callee is unknown, so YES cannot be promised.
+	// Literal loop guards are not constant-folded by this compiler: while(true)
+	// emits SetV1(const) -> CpyVtoR4 -> JLowZ whose exit edge is statically
+	// dead. Exactly that adjacent triple (no jump entering mid-pattern) has its
+	// dead edge elided from the reachability walk; any other conditional keeps
+	// both edges. Elision only when the register value is provably the
+	// immediate constant — never on doubt.
 	{
-		asDWORD *bc = outFunc->scriptData->byteCode.AddressOf();
+		asDWORD *bc  = outFunc->scriptData->byteCode.AddressOf();
 		asUINT bcLen = (asUINT)outFunc->scriptData->byteCode.GetLength();
 
-		bool hasBackwardJump = false;
-		bool hasConditionalBackwardJump = false;
-		bool hasConditionalJump = false;
+		bool decodeOk = true;
+		bool hasCycle = false;
+		asCArray<asUINT> backEdgeFrom, backEdgeTo;
+
+		// Pass 1: decode, detect cycles, check the JMPP table shape, and mark
+		// every address any jump can enter at (JMPP marks its whole JMP table;
+		// each table JMP's own target is marked by the plain-JMP case when the
+		// linear scan reaches it).
+		asCArray<bool> isJumpTarget;
+		isJumpTarget.SetLength(bcLen);
+		for (asUINT v = 0; v < bcLen; v++) isJumpTarget[v] = false;
 
 		for (asUINT n = 0; n < bcLen; )
 		{
 			asBYTE op = *(asBYTE*)&bc[n];
 			int instrSize = asBCTypeSize[asBCInfo[op].type];
-			if (instrSize == 0) break;
+			if (instrSize == 0) { decodeOk = false; break; }
 
-			if (op == asBC_JMP)
+			bool isCondJump = (op >= asBC_JZ && op <= asBC_JNP) ||
+			                  op == asBC_JLowZ || op == asBC_JLowNZ;
+			if (op == asBC_JMP || isCondJump)
 			{
-				int offset = asBC_INTARG(&bc[n]);
-				int target = (int)n + instrSize + offset;
+				int target = (int)n + instrSize + asBC_INTARG(&bc[n]);
 				if (target <= (int)n)
 				{
-					hasBackwardJump = true;
+					hasCycle = true;
+					backEdgeFrom.PushLast(n);
+					backEdgeTo.PushLast((asUINT)target);
 				}
+				if (target >= 0 && target < (int)bcLen)
+					isJumpTarget[target] = true;
 			}
-			else if (op == asBC_JZ || op == asBC_JNZ ||
-			         op == asBC_JS || op == asBC_JNS ||
-			         op == asBC_JP || op == asBC_JNP)
+			else if (op == asBC_JMPP)
 			{
-				int offset = asBC_INTARG(&bc[n]);
-				int target = (int)n + instrSize + offset;
-				hasConditionalJump = true;
-				if (target <= (int)n)
-				{
-					hasConditionalBackwardJump = true;
-				}
+				// Switch dispatch always jumps forward into the JMP table
+				// that follows. The reachability walk below relies on that
+				// shape; anything else is out of contract.
+				asUINT next = n + (asUINT)instrSize;
+				if (next >= bcLen || *(asBYTE*)&bc[next] != asBC_JMP)
+					decodeOk = false;
+				else
+					for (asUINT t = next;
+					     t < bcLen && *(asBYTE*)&bc[t] == asBC_JMP;
+					     t += (asUINT)asBCTypeSize[asBCInfo[asBC_JMP].type])
+						isJumpTarget[t] = true;
 			}
-
-			n += instrSize;
+			n += (asUINT)instrSize;
 		}
 
-		if (!hasBackwardJump && !hasConditionalBackwardJump)
+		// Pass 2: resolve statically-constant guards. forced[n] for a
+		// conditional jump at n: 0 = both edges live, 1 = fall-through only,
+		// 2 = jump-target only. Elision requires the exact adjacent triple
+		// SetV1/SetV2/SetV4(var, imm) -> CpyVtoR4(same var) -> JLowZ/JLowNZ
+		// with no jump entering at the CpyVtoR4 or the jump itself (a jump
+		// into the SetV is fine — the constant still gets written). Anything
+		// else leaves forced[n] == 0.
+		asCArray<asBYTE> forced;
+		forced.SetLength(bcLen);
+		for (asUINT v = 0; v < bcLen; v++) forced[v] = 0;
+
+		if (decodeOk)
+		{
+			asUINT p2 = bcLen, p1 = bcLen; // the two preceding instruction addresses
+			for (asUINT n = 0; n < bcLen; )
+			{
+				asBYTE op = *(asBYTE*)&bc[n];
+				int instrSize = asBCTypeSize[asBCInfo[op].type];
+
+				if ((op == asBC_JLowZ || op == asBC_JLowNZ) &&
+				    p1 < bcLen && p2 < bcLen &&
+				    !isJumpTarget[p1] && !isJumpTarget[n])
+				{
+					asBYTE op1 = *(asBYTE*)&bc[p1];
+					asBYTE op2 = *(asBYTE*)&bc[p2];
+					if (op1 == asBC_CpyVtoR4 &&
+					    (op2 == asBC_SetV1 || op2 == asBC_SetV2 || op2 == asBC_SetV4) &&
+					    asBC_SWORDARG0(&bc[p1]) == asBC_SWORDARG0(&bc[p2]))
+					{
+						// JLowZ/JLowNZ test only the low byte of the value
+						// register, which CpyVtoR4 loaded from the var the
+						// SetV wrote — so the outcome is the constant's.
+						asDWORD c = asBC_DWORDARG(&bc[p2]);
+						bool jumpTaken = (op == asBC_JLowZ) ? ((c & 0xFF) == 0)
+						                                    : ((c & 0xFF) != 0);
+						forced[n] = jumpTaken ? (asBYTE)2 : (asBYTE)1;
+					}
+				}
+				p2 = p1; p1 = n;
+				n += (asUINT)instrSize;
+			}
+		}
+
+		// Counted-loop prover: YES survives cycles when every back edge is a
+		// proven-bounded counted loop and no two back edges share a target
+		// (a shared target means a continue-style edge can bypass the
+		// increment — refuse).
+		bool allCyclesBounded = decodeOk && backEdgeFrom.GetLength() > 0;
+		for (asUINT e = 0; allCyclesBounded && e < backEdgeFrom.GetLength(); e++)
+		{
+			for (asUINT e2 = 0; e2 < backEdgeFrom.GetLength(); e2++)
+				if (e2 != e && backEdgeTo[e2] == backEdgeTo[e])
+					allCyclesBounded = false;
+			if (allCyclesBounded)
+				allCyclesBounded = asProveCountedLoop(bc, bcLen, backEdgeTo[e], backEdgeFrom[e], isJumpTarget);
+		}
+
+		if (!decodeOk)
+			outFunc->localHalts = asHALTS_UNKNOWN;
+		else if (!hasCycle || allCyclesBounded)
 			outFunc->localHalts = asHALTS_YES;
-		else if (hasBackwardJump && !hasConditionalJump)
-			outFunc->localHalts = asHALTS_NO;    // unconditional backward jump, no conditional jumps at all
+		else if (outFunc->scriptData->tryCatchInfo.GetLength() > 0)
+		{
+			// Catch handlers are CFG edges from every potentially-throwing
+			// instruction in the try range; those edges are not modeled
+			// here, so NO must never be claimed for such a function.
+			outFunc->localHalts = asHALTS_UNKNOWN;
+		}
 		else
+		{
+			// RET-reachability from entry over the real CFG. If no RET can
+			// be reached the function cannot return normally: NO.
+			asCArray<bool> visited;
+			visited.SetLength(bcLen);
+			for (asUINT v = 0; v < bcLen; v++) visited[v] = false;
+
+			asCArray<asUINT> work;
+			work.PushLast(0);
+			bool retReachable = false;
+
+			while (work.GetLength() > 0 && !retReachable)
+			{
+				asUINT n = work[work.GetLength() - 1];
+				work.PopLast();
+				if (n >= bcLen || visited[n]) continue;
+				visited[n] = true;
+
+				asBYTE op = *(asBYTE*)&bc[n];
+				int instrSize = asBCTypeSize[asBCInfo[op].type];
+
+				if (op == asBC_RET)
+					retReachable = true;
+				else if (op == asBC_JMP)
+					work.PushLast((asUINT)((int)n + instrSize + asBC_INTARG(&bc[n])));
+				else if ((op >= asBC_JZ && op <= asBC_JNP) ||
+				         op == asBC_JLowZ || op == asBC_JLowNZ)
+				{
+					// A guard pass 2 proved constant contributes only its
+					// live edge; forced == 0 means both edges are live.
+					if (forced[n] != 1)
+						work.PushLast((asUINT)((int)n + instrSize + asBC_INTARG(&bc[n])));
+					if (forced[n] != 2)
+						work.PushLast(n + (asUINT)instrSize);
+				}
+				else if (op == asBC_JMPP)
+				{
+					for (asUINT t = n + (asUINT)instrSize;
+					     t < bcLen && *(asBYTE*)&bc[t] == asBC_JMP;
+					     t += (asUINT)asBCTypeSize[asBCInfo[asBC_JMP].type])
+						work.PushLast(t);
+				}
+				else
+					work.PushLast(n + (asUINT)instrSize);
+			}
+
+			outFunc->localHalts = retReachable ? asHALTS_UNKNOWN : asHALTS_NO;
+		}
+
+		if (outFunc->localCallsDelegate && outFunc->localHalts == asHALTS_YES)
 			outFunc->localHalts = asHALTS_UNKNOWN;
 	}
 

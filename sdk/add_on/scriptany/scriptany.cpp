@@ -228,6 +228,10 @@ CScriptAny &CScriptAny::operator=(const CScriptAny &other)
 		value.valueInt = other.value.valueInt;
 	}
 
+#if REMOVE_MODULE_LINKAGE
+	UpdateListSafe();
+#endif
+
 	return *this;
 }
 
@@ -271,6 +275,10 @@ CScriptAny::CScriptAny(void *ref, int refTypeId, asIScriptEngine *engine)
 CScriptAny::~CScriptAny()
 {
 	FreeObject();
+	
+#if REMOVE_MODULE_LINKAGE
+	UpdateListSafe();
+#endif
 }
 
 void CScriptAny::Store(void *ref, int refTypeId)
@@ -310,6 +318,60 @@ void CScriptAny::Store(void *ref, int refTypeId)
 		int size = engine->GetSizeOfPrimitiveType(value.typeId);
 		memcpy(&value.valueInt, ref, size);
 	}
+}
+
+void CScriptAny::StoreMove(void *ref, int refTypeId, MovePointer status)
+{
+	// This method is not expected to be used for primitive types, except for bool, int64, or double
+	assert( refTypeId > asTYPEID_DOUBLE || refTypeId == asTYPEID_VOID || refTypeId == asTYPEID_BOOL || refTypeId == asTYPEID_INT64 || refTypeId == asTYPEID_DOUBLE );
+
+	// Hold on to the object type reference so it isn't destroyed too early
+	if( (refTypeId & asTYPEID_MASK_OBJECT) )
+	{
+		asITypeInfo *ti = engine->GetTypeInfoById(refTypeId);
+		if( ti )
+			ti->AddRef();
+	}
+
+	FreeObject();
+
+	if(status == matchTypeId)
+		status = (refTypeId & asTYPEID_OBJHANDLE)? isHandle : isReference;
+
+	value.typeId = refTypeId;
+	if( value.typeId & asTYPEID_OBJHANDLE || value.typeId & asTYPEID_SCRIPTOBJECT )
+	{
+		value.valueObj = status == isHandle? *(void**)ref : ref;
+	}
+	else if( value.typeId & asTYPEID_APPOBJECT )
+	{
+		auto typeInfo = engine->GetTypeInfoById(refTypeId);
+
+//delegate or reftype
+		if(!(typeInfo->GetFlags() & asOBJ_VALUE))
+		{
+			value.valueObj = status == isHandle? *(void**)ref : ref;
+		}
+		else
+		{
+			// Create a copy of the object
+			value.valueObj = engine->CreateScriptObjectCopy(ref, engine->GetTypeInfoById(value.typeId));
+		}
+	}
+	else
+	{
+		// Primitives can be copied directly
+		value.valueInt = 0;
+
+		// Copy the primitive value
+		// We receive a pointer to the value.
+		int size = engine->GetSizeOfPrimitiveType(value.typeId);
+		memcpy(&value.valueInt, ref, size);
+	}
+
+#if REMOVE_MODULE_LINKAGE
+	UpdateListSafe();
+#endif
 }
 
 void CScriptAny::Store(double &ref)
@@ -417,7 +479,27 @@ void CScriptAny::FreeObject()
 		value.typeId = 0;
 	}
 
+
+#if REMOVE_MODULE_LINKAGE
+	UpdateListSafe();
+#endif
 	// For primitives, there's nothing to do
+	
+//mark as asTYPEID_VOID
+	value.typeId = asTYPEID_VOID;
+//clear mark so we know something changed
+	mark = false;
+}
+
+void * CScriptAny::GetObjectAddress()
+{
+	if((value.typeId & asTYPEID_MASK_SEQNBR) == value.typeId)
+		return &value.valueInt;
+
+	if(value.typeId & asTYPEID_OBJHANDLE)
+		return &value.valueObj;
+
+	return value.valueObj;
 }
 
 
@@ -486,5 +568,94 @@ bool CScriptAny::GetFlag()
 	return gcFlag;
 }
 
+#if REMOVE_MODULE_LINKAGE
+
+void CScriptAny::RemoverModule(asIScriptModule* _module)
+{
+	std::lock_guard<std::recursive_mutex> lock(g_mutex);
+
+	for(auto itr = g_first, next = g_first; itr; itr = next)
+	{
+		next = itr->m_next;
+
+		if(itr->Depends(_module))
+			itr->FreeObject();
+	}
+}
+
+std::recursive_mutex CScriptAny::g_mutex;
+CScriptAny * CScriptAny::g_first{};
+CScriptAny * CScriptAny::g_last{};
+
+void CScriptAny::AddToListSafe()
+{
+	if(m_isInList.load(std::memory_order_acquire) == false)
+	{
+		std::lock_guard<std::recursive_mutex> lock(g_mutex);
+		return AddToListUnsafe();
+	}
+}
+
+void CScriptAny::AddToListUnsafe()
+{
+	if(m_isInList.load(std::memory_order_acquire) == false)
+	{
+		if(!g_first)	g_first = this;
+		if(g_last)      g_last->m_next = this;
+
+		m_prev = g_last;
+		m_next = nullptr;
+		g_last = this;
+
+		m_isInList.store(true, std::memory_order_release);
+	}
+}
+
+void CScriptAny::RemoveFromListSafe()
+{
+	if(m_isInList.load(std::memory_order_acquire))
+	{
+		std::lock_guard<std::recursive_mutex> lock(g_mutex);
+		return RemoveFromListUnsafe();
+	}
+}
+
+void CScriptAny::RemoveFromListUnsafe()
+{
+	if(m_isInList.load(std::memory_order_acquire))
+	{
+		if(m_prev)			 m_prev->m_next = m_next;
+		if(m_next)			 m_next->m_prev = m_prev;
+		if(g_first == this)  g_first = m_next;
+		if(g_last == this)   g_last  = m_prev;
+		m_prev = nullptr;
+		m_next = nullptr;
+
+		m_isInList.store(false, std::memory_order_release);
+	}
+}
+
+bool CScriptAny::ShouldBeInList() const
+{
+	if((value.typeId & asTYPEID_MASK_OBJECT) == false
+	|| engine == nullptr)
+		return false;
+
+//i think templates count as appobjects even if they're _module dependent?
+	auto typeInfo = engine->GetTypeInfoById(value.typeId);
+
+	return typeInfo? typeInfo->GetModule() != nullptr : false;
+}
+
+bool CScriptAny::Depends(asIScriptModule * _module) const
+{
+	if((value.typeId & asTYPEID_MASK_OBJECT) == false
+	|| engine == nullptr)
+		return false;
+
+	return _module == engine->GetTypeInfoById(value.typeId)->GetModule();
+}
+
+#endif
 
 END_AS_NAMESPACE

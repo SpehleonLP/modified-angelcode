@@ -1,108 +1,387 @@
 #include "scriptbuilder.h"
-#include <vector>
-#include <assert.h>
-#ifdef _WIN32
-#include <windows.h> // MultiByteToWideChar()
-#endif
-using namespace std;
 
+#include <string.h>  // _stricmp
 #include <stdio.h>
+#ifdef _WIN32
+#include <windows.h>
+#endif
 #if defined(_MSC_VER) && !defined(_WIN32_WCE) && !defined(__S3E__)
 #include <direct.h>
 #endif
 #ifdef _WIN32_WCE
-#include <windows.h> // For GetModuleFileName()
+#include <windows.h>
+#endif
+#if defined(__S3E__) || defined(__APPLE__) || defined(__GNUC__)
+#include <unistd.h>
 #endif
 
-#if defined(__S3E__) || defined(__APPLE__) || defined(__GNUC__)
-#include <unistd.h> // For getcwd()
-#endif
+#include "builderinternals/types.hpp"
+#include "builderinternals/script_text.hpp"
+#include "builderinternals/scope_tracker.hpp"
+#include "builderinternals/conditional_pass.hpp"
+#include "builderinternals/directive_pass.hpp"
+#include "builderinternals/decorator_pass.hpp"
+#include "builderinternals/metadata_pass.hpp"
+#include "builderinternals/splice_pass.hpp"
+
+// Internal AngelScript headers for debug info remapping
+#include "as_scriptengine.h"
+#include "as_scriptfunction.h"
+#include "as_module.h"
+
+#include <map>
+#include <set>
+#include <assert.h>
+
+using namespace std;
 
 BEGIN_AS_NAMESPACE
 
-// Helper functions
-static string GetCurrentDir();
-static string GetAbsolutePath(const string &path);
+// ---------------------------------------------------------------------------
+// File-static helpers
+// ---------------------------------------------------------------------------
 
-
-CScriptBuilder::CScriptBuilder()
+static string GetCurrentDir()
 {
-	engine = 0;
-	module = 0;
+	char buffer[1024];
+#if defined(_MSC_VER) || defined(_WIN32)
+	#ifdef _WIN32_WCE
+	static TCHAR apppath[MAX_PATH] = TEXT("");
+	if (!apppath[0])
+	{
+		GetModuleFileName(NULL, apppath, MAX_PATH);
 
-	includeCallback = 0;
-	includeParam = 0;
+		int appLen = _tcslen(apppath);
 
-	pragmaCallback = 0;
-	pragmaParam = 0;
+		while (appLen > 1)
+		{
+			if (apppath[appLen-1] == TEXT('\\'))
+				break;
+			appLen--;
+		}
+
+		apppath[appLen] = TEXT('\0');
+	}
+		#ifdef _UNICODE
+	wcstombs(buffer, apppath, min(1024, wcslen(apppath)*sizeof(wchar_t)));
+		#else
+	memcpy(buffer, apppath, min(1024, strlen(apppath)));
+		#endif
+
+	return buffer;
+	#elif defined(__S3E__)
+	return getcwd(buffer, (int)1024);
+	#elif _XBOX_VER >= 200
+	return "game:/";
+	#elif defined(_M_ARM)
+	return "";
+	#else
+	return _getcwd(buffer, (int)1024);
+	#endif
+#elif defined(__APPLE__) || defined(__linux__)
+	return getcwd(buffer, 1024);
+#else
+	return "";
+#endif
 }
 
-void CScriptBuilder::SetIncludeCallback(INCLUDECALLBACK_t callback, void *userParam)
+static string GetAbsolutePath(const string &file)
 {
-	includeCallback = callback;
-	includeParam   = userParam;
+	string str = file;
+
+	if( !((str.length() > 0 && (str[0] == '/' || str[0] == '\\')) ||
+		  str.find(":") != string::npos) )
+	{
+		str = GetCurrentDir() + "/" + str;
+	}
+
+	string::size_type pos = 0;
+	while( (pos = str.find("\\", pos)) != string::npos )
+		str[pos] = '/';
+
+	pos = 0;
+	while( (pos = str.find("/./", pos)) != string::npos )
+		str.erase(pos+1, 2);
+
+	pos = 0;
+	while( (pos = str.find("/../")) != string::npos )
+	{
+		string::size_type pos2 = str.rfind("/", pos-1);
+		if( pos2 != string::npos )
+			str.erase(pos2, pos+3-pos2);
+		else
+			break;
+	}
+
+	return str;
 }
 
-void CScriptBuilder::SetPragmaCallback(PRAGMACALLBACK_t callback, void *userParam)
+// Helper: check if a type ID refers to a funcdef, and if so collect it
+static void CollectFuncdefDep(asIScriptEngine *eng, int typeId,
+	set<string> &funcdefs)
 {
-	pragmaCallback = callback;
-	pragmaParam = userParam;
+	typeId &= asTYPEID_MASK_OBJECT | asTYPEID_MASK_SEQNBR;
+	asITypeInfo *type = eng->GetTypeInfoById(typeId);
+	if( !type ) return;
+	if( !(type->GetFlags() & asOBJ_FUNCDEF) ) return;
+
+	asIScriptFunction *sig = type->GetFuncdefSignature();
+	if( !sig ) return;
+
+	string decl = "funcdef ";
+	decl += sig->GetDeclaration(false, false, true);
+	decl += ";\n";
+	funcdefs.insert(decl);
 }
+
+// Helper: scan a function's parameter and return types for funcdef dependencies
+static void CollectFuncdefDeps(asIScriptEngine *eng, asIScriptFunction *func,
+	set<string> &funcdefs)
+{
+	CollectFuncdefDep(eng, func->GetReturnTypeId(), funcdefs);
+
+	for( asUINT p = 0; p < func->GetParamCount(); p++ )
+	{
+		int paramTypeId = 0;
+		func->GetParam(p, &paramTypeId);
+		CollectFuncdefDep(eng, paramTypeId, funcdefs);
+	}
+}
+
+// ---------------------------------------------------------------------------
+// CScriptBuilder::Impl
+// ---------------------------------------------------------------------------
+
+struct CScriptBuilder::Impl
+{
+	int processingFlags;
+	CScriptBuilder *owner_;
+
+	asIScriptEngine *engine;
+	asIScriptModule *module;
+
+	ConditionalPass conditional;
+	DirectivePass   directive;
+	DecoratorPass   decorator;
+	MetadataPass    metadata;
+	SplicePass      splice;
+
+	vector<SectionEntry> pendingSections;
+	vector<SectionEntry> processedSections;
+	bool preprocessed;
+	string modifiedScript;
+
+	MSGCALLBACK_t msgCallback;
+	void         *msgParam;
+
+#ifdef _WIN32
+	struct ci_less
+	{
+		bool operator()(const string &a, const string &b) const
+		{
+			return _stricmp(a.c_str(), b.c_str()) < 0;
+		}
+	};
+	set<string, ci_less> includedScripts;
+#else
+	set<string>          includedScripts;
+#endif
+
+	Impl(int flags)
+		: processingFlags(flags)
+		, owner_(0)
+		, engine(0)
+		, module(0)
+		, conditional(flags)
+		, directive(flags)
+		, decorator(flags)
+		, metadata(flags)
+		, splice(flags)
+		, preprocessed(false)
+		, msgCallback(0)
+		, msgParam(0)
+	{
+	}
+
+	void ClearAll();
+	int  ProcessScriptSection(const char *script, unsigned int length,
+	                          const char *sectionname, int lineOffset,
+	                          int flags);
+	int  LoadScriptSection(const char *filename, int flags);
+	bool IncludeIfNotAlreadyIncluded(const char *filename);
+	static void InternalMessageCallback(const asSMessageInfo *msg, void *param);
+};
+
+// ---------------------------------------------------------------------------
+// CScriptBuilder delegation methods
+// ---------------------------------------------------------------------------
+
+CScriptBuilder::CScriptBuilder(int processingFlags)
+	: impl_(new Impl(processingFlags))
+{
+	impl_->owner_ = this;
+}
+
+CScriptBuilder::~CScriptBuilder()
+{
+	delete impl_;
+}
+
 
 int CScriptBuilder::StartNewModule(asIScriptEngine *inEngine, const char *moduleName)
 {
-	if(inEngine == 0 ) return -1;
+	if( inEngine == 0 ) return -1;
 
-	engine = inEngine;
-	module = inEngine->GetModule(moduleName, asGM_ALWAYS_CREATE);
-	if( module == 0 )
+	impl_->engine = inEngine;
+	impl_->module = inEngine->GetModule(moduleName, asGM_ALWAYS_CREATE);
+	if( impl_->module == 0 )
 		return -1;
 
-	ClearAll();
+	impl_->ClearAll();
 
 	return 0;
 }
 
 asIScriptEngine *CScriptBuilder::GetEngine()
 {
-	return engine;
+	return impl_->engine;
 }
 
 asIScriptModule *CScriptBuilder::GetModule()
 {
-	return module;
+	return impl_->module;
+}
+
+void CScriptBuilder::SetIncludeCallback(INCLUDECALLBACK_t cb, void *p)
+{
+	impl_->directive.includeCb_ = cb;
+	impl_->directive.includeParam_ = p;
+}
+
+void CScriptBuilder::SetPragmaCallback(PRAGMACALLBACK_t cb, void *p)
+{
+	impl_->directive.pragmaCb_ = cb;
+	impl_->directive.pragmaParam_ = p;
+}
+
+void CScriptBuilder::DefineWord(const char *word)
+{
+	impl_->conditional.definedWords.insert(word);
+}
+
+void CScriptBuilder::SetMessageCallback(MSGCALLBACK_t callback, void *param)
+{
+	impl_->msgCallback = callback;
+	impl_->msgParam = param;
+}
+
+void CScriptBuilder::ClearMessageCallback()
+{
+	impl_->msgCallback = 0;
+	impl_->msgParam = 0;
+}
+
+Visibility CScriptBuilder::GetVisibility(asITypeInfo *type) const
+{
+	return impl_->decorator.GetVisibility(type);
+}
+
+Visibility CScriptBuilder::GetVisibility(asIScriptFunction *func) const
+{
+	return impl_->decorator.GetVisibility(func);
+}
+
+vector<string> CScriptBuilder::GetMetadataForType(int typeId)
+{
+	return impl_->metadata.GetMetadataForType(typeId);
+}
+
+vector<string> CScriptBuilder::GetMetadataForFunc(asIScriptFunction *func)
+{
+	return impl_->metadata.GetMetadataForFunc(func);
+}
+
+vector<string> CScriptBuilder::GetMetadataForVar(int varIdx)
+{
+	return impl_->metadata.GetMetadataForVar(varIdx);
+}
+
+vector<string> CScriptBuilder::GetMetadataForTypeProperty(int typeId, int varIdx)
+{
+	return impl_->metadata.GetMetadataForTypeProperty(typeId, varIdx);
+}
+
+vector<string> CScriptBuilder::GetMetadataForTypeMethod(int typeId, asIScriptFunction *method)
+{
+	return impl_->metadata.GetMetadataForTypeMethod(typeId, method);
 }
 
 unsigned int CScriptBuilder::GetSectionCount() const
 {
-	return (unsigned int)(includedScripts.size());
+	return (unsigned int)(impl_->includedScripts.size());
 }
 
 string CScriptBuilder::GetSectionName(unsigned int idx) const
 {
-	if( idx >= includedScripts.size() ) return "";
+	if( idx >= impl_->includedScripts.size() ) return "";
 
 #ifdef _WIN32
-	set<string, ci_less>::const_iterator it = includedScripts.begin();
+	set<string, Impl::ci_less>::const_iterator it = impl_->includedScripts.begin();
 #else
-	set<string>::const_iterator it = includedScripts.begin();
+	set<string>::const_iterator it = impl_->includedScripts.begin();
 #endif
 	while( idx-- > 0 ) it++;
 	return *it;
 }
 
-// Returns 1 if the section was included
-// Returns 0 if the section was not included because it had already been included before
-// Returns <0 if there was an error
-int CScriptBuilder::AddSectionFromFile(const char *filename)
+string CScriptBuilder::GetSectionSourceLine(const char *sectionName, int row) const
 {
-	// The file name stored in the set should be the fully resolved name because
-	// it is possible to name the same file in multiple ways using relative paths.
+	if( sectionName == 0 || row <= 0 )
+		return string();
+
+	// Prefer the preprocessed sections — that's the exact text the compiler
+	// saw, so its rows index into it. Fall back to pending if Preprocess()
+	// hasn't run yet.
+	const SectionEntry *sec = 0;
+	for( size_t i = 0; i < impl_->processedSections.size(); i++ )
+		if( impl_->processedSections[i].name == sectionName )
+		{ sec = &impl_->processedSections[i]; break; }
+	if( sec == 0 )
+		for( size_t i = 0; i < impl_->pendingSections.size(); i++ )
+			if( impl_->pendingSections[i].name == sectionName )
+			{ sec = &impl_->pendingSections[i]; break; }
+	if( sec == 0 )
+		return string();
+
+	// Compiler rows are 1-based and include the section's lineOffset.
+	int line = row - sec->lineOffset;
+	if( line <= 0 )
+		return string();
+
+	const string &code = sec->code;
+	size_t start = 0;
+	for( int n = 1; n < line; n++ )
+	{
+		size_t nl = code.find('\n', start);
+		if( nl == string::npos )
+			return string();
+		start = nl + 1;
+	}
+
+	size_t end = code.find('\n', start);
+	string out = code.substr(start, end == string::npos ? string::npos : end - start);
+	if( !out.empty() && out.back() == '\r' )
+		out.pop_back();
+	return out;
+}
+
+int CScriptBuilder::AddSectionFromFile(const char *filename, int flags)
+{
 	string fullpath = GetAbsolutePath(filename);
 
-	if( IncludeIfNotAlreadyIncluded(fullpath.c_str()) )
+	if( impl_->IncludeIfNotAlreadyIncluded(fullpath.c_str()) )
 	{
-		int r = LoadScriptSection(fullpath.c_str());
+		int r = impl_->LoadScriptSection(fullpath.c_str(), flags);
 		if( r < 0 )
 			return r;
 		else
@@ -112,76 +391,167 @@ int CScriptBuilder::AddSectionFromFile(const char *filename)
 	return 0;
 }
 
-// Returns 1 if the section was included
-// Returns 0 if the section was not included because it had already been included before
-// Returns <0 if there was an error
-int CScriptBuilder::AddSectionFromMemory(const char *sectionName, const char *scriptCode, unsigned int scriptLength, int lineOffset)
+int CScriptBuilder::AddSectionFromMemory(const char *sectionName, const char *scriptCode, unsigned int scriptLength, int lineOffset, int flags)
 {
-	if( IncludeIfNotAlreadyIncluded(sectionName) )
+	if( impl_->IncludeIfNotAlreadyIncluded(sectionName) )
 	{
-		int r = ProcessScriptSection(scriptCode, scriptLength, sectionName, lineOffset);
-		if( r < 0 )
-			return r;
+		SectionEntry entry;
+		entry.name = sectionName;
+		if( scriptLength )
+			entry.code.assign(scriptCode, scriptLength);
 		else
-			return 1;
+			entry.code = scriptCode;
+		entry.lineOffset = lineOffset;
+		entry.flags = flags;
+		impl_->pendingSections.push_back(entry);
+		impl_->preprocessed = false;
+		return 1;
 	}
 
+	return 0;
+}
+
+int CScriptBuilder::Preprocess()
+{
+	if( impl_->preprocessed )
+		return 0;
+
+	int totalErrors = 0;
+
+	// Process each pending section
+	// Note: ProcessScriptSection may add new entries via #include,
+	// which can cause vector reallocation. Copy fields to locals before the call.
+	for( size_t i = 0; i < impl_->pendingSections.size(); i++ )
+	{
+		string secCode = impl_->pendingSections[i].code;
+		string secName = impl_->pendingSections[i].name;
+		int secLineOffset   = impl_->pendingSections[i].lineOffset;
+		int secFlags        = impl_->pendingSections[i].flags;
+
+		int r = impl_->ProcessScriptSection(
+			secCode.c_str(),
+			(unsigned int)secCode.size(),
+			secName.c_str(),
+			secLineOffset,
+			secFlags);
+		if( r < 0 )
+		{
+			totalErrors++;
+			continue;
+		}
+
+		SectionEntry processed;
+		processed.name = secName;
+		processed.code = impl_->modifiedScript;
+		processed.lineOffset = secLineOffset;
+		processed.flags = secFlags;
+		impl_->processedSections.push_back(processed);
+	}
+
+	impl_->pendingSections.clear();
+
+	if( totalErrors > 0 )
+		return -1;
+
+	// Out-of-class method splicing
+	{
+		int spliceErrors = impl_->splice.Extract(impl_->processedSections, impl_->engine);
+		spliceErrors += impl_->splice.Splice(impl_->processedSections, impl_->engine);
+		if( spliceErrors > 0 )
+			return -1;
+	}
+
+	impl_->preprocessed = true;
 	return 0;
 }
 
 int CScriptBuilder::BuildModule()
 {
-	return Build();
-}
+	int r = 0;
 
-void CScriptBuilder::DefineWord(const char *word)
-{
-	string sword = word;
-	if( definedWords.find(sword) == definedWords.end() )
+	// Preprocess if not already done
+	if( !impl_->preprocessed )
 	{
-		definedWords.insert(sword);
+		r = Preprocess();
+		if( r < 0 )
+			return r;
 	}
+
+	// Feed all processed sections to the engine
+	for( size_t i = 0; i < impl_->processedSections.size(); i++ )
+	{
+		impl_->module->AddScriptSection(
+			impl_->processedSections[i].name.c_str(),
+			impl_->processedSections[i].code.c_str(),
+			impl_->processedSections[i].code.size(),
+			impl_->processedSections[i].lineOffset);
+	}
+
+	// Save the engine's current message callback — it may have been set by
+	// the host, and Preprocess callbacks (include/pragma) or other code on the
+	// call stack may have cleared or replaced it since we last checked.
+	// We restore whatever was here after Build so we don't leak our internal
+	// callback or clobber the host's.
+	asSFuncPtr prevCbFunc;
+	void      *prevCbObj  = 0;
+	asDWORD    prevCbConv = 0;
+	bool hadPrevCb = (impl_->engine->GetMessageCallback(&prevCbFunc, &prevCbObj, &prevCbConv) >= 0);
+
+	if( impl_->msgCallback )
+		impl_->engine->SetMessageCallback(asFUNCTION(Impl::InternalMessageCallback), impl_, asCALL_CDECL);
+
+	r = impl_->module->Build();
+
+	if( impl_->msgCallback )
+	{
+		if( hadPrevCb )
+			impl_->engine->SetMessageCallback(prevCbFunc, prevCbObj, prevCbConv);
+		else
+			impl_->engine->ClearMessageCallback();
+	}
+
+	if( r >= 0 )
+	{
+		impl_->decorator.Resolve(impl_->module);
+		impl_->metadata.Resolve(impl_->module, impl_->engine);
+		impl_->splice.RemapDebugInfo(impl_->module);
+	}
+
+	return r;
 }
 
-void CScriptBuilder::ClearAll()
+// ---------------------------------------------------------------------------
+// Impl method bodies
+// ---------------------------------------------------------------------------
+
+void CScriptBuilder::Impl::ClearAll()
 {
 	includedScripts.clear();
-
-#if AS_PROCESS_METADATA == 1
-	currentClass = "";
-	currentNamespace = "";
-
-	foundDeclarations.clear();
-
-	typeMetadataMap.clear();
-	funcMetadataMap.clear();
-	varMetadataMap.clear();
-	classMetadataMap.clear();
-#endif
+	pendingSections.clear();
+	processedSections.clear();
+	preprocessed = false;
+	conditional.definedWords.clear();
+	directive.pendingIncludes_.clear();
+	decorator.ClearAll();
+	metadata.ClearAll();
+	splice.ClearAll();
 }
 
-bool CScriptBuilder::IncludeIfNotAlreadyIncluded(const char *filename)
+bool CScriptBuilder::Impl::IncludeIfNotAlreadyIncluded(const char *filename)
 {
 	string scriptFile = filename;
 	if( includedScripts.find(scriptFile) != includedScripts.end() )
-	{
-		// Already included
 		return false;
-	}
 
-	// Add the file to the set of included sections
 	includedScripts.insert(scriptFile);
-
 	return true;
 }
 
-int CScriptBuilder::LoadScriptSection(const char* filename)
+int CScriptBuilder::Impl::LoadScriptSection(const char* filename, int flags)
 {
-	// Open the script file
 	string scriptFile = filename;
 #if _MSC_VER >= 1500 && !defined(__S3E__)
   #ifdef _WIN32
-	// Convert the filename from UTF8 to UTF16
 	wchar_t bufUTF16_name[10000] = {0};
 	wchar_t bufUTF16_mode[10] = {0};
 	MultiByteToWideChar(CP_UTF8, 0, filename, -1, bufUTF16_name, 10000);
@@ -198,24 +568,15 @@ int CScriptBuilder::LoadScriptSection(const char* filename)
 #endif
 	if( f == 0 )
 	{
-		// Write a message to the engine's message callback
 		string msg = "Failed to open script file '" + GetAbsolutePath(scriptFile) + "'";
 		engine->WriteMessage(filename, 0, 0, asMSGTYPE_ERROR, msg.c_str());
-
-		// TODO: Write the file where this one was included from
-
 		return -1;
 	}
 
-	// Determine size of the file
 	fseek(f, 0, SEEK_END);
 	int len = ftell(f);
 	fseek(f, 0, SEEK_SET);
 
-	// On Win32 it is possible to do the following instead
-	// int len = _filelength(_fileno(f));
-
-	// Read the entire file
 	string code;
 	size_t c = 0;
 	if( len > 0 )
@@ -228,1005 +589,306 @@ int CScriptBuilder::LoadScriptSection(const char* filename)
 
 	if( c == 0 && len > 0 )
 	{
-		// Write a message to the engine's message callback
 		string msg = "Failed to load script file '" + GetAbsolutePath(scriptFile) + "'";
 		engine->WriteMessage(filename, 0, 0, asMSGTYPE_ERROR, msg.c_str());
 		return -1;
 	}
 
-	// Process the script section even if it is zero length so that the name is registered
-	return ProcessScriptSection(code.c_str(), (unsigned int)(code.length()), filename, 0);
+	SectionEntry entry;
+	entry.name = filename;
+	entry.code = code;
+	entry.lineOffset = 0;
+	entry.flags = flags;
+	pendingSections.push_back(entry);
+	preprocessed = false;
+	return 0;
 }
 
-int CScriptBuilder::ProcessScriptSection(const char *script, unsigned int length, const char *sectionname, int lineOffset)
+int CScriptBuilder::Impl::ProcessScriptSection(const char *script, unsigned int length,
+                                                const char *sectionname, int lineOffset,
+                                                int flags)
 {
-	vector<string> includes;
+	int errors = 0;
 
-	// Perform a superficial parsing of the script first to store the metadata
 	if( length )
 		modifiedScript.assign(script, length);
 	else
 		modifiedScript = script;
 
-	// First perform the checks for #if directives to exclude code that shouldn't be compiled
-	unsigned int pos = 0;
-	int nested = 0;
-	while( pos < modifiedScript.size() )
-	{
-		asUINT len = 0;
-		asETokenClass t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-		if( t == asTC_UNKNOWN && modifiedScript[pos] == '#' && (pos + 1 < modifiedScript.size()) )
-		{
-			int start = pos++;
+	ScriptText text(modifiedScript, engine);
 
-			// Is this an #if directive?
-			t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-
-			string token;
-			token.assign(&modifiedScript[pos], len);
-
-			pos += len;
-
-			if( token == "if" )
-			{
-				t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-				if( t == asTC_WHITESPACE )
-				{
-					pos += len;
-					t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-				}
-
-				if( t == asTC_IDENTIFIER )
-				{
-					string word;
-					word.assign(&modifiedScript[pos], len);
-
-					// Overwrite the #if directive with space characters to avoid compiler error
-					pos += len;
-					OverwriteCode(start, pos-start);
-
-					// Has this identifier been defined by the application or not?
-					if( definedWords.find(word) == definedWords.end() )
-					{
-						// Exclude all the code until and including the #endif
-						pos = ExcludeCode(pos);
-					}
-					else
-					{
-						nested++;
-					}
-				}
-			}
-			else if( token == "endif" )
-			{
-				// Only remove the #endif if there was a matching #if
-				if( nested > 0 )
-				{
-					OverwriteCode(start, pos-start);
-					nested--;
-				}
-			}
-		}
-		else
-			pos += len;
-	}
-
-#if AS_PROCESS_METADATA == 1
-	// Preallocate memory
-	string name, declaration;
-	vector<string> metadata;
-	declaration.reserve(100);
-#endif
+	// Conditional exclusion (#if/#else/#endif pre-pass)
+	errors += conditional.Exclude(text);
 
 	// Then check for meta data and pre-processor directives
-	pos = 0;
-	while( pos < modifiedScript.size() )
+	directive.pendingIncludes_.clear();
+	decorator.hadDecorator_ = false;
+	decorator.pendingVis_ = 0;
+	decorator.errors_ = 0;
+	text.pos = 0;
+	ScopeTracker scope;
+	while( text.pos < text.code.size() )
 	{
-		asUINT len = 0;
-		asETokenClass t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-		if( t == asTC_COMMENT || t == asTC_WHITESPACE )
-		{
-			pos += len;
+		Token tok = text.Next();
+
+		if( tok.type == asTC_UNKNOWN && tok.span.len == 0 )
+			break;
+
+		// Bare ';' (e.g. after '};' terminating a class) — skip without
+		// invoking SkipStatement, which would consume the following statement.
+		if( text.Equals(tok, ";") )
 			continue;
-		}
-		string token;
-		token.assign(&modifiedScript[pos], len);
 
-#if AS_PROCESS_METADATA == 1
-		// Skip possible decorators before class and interface declarations
-		if (token == "shared" || token == "abstract" || token == "mixin" || token == "external")
-		{
-			pos += len;
+		// Decorators: shared, abstract, mixin, external, public, private, protected
+		if( decorator.HandleDecorator(text, tok, flags, sectionname, scope.currentClass.len != 0) )
 			continue;
-		}
 
-		// Check if class or interface so the metadata for members can be gathered
-		if( currentClass == "" && (token == "class" || token == "interface") )
+		// Class/interface: shared insert + scope tracking + annotation
+		if( (text.Equals(tok, "class") || text.Equals(tok, "interface")) && scope.currentClass.len == 0 )
 		{
-			// Get the identifier after "class"
-			do
-			{
-				pos += len;
-				if( pos >= modifiedScript.size() )
-				{
-					t = asTC_UNKNOWN;
-					break;
-				}
-				t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-			} while(t == asTC_COMMENT || t == asTC_WHITESPACE);
-
-			if( t == asTC_IDENTIFIER )
-			{
-				currentClass = modifiedScript.substr(pos,len);
-
-				// Search until first { or ; is encountered
-				while( pos < modifiedScript.length() )
-				{
-					engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-
-					// If start of class section encountered stop
-					if( modifiedScript[pos] == '{' )
-					{
-						pos += len;
-						break;
-					}
-					else if (modifiedScript[pos] == ';')
-					{
-						// The class declaration has ended and there are no children
-						currentClass = "";
-						pos += len;
-						break;
-					}
-
-					// Check next symbol
-					pos += len;
-				}
-			}
-
-			continue;
+			if( decorator.HandleClassDecl(text, tok, scope, flags) )
+				continue;
 		}
 
-		// Check if end of class
-		if( currentClass != "" && token == "}" )
-		{
-			currentClass = "";
-			pos += len;
+		// Let ScopeTracker handle '}' (class exit, namespace exit) and 'namespace'
+		if( scope.Update(text, tok) )
 			continue;
-		}
 
-		// Check if namespace so the metadata for members can be gathered
-		if( token == "namespace" )
+		// Metadata: [...]
+		if( text.Equals(tok, "[") )
 		{
-			// Get the scope after "namespace". It can be composed of multiple nested namespaces, e.g. A::B::C
-			// Keep track of the number of nested namespace scopes are declared for each block
-			int nestedNamespaces = 0;
-			do
+			int metaPos = metadata.HandleMetadata(text, tok.span.pos, scope);
+			if( metaPos >= 0 )
 			{
-				do
-				{
-					pos += len;
-					t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-				} while (t == asTC_COMMENT || t == asTC_WHITESPACE);
-
-				if (t == asTC_IDENTIFIER)
-				{
-					if (currentNamespace != "")
-						currentNamespace += "::";
-					currentNamespace += modifiedScript.substr(pos, len);
-					nestedNamespaces++;
-				}
-			} while (t == asTC_IDENTIFIER || (t == asTC_KEYWORD && modifiedScript.substr(pos, len) == "::"));
-			currentNamespaceStack.push_back(nestedNamespaces);
-
-			// Search until first { is encountered
-			while( pos < modifiedScript.length() )
-			{
-				engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-
-				// If start of namespace section encountered stop
-				if( modifiedScript[pos] == '{' )
-				{
-					pos += len;
-					break;
-				}
-
-				// Check next symbol
-				pos += len;
-			}
-
-			continue;
-		}
-
-		// Check if end of namespace
-		if( currentNamespace != "" && token == "}" )
-		{
-			assert(currentNamespaceStack.size() > 0);
-			int nestedNamespaces = currentNamespaceStack[currentNamespaceStack.size()-1];
-			currentNamespaceStack.pop_back();
-			while (nestedNamespaces-- > 0)
-			{
-				size_t found = currentNamespace.rfind("::");
-				if (found != string::npos)
-				{
-					currentNamespace.erase(found);
-				}
-				else
-				{
-					currentNamespace = "";
-				}
-			}
-			pos += len;
-			continue;
-		}
-
-		// Is this the start of metadata?
-		if( token == "[" )
-		{
-			// Get the metadata string
-			pos = ExtractMetadata(pos, metadata);
-
-			// Determine what this metadata is for
-			int type;
-			ExtractDeclaration(pos, name, declaration, type);
-
-			// Store away the declaration in a map for lookup after the build has completed
-			if( type > 0 )
-			{
-				SMetadataDecl decl(metadata, name, declaration, type, currentClass, currentNamespace);
-				foundDeclarations.push_back(decl);
+				text.pos = metaPos;
+				continue;
 			}
 		}
-		else
-#endif
+
 		// Is this a preprocessor directive?
-		if( token == "#" && (pos + 1 < modifiedScript.size()) )
+		if( text.Equals(tok, "#") && (tok.span.pos + 1 < modifiedScript.size()) )
 		{
-			int start = pos++;
-
-			t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-			if (t == asTC_IDENTIFIER)
-			{
-				token.assign(&modifiedScript[pos], len);
-				if (token == "include")
-				{
-					pos += len;
-					t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-					if (t == asTC_WHITESPACE)
-					{
-						pos += len;
-						t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-					}
-
-					if (t == asTC_VALUE && len > 2 && (modifiedScript[pos] == '"' || modifiedScript[pos] == '\''))
-					{
-						// Get the include file
-						string includefile;
-						includefile.assign(&modifiedScript[pos + 1], len - 2);
-						pos += len;
-
-						// Make sure the includeFile doesn't contain any line breaks
-						size_t p = includefile.find('\n');
-						if (p != string::npos)
-						{
-							// TODO: Show the correct line number for the error
-							string str = "Invalid file name for #include; it contains a line-break: '" + includefile.substr(0, p) + "'";
-							engine->WriteMessage(sectionname, 0, 0, asMSGTYPE_ERROR, str.c_str());
-						}
-						else
-						{
-							// Store it for later processing
-							includes.push_back(includefile);
-
-							// Overwrite the include directive with space characters to avoid compiler error
-							OverwriteCode(start, pos - start);
-						}
-					}
-				}
-				else if (token == "pragma")
-				{
-					// Read until the end of the line
-					pos += len;
-					for (; pos < modifiedScript.size() && modifiedScript[pos] != '\n'; pos++);
-
-					// Call the pragma callback
-					string pragmaText(&modifiedScript[start + 7], pos - start - 7);
-					int r = pragmaCallback ? pragmaCallback(pragmaText, *this, pragmaParam) : -1;
-					if (r < 0)
-					{
-						// TODO: Report the correct line number
-						engine->WriteMessage(sectionname, 0, 0, asMSGTYPE_ERROR, "Invalid #pragma directive");
-						return r;
-					}
-
-					// Overwrite the pragma directive with space characters to avoid compiler error
-					OverwriteCode(start, pos - start);
-				}
-			}
-			else
-			{
-				// Check for lines starting with #!, e.g. shebang interpreter directive. These will be treated as comments and removed by the preprocessor
-				if (modifiedScript[pos] == '!')
-				{
-					// Read until the end of the line
-					pos += len;
-					for (; pos < modifiedScript.size() && modifiedScript[pos] != '\n'; pos++);
-
-					// Overwrite the directive with space characters to avoid compiler error
-					OverwriteCode(start, pos - start);
-				}
-			}
+			int r = directive.HandleDirective(text, tok.span.pos, sectionname, flags, owner_);
+			if( r < 0 )
+				return r;
+			errors += r;
+			continue;
 		}
-		// Don't search for metadata/includes within statement blocks or between tokens in statements
-		else
+
+		// Import restriction
+		if( text.Equals(tok, "import") && !(flags & kAllowImport) )
 		{
-			pos = SkipStatement(pos);
+			engine->WriteMessage(sectionname, text.line, 0,
+				asMSGTYPE_ERROR, "Keyword 'import' is not allowed in this section");
+			errors++;
 		}
+
+		// Other declarations: shared insert + visibility annotation
+		decorator.HandleOtherDecl(text, tok, scope, flags);
+
+		text.SkipStatement();
 	}
 
-	// Build the actual script
-	engine->SetEngineProperty(asEP_COPY_SCRIPT_SECTIONS, true);
-	module->AddScriptSection(sectionname, modifiedScript.c_str(), modifiedScript.size(), lineOffset);
+	errors += decorator.errors_;
 
-	if( includes.size() > 0 )
 	{
-		// If the callback has been set, then call it for each included file
-		if( includeCallback )
-		{
-			for( int n = 0; n < (int)includes.size(); n++ )
-			{
-				int r = includeCallback(includes[n].c_str(), sectionname, this, includeParam);
-				if( r < 0 )
-					return r;
-			}
-		}
-		else
-		{
-			// By default we try to load the included file from the relative directory of the current file
-
-			// Determine the path of the current script so that we can resolve relative paths for includes
-			string path = sectionname;
-			size_t posOfSlash = path.find_last_of("/\\");
-			if( posOfSlash != string::npos )
-				path.resize(posOfSlash+1);
-			else
-				path = "";
-
-			// Load the included scripts
-			for( int n = 0; n < (int)includes.size(); n++ )
-			{
-				// If the include is a relative path, then prepend the path of the originating script
-				if( includes[n].find_first_of("/\\") != 0 &&
-					includes[n].find_first_of(":") == string::npos )
-				{
-					includes[n] = path + includes[n];
-				}
-
-				// Include the script section
-				int r = AddSectionFromFile(includes[n].c_str());
-				if( r < 0 )
-					return r;
-			}
-		}
+		int r = directive.ResolveIncludes(sectionname, flags, owner_);
+		if( r < 0 )
+			return r;
 	}
 
-	return 0;
+	return errors > 0 ? -1 : 0;
 }
 
-int CScriptBuilder::Build()
+// ---------------------------------------------------------------------------
+// RemapDebugInfo — fix bytecode debug info to point to original source
+// locations instead of the synthesized splice locations.
+// ---------------------------------------------------------------------------
+
+void SplicePass::RemapDebugInfo(asIScriptModule *module)
 {
-	int r = module->Build();
-	if( r < 0 )
-		return r;
+	if( sourceMap_.empty() ) return;
 
-#if AS_PROCESS_METADATA == 1
-	// After the script has been built, the metadata strings should be
-	// stored for later lookup by function id, type id, and variable index
-	for( int n = 0; n < (int)foundDeclarations.size(); n++ )
+	asCModule *mod = static_cast<asCModule*>(module);
+	asCScriptEngine *eng = mod->m_engine;
+
+	for( asUINT fi = 0; fi < mod->m_scriptFunctions.GetLength(); fi++ )
 	{
-		SMetadataDecl *decl = &foundDeclarations[n];
-		module->SetDefaultNamespace(decl->nameSpace.c_str());
-		if( decl->type == MDT_TYPE )
+		asCScriptFunction *func = mod->m_scriptFunctions[fi];
+		if( !func || !func->scriptData ) continue;
+
+		asCScriptFunction::ScriptFunctionData *sd = func->scriptData;
+
+		// Get the function's default section name
+		string funcSection;
+		if( sd->scriptSectionIdx >= 0 )
+			funcSection = eng->scriptSectionNames[sd->scriptSectionIdx]->AddressOf();
+
+		// Build new sectionIdxs entries — collect them separately so we
+		// don't mutate sectionIdxs while iterating lineNumbers
+		struct SectionEntry { int pos; int idx; };
+		vector<SectionEntry> newEntries;
+
+		// Walk lineNumbers (paired: [bytecodePos, encodedLine, ...])
+		for( asUINT n = 0; n + 1 < sd->lineNumbers.GetLength(); n += 2 )
 		{
-			// Find the type id
-			int typeId = module->GetTypeIdByDecl(decl->declaration.c_str());
-			assert( typeId >= 0 );
-			if( typeId >= 0 )
-				typeMetadataMap.insert(map<int, vector<string> >::value_type(typeId, decl->metadata));
-		}
-		else if( decl->type == MDT_FUNC )
-		{
-			if( decl->parentClass == "" )
+			int encoded = sd->lineNumbers[n + 1];
+			int line = encoded & 0xFFFFF;
+			int col  = encoded >> 20;
+
+			// Check if this line falls in a spliced range
+			// Use the function's default section for the lookup (all bytecode
+			// in a spliced method originally belongs to the synth section)
+			for( size_t mi = 0; mi < sourceMap_.size(); mi++ )
 			{
-				// Find the function id
-				asIScriptFunction *func = module->GetFunctionByDecl(decl->declaration.c_str());
-				assert( func );
-				if( func )
-					funcMetadataMap.insert(map<int, vector<string> >::value_type(func->GetId(), decl->metadata));
-			}
-			else
-			{
-				// Find the method id
-				int typeId = module->GetTypeIdByDecl(decl->parentClass.c_str());
-				assert( typeId > 0 );
-				map<int, SClassMetadata>::iterator it = classMetadataMap.find(typeId);
-				if( it == classMetadataMap.end() )
+				const SourceMapping &mapping = sourceMap_[mi];
+				if( mapping.synthSection == funcSection &&
+				    line >= mapping.synthLineStart &&
+				    line <= mapping.synthLineEnd )
 				{
-					classMetadataMap.insert(map<int, SClassMetadata>::value_type(typeId, SClassMetadata(decl->parentClass)));
-					it = classMetadataMap.find(typeId);
-				}
+					int offset = line - mapping.synthLineStart;
+					int newLine = mapping.origLine + offset;
+					sd->lineNumbers[n + 1] = (newLine & 0xFFFFF) | (col << 20);
 
-				asITypeInfo *type = engine->GetTypeInfoById(typeId);
-				asIScriptFunction *func = type->GetMethodByDecl(decl->declaration.c_str());
-				assert( func );
-				if( func )
-					it->second.funcMetadataMap.insert(map<int, vector<string> >::value_type(func->GetId(), decl->metadata));
-			}
-		}
-		else if( decl->type == MDT_VIRTPROP )
-		{
-			if( decl->parentClass == "" )
-			{
-				// Find the global virtual property accessors
-				asIScriptFunction *func = module->GetFunctionByName(("get_" + decl->declaration).c_str());
-				if( func )
-					funcMetadataMap.insert(map<int, vector<string> >::value_type(func->GetId(), decl->metadata));
-				func = module->GetFunctionByName(("set_" + decl->declaration).c_str());
-				if( func )
-					funcMetadataMap.insert(map<int, vector<string> >::value_type(func->GetId(), decl->metadata));
-			}
-			else
-			{
-				// Find the method virtual property accessors
-				int typeId = module->GetTypeIdByDecl(decl->parentClass.c_str());
-				assert( typeId > 0 );
-				map<int, SClassMetadata>::iterator it = classMetadataMap.find(typeId);
-				if( it == classMetadataMap.end() )
-				{
-					classMetadataMap.insert(map<int, SClassMetadata>::value_type(typeId, SClassMetadata(decl->parentClass)));
-					it = classMetadataMap.find(typeId);
-				}
-
-				asITypeInfo *type = engine->GetTypeInfoById(typeId);
-				asIScriptFunction *func = type->GetMethodByName(("get_" + decl->declaration).c_str());
-				if( func )
-					it->second.funcMetadataMap.insert(map<int, vector<string> >::value_type(func->GetId(), decl->metadata));
-				func = type->GetMethodByName(("set_" + decl->declaration).c_str());
-				if( func )
-					it->second.funcMetadataMap.insert(map<int, vector<string> >::value_type(func->GetId(), decl->metadata));
-			}
-		}
-		else if( decl->type == MDT_VAR )
-		{
-			if( decl->parentClass == "" )
-			{
-				// Find the global variable index
-				int varIdx = module->GetGlobalVarIndexByName(decl->declaration.c_str());
-				assert( varIdx >= 0 );
-				if( varIdx >= 0 )
-					varMetadataMap.insert(map<int, vector<string> >::value_type(varIdx, decl->metadata));
-			}
-			else
-			{
-				int typeId = module->GetTypeIdByDecl(decl->parentClass.c_str());
-				assert( typeId > 0 );
-
-				// Add the classes if needed
-				map<int, SClassMetadata>::iterator it = classMetadataMap.find(typeId);
-				if( it == classMetadataMap.end() )
-				{
-					classMetadataMap.insert(map<int, SClassMetadata>::value_type(typeId, SClassMetadata(decl->parentClass)));
-					it = classMetadataMap.find(typeId);
-				}
-
-				// Add the variable to class
-				asITypeInfo *objectType = engine->GetTypeInfoById(typeId);
-				int idx = -1;
-
-				// Search through all properties to get proper declaration
-				for( asUINT i = 0; i < (asUINT)objectType->GetPropertyCount(); ++i )
-				{
-					const char *name;
-					objectType->GetProperty(i, &name);
-					if( decl->declaration == name )
-					{
-						idx = i;
-						break;
-					}
-				}
-
-				// If found, add it
-				assert( idx >= 0 );
-				if( idx >= 0 ) it->second.varMetadataMap.insert(map<int, vector<string> >::value_type(idx, decl->metadata));
-			}
-		}
-		else if (decl->type == MDT_FUNC_OR_VAR)
-		{
-			if (decl->parentClass == "")
-			{
-				// Find the global variable index
-				int varIdx = module->GetGlobalVarIndexByName(decl->name.c_str());
-				if (varIdx >= 0)
-					varMetadataMap.insert(map<int, vector<string> >::value_type(varIdx, decl->metadata));
-				else
-				{
-					asIScriptFunction *func = module->GetFunctionByDecl(decl->declaration.c_str());
-					assert(func);
-					if (func)
-						funcMetadataMap.insert(map<int, vector<string> >::value_type(func->GetId(), decl->metadata));
-				}
-			}
-			else
-			{
-				int typeId = module->GetTypeIdByDecl(decl->parentClass.c_str());
-				assert(typeId > 0);
-
-				// Add the classes if needed
-				map<int, SClassMetadata>::iterator it = classMetadataMap.find(typeId);
-				if (it == classMetadataMap.end())
-				{
-					classMetadataMap.insert(map<int, SClassMetadata>::value_type(typeId, SClassMetadata(decl->parentClass)));
-					it = classMetadataMap.find(typeId);
-				}
-
-				// Add the variable to class
-				asITypeInfo *objectType = engine->GetTypeInfoById(typeId);
-				int idx = -1;
-
-				// Search through all properties to get proper declaration
-				for (asUINT i = 0; i < (asUINT)objectType->GetPropertyCount(); ++i)
-				{
-					const char *name;
-					objectType->GetProperty(i, &name);
-					if (decl->name == name)
-					{
-						idx = i;
-						break;
-					}
-				}
-
-				// If found, add it
-				if (idx >= 0) 
-					it->second.varMetadataMap.insert(map<int, vector<string> >::value_type(idx, decl->metadata));
-				else
-				{
-					// Look for the matching method instead
-					asITypeInfo *type = engine->GetTypeInfoById(typeId);
-					asIScriptFunction *func = type->GetMethodByDecl(decl->declaration.c_str());
-					if (func)
-						it->second.funcMetadataMap.insert(map<int, vector<string> >::value_type(func->GetId(), decl->metadata));
-				}
-			}
-		}
-	}
-	module->SetDefaultNamespace("");
-#endif
-
-	return 0;
-}
-
-int CScriptBuilder::SkipStatement(int pos)
-{
-	asUINT len = 0;
-
-	// Skip until ; or { whichever comes first
-	while( pos < (int)modifiedScript.length() && modifiedScript[pos] != ';' && modifiedScript[pos] != '{' )
-	{
-		engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-		pos += len;
-	}
-
-	// Skip entire statement block
-	if( pos < (int)modifiedScript.length() && modifiedScript[pos] == '{' )
-	{
-		pos += 1;
-
-		// Find the end of the statement block
-		int level = 1;
-		while( level > 0 && pos < (int)modifiedScript.size() )
-		{
-			asETokenClass t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-			if( t == asTC_KEYWORD )
-			{
-				if( modifiedScript[pos] == '{' )
-					level++;
-				else if( modifiedScript[pos] == '}' )
-					level--;
-			}
-
-			pos += len;
-		}
-	}
-	else
-		pos += 1;
-
-	return pos;
-}
-
-// Overwrite all code with blanks until the matching #endif
-int CScriptBuilder::ExcludeCode(int pos)
-{
-	asUINT len = 0;
-	int nested = 0;
-	while( pos < (int)modifiedScript.size() )
-	{
-		engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-		if( modifiedScript[pos] == '#' )
-		{
-			modifiedScript[pos] = ' ';
-			pos++;
-
-			// Is it an #if or #endif directive?
-			engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-			string token;
-			token.assign(&modifiedScript[pos], len);
-			OverwriteCode(pos, len);
-
-			if( token == "if" )
-			{
-				nested++;
-			}
-			else if( token == "endif" )
-			{
-				if( nested-- == 0 )
-				{
-					pos += len;
+					int origSecIdx = eng->GetScriptSectionNameIndex(mapping.origSection.c_str());
+					SectionEntry se;
+					se.pos = sd->lineNumbers[n];
+					se.idx = origSecIdx;
+					newEntries.push_back(se);
 					break;
 				}
 			}
 		}
-		else if( modifiedScript[pos] != '\n' )
+
+		// Apply collected section index entries
+		for( size_t i = 0; i < newEntries.size(); i++ )
 		{
-			OverwriteCode(pos, len);
-		}
-		pos += len;
-	}
-
-	return pos;
-}
-
-// Overwrite all characters except line breaks with blanks
-void CScriptBuilder::OverwriteCode(int start, int len)
-{
-	char *code = &modifiedScript[start];
-	for( int n = 0; n < len; n++ )
-	{
-		if( *code != '\n' )
-			*code = ' ';
-		code++;
-	}
-}
-
-#if AS_PROCESS_METADATA == 1
-int CScriptBuilder::ExtractMetadata(int pos, vector<string> &metadata)
-{
-	metadata.clear();
-
-	// Extract all metadata. They can be separated by whitespace and comments
-	for (;;)
-	{
-		string metadataString = "";
-
-		// Overwrite the metadata with space characters to allow compilation
-		modifiedScript[pos] = ' ';
-
-		// Skip opening brackets
-		pos += 1;
-
-		int level = 1;
-		asUINT len = 0;
-		while (level > 0 && pos < (int)modifiedScript.size())
-		{
-			asETokenClass t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-			if (t == asTC_KEYWORD)
-			{
-				if (modifiedScript[pos] == '[')
-					level++;
-				else if (modifiedScript[pos] == ']')
-					level--;
-			}
-
-			// Copy the metadata to our buffer
-			if (level > 0)
-				metadataString.append(&modifiedScript[pos], len);
-
-			// Overwrite the metadata with space characters to allow compilation
-			if (t != asTC_WHITESPACE)
-				OverwriteCode(pos, len);
-
-			pos += len;
+			sd->sectionIdxs.PushLast(newEntries[i].pos);
+			sd->sectionIdxs.PushLast(newEntries[i].idx);
 		}
 
-		metadata.push_back(metadataString);
-
-		// Check for more metadata. Possibly separated by comments
-		asETokenClass t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-		while (t == asTC_COMMENT || t == asTC_WHITESPACE)
+		// Sort sectionIdxs by bytecode position so GetLineNumber's
+		// linear scan works correctly
+		for( asUINT a = 0; a + 3 < sd->sectionIdxs.GetLength(); a += 2 )
 		{
-			pos += len;
-			t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-		}
-
-		if (modifiedScript[pos] != '[')
-			break;
-	}
-
-	return pos;
-}
-
-int CScriptBuilder::ExtractDeclaration(int pos, string &name, string &declaration, int &type)
-{
-	declaration = "";
-	type = 0;
-
-	int start = pos;
-
-	std::string token;
-	asUINT len = 0;
-	asETokenClass t = asTC_WHITESPACE;
-
-	// Skip white spaces, comments, and leading decorators
-	do
-	{
-		pos += len;
-		t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-		token.assign(&modifiedScript[pos], len);
-	} while ( t == asTC_WHITESPACE || t == asTC_COMMENT || 
-	          token == "private" || token == "protected" || 
-	          token == "shared" || token == "external" || 
-	          token == "final" || token == "abstract" );
-
-	// We're expecting, either a class, interface, function, or variable declaration
-	if( t == asTC_KEYWORD || t == asTC_IDENTIFIER )
-	{
-		token.assign(&modifiedScript[pos], len);
-		if( token == "interface" || token == "class" || token == "enum" )
-		{
-			// Skip white spaces and comments
-			do
+			for( asUINT b = a + 2; b + 1 < sd->sectionIdxs.GetLength(); b += 2 )
 			{
-				pos += len;
-				t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-			} while ( t == asTC_WHITESPACE || t == asTC_COMMENT );
-
-			if( t == asTC_IDENTIFIER )
-			{
-				type = MDT_TYPE;
-				declaration.assign(&modifiedScript[pos], len);
-				pos += len;
-				return pos;
-			}
-		}
-		else
-		{
-			// For function declarations, store everything up to the start of the 
-			// statement block, except for succeeding decorators (final, override, etc)
-
-			// For variable declaration store just the name as there can only be one
-
-			// We'll only know if the declaration is a variable or function declaration
-			// when we see the statement block, or absense of a statement block.
-			bool hasParenthesis = false;
-			int nestedParenthesis = 0;
-			declaration.append(&modifiedScript[pos], len);
-			pos += len;
-			for(; pos < (int)modifiedScript.size();)
-			{
-				t = engine->ParseToken(&modifiedScript[pos], modifiedScript.size() - pos, &len);
-				token.assign(&modifiedScript[pos], len);
-				if (t == asTC_KEYWORD)
+				if( sd->sectionIdxs[b] < sd->sectionIdxs[a] )
 				{
-					if (token == "{" && nestedParenthesis == 0)
-					{
-						if (hasParenthesis)
-						{
-							// We've found the end of a function signature
-							type = MDT_FUNC;
-						}
-						else
-						{
-							// We've found a virtual property. Just keep the name
-							declaration = name;
-							type = MDT_VIRTPROP;
-						}
-						return pos;
-					}
-					if ((token == "=" && !hasParenthesis) || token == ";")
-					{
-						if (hasParenthesis)
-						{
-							// The declaration is ambigous. It can be a variable with initialization, or a function prototype
-							type = MDT_FUNC_OR_VAR;
-						}
-						else
-						{
-							// Substitute the declaration with just the name
-							declaration = name;
-							type = MDT_VAR;
-						}
-						return pos;
-					}
-					else if (token == "(")
-					{
-						nestedParenthesis++;
-
-						// This is the first parenthesis we encounter. If the parenthesis isn't followed
-						// by a statement block, then this is a variable declaration, in which case we
-						// should only store the type and name of the variable, not the initialization parameters.
-						hasParenthesis = true;
-					}
-					else if (token == ")")
-					{
-						nestedParenthesis--;
-					}
+					int tmpPos = sd->sectionIdxs[a];
+					int tmpIdx = sd->sectionIdxs[a + 1];
+					sd->sectionIdxs[a]     = sd->sectionIdxs[b];
+					sd->sectionIdxs[a + 1] = sd->sectionIdxs[b + 1];
+					sd->sectionIdxs[b]     = tmpPos;
+					sd->sectionIdxs[b + 1] = tmpIdx;
 				}
-				else if( t == asTC_IDENTIFIER )
-				{
-					// If a parenthesis is already found then the name is already known so it must not be overwritten
-					if( !hasParenthesis )
-						name = token;
-				}
-
-				// Skip trailing decorators
-				if( !hasParenthesis || nestedParenthesis > 0 || t != asTC_IDENTIFIER || (token != "final" && token != "override" && token != "delete" && token != "property"))
-					declaration += token;
-
-				pos += len;
 			}
 		}
 	}
-
-	return start;
 }
 
-vector<string> CScriptBuilder::GetMetadataForType(int typeId)
+void CScriptBuilder::Impl::InternalMessageCallback(const asSMessageInfo *msg, void *param)
 {
-	map<int,vector<string> >::iterator it = typeMetadataMap.find(typeId);
-	if( it != typeMetadataMap.end() )
-		return it->second;
+	Impl *self = static_cast<Impl*>(param);
+	if( !self->msgCallback ) return;
 
-	return vector<string>();
-}
+	asSMessageInfo translated;
+	translated.section = msg->section;
+	translated.row     = msg->row;
+	translated.col     = msg->col;
+	translated.type    = msg->type;
+	translated.message = msg->message;
 
-vector<string> CScriptBuilder::GetMetadataForFunc(asIScriptFunction *func)
-{
-	if( func )
+	string translatedSection;
+
+	const vector<SourceMapping> &sourceMap = self->splice.GetSourceMap();
+	for( size_t i = 0; i < sourceMap.size(); i++ )
 	{
-		map<int,vector<string> >::iterator it = funcMetadataMap.find(func->GetId());
-		if( it != funcMetadataMap.end() )
-			return it->second;
-	}
-
-	return vector<string>();
-}
-
-vector<string> CScriptBuilder::GetMetadataForVar(int varIdx)
-{
-	map<int,vector<string> >::iterator it = varMetadataMap.find(varIdx);
-	if( it != varMetadataMap.end() )
-		return it->second;
-
-	return vector<string>();
-}
-
-vector<string> CScriptBuilder::GetMetadataForTypeProperty(int typeId, int varIdx)
-{
-	map<int, SClassMetadata>::iterator typeIt = classMetadataMap.find(typeId);
-	if(typeIt == classMetadataMap.end()) return vector<string>();
-
-	map<int, vector<string> >::iterator propIt = typeIt->second.varMetadataMap.find(varIdx);
-	if(propIt == typeIt->second.varMetadataMap.end()) return vector<string>();
-
-	return propIt->second;
-}
-
-vector<string> CScriptBuilder::GetMetadataForTypeMethod(int typeId, asIScriptFunction *method)
-{
-	if( method )
-	{
-		map<int, SClassMetadata>::iterator typeIt = classMetadataMap.find(typeId);
-		if (typeIt == classMetadataMap.end()) return vector<string>();
-
-		map<int, vector<string> >::iterator methodIt = typeIt->second.funcMetadataMap.find(method->GetId());
-		if(methodIt == typeIt->second.funcMetadataMap.end()) return vector<string>();
-
-		return methodIt->second;
-	}
-
-	return vector<string>();
-}
-#endif
-
-string GetAbsolutePath(const string &file)
-{
-	string str = file;
-
-	// If this is a relative path, complement it with the current path
-	if( !((str.length() > 0 && (str[0] == '/' || str[0] == '\\')) ||
-		  str.find(":") != string::npos) )
-	{
-		str = GetCurrentDir() + "/" + str;
-	}
-
-	// Replace backslashes for forward slashes
-	size_t pos = 0;
-	while( (pos = str.find("\\", pos)) != string::npos )
-		str[pos] = '/';
-
-	// Replace /./ with /
-	pos = 0;
-	while( (pos = str.find("/./", pos)) != string::npos )
-		str.erase(pos+1, 2);
-
-	// For each /../ remove the parent dir and the /../
-	pos = 0;
-	while( (pos = str.find("/../")) != string::npos )
-	{
-		size_t pos2 = str.rfind("/", pos-1);
-		if( pos2 != string::npos )
-			str.erase(pos2, pos+3-pos2);
-		else
+		const SourceMapping &mapping = sourceMap[i];
+		if( mapping.synthSection == msg->section &&
+		    msg->row >= mapping.synthLineStart &&
+		    msg->row <= mapping.synthLineEnd )
 		{
-			// The path is invalid
+			int offset = msg->row - mapping.synthLineStart;
+			translatedSection = mapping.origSection;
+			translated.section = translatedSection.c_str();
+			translated.row = mapping.origLine + offset;
 			break;
 		}
 	}
 
-	return str;
+	self->msgCallback(&translated, self->msgParam);
 }
 
-string GetCurrentDir()
+// ---------------------------------------------------------------------------
+// BuildLibrarySurface
+// ---------------------------------------------------------------------------
+
+string BuildLibrarySurface(asIScriptModule *lib,
+	bool (*isPublicType)(asITypeInfo*),
+	bool (*isPublicFunc)(asIScriptFunction*))
 {
-	char buffer[1024];
-#if defined(_MSC_VER) || defined(_WIN32)
-	#ifdef _WIN32_WCE
-	static TCHAR apppath[MAX_PATH] = TEXT("");
-	if (!apppath[0])
+	asIScriptEngine *eng = lib->GetEngine();
+	set<string> funcdefDecls;
+	string out;
+
+	// Shared classes and interfaces
+	for( asUINT i = 0; i < lib->GetObjectTypeCount(); i++ )
 	{
-		GetModuleFileName(NULL, apppath, MAX_PATH);
+		asITypeInfo *type = lib->GetObjectTypeByIndex(i);
+		if( !(type->GetFlags() & asOBJ_SHARED) ) continue;
+		if( !(type->GetFlags() & asOBJ_SCRIPT_OBJECT) ) continue;
+		if( isPublicType && !isPublicType(type) ) continue;
 
-		int appLen = _tcslen(apppath);
+		for( asUINT m = 0; m < type->GetMethodCount(); m++ )
+			CollectFuncdefDeps(eng, type->GetMethodByIndex(m), funcdefDecls);
 
-		// Look for the last backslash in the path, which would be the end
-		// of the path itself and the start of the filename.  We only want
-		// the path part of the exe's full-path filename
-		// Safety is that we make sure not to walk off the front of the
-		// array (in case the path is nothing more than a filename)
-		while (appLen > 1)
-		{
-			if (apppath[appLen-1] == TEXT('\\'))
-				break;
-			appLen--;
-		}
-
-		// Terminate the string after the trailing backslash
-		apppath[appLen] = TEXT('\0');
+		bool isInterface = (type->GetSize() == 0);
+		if( isInterface )
+			out += "external shared interface ";
+		else
+			out += "external shared class ";
+		out += type->GetName();
+		out += ";\n";
 	}
-		#ifdef _UNICODE
-	wcstombs(buffer, apppath, min(1024, wcslen(apppath)*sizeof(wchar_t)));
-		#else
-	memcpy(buffer, apppath, min(1024, strlen(apppath)));
-		#endif
 
-	return buffer;
-	#elif defined(__S3E__)
-	// Marmalade uses its own portable C library
-	return getcwd(buffer, (int)1024);
-	#elif _XBOX_VER >= 200
-	// XBox 360 doesn't support the getcwd function, just use the root folder
-	return "game:/";
-	#elif defined(_M_ARM)
-	// TODO: How to determine current working dir on Windows Phone?
-	return "";
-	#else
-	return _getcwd(buffer, (int)1024);
-	#endif // _MSC_VER
-#elif defined(__APPLE__) || defined(__linux__)
-	return getcwd(buffer, 1024);
-#else
-	return "";
-#endif
+	// Shared enums
+	for( asUINT i = 0; i < lib->GetEnumCount(); i++ )
+	{
+		asITypeInfo *type = lib->GetEnumByIndex(i);
+		if( !(type->GetFlags() & asOBJ_SHARED) ) continue;
+		if( isPublicType && !isPublicType(type) ) continue;
+
+		out += "external shared enum ";
+		out += type->GetName();
+		out += ";\n";
+	}
+
+	// Shared global functions
+	for( asUINT i = 0; i < lib->GetFunctionCount(); i++ )
+	{
+		asIScriptFunction *func = lib->GetFunctionByIndex(i);
+		if( !func->IsShared() ) continue;
+		if( func->GetObjectType() ) continue;
+		if( isPublicFunc && !isPublicFunc(func) ) continue;
+
+		CollectFuncdefDeps(eng, func, funcdefDecls);
+
+		out += "external shared ";
+		out += func->GetDeclaration(false, false, true);
+		out += ";\n";
+	}
+
+	// Prepend funcdef declarations
+	string result;
+	for( set<string>::iterator it = funcdefDecls.begin();
+	     it != funcdefDecls.end(); ++it )
+	{
+		result += *it;
+	}
+	result += out;
+
+	return result;
 }
 
 END_AS_NAMESPACE
-
-
