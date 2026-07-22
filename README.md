@@ -156,6 +156,28 @@ The full design/implementation record for this hardening pass lives in the
 engine repository at
 `docs/superpowers/plans/2026-07-22-as-halting-analysis-hardening.md`.
 
+## Building and testing
+
+This repo is a standalone CMake project (the vanilla `sdk/angelscript/projects/cmake`
+subproject plus a `tests/` gtest suite; system GTest 1.14+ required):
+
+```bash
+cmake -B <build-dir> -S /mnt/Passport/Libraries/svn/angelscript-code -DCMAKE_BUILD_TYPE=Debug
+cmake --build <build-dir> -j8
+ctest --test-dir <build-dir> --output-on-failure
+```
+
+`<build-dir>` must live on a native (ext4) filesystem, not under `/mnt/Passport`
+itself — that drive is NTFS via `ntfs-3g`/fuseblk, which cannot carry the
+executable bit, so a build directory placed on it produces object/binary files
+that fail to run (`ctest`/`gtest_discover_tests` sees "Permission denied").
+This is the same constraint the engine's `scripts/wt-build.sh` works around by
+building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
+`/home/anyuser/Developer/Build/angelscript-fork`.
+
+All `AsHalting.*` tests (currently 30) should pass; this is the suite every
+later halting-analysis change adds to, in `tests/test_as_halting.cpp`.
+
 ## Branch layout
 
 - **`master`** — the working fork. Edit, commit, and push here.
@@ -172,7 +194,12 @@ engine repository at
    `/mnt/Passport/Libraries/svn/next-version` and commit it there.
 2. Diff/merge the new vanilla tree against `our-upstream` to carry the fork's
    modifications (this README's "Changes vs upstream" section, `sdk/patch.md`,
-   and the halting-analysis hardening plan) forward onto the new base.
+   and the halting-analysis hardening plan) forward onto the new base. The
+   gtest suite cannot run against raw vanilla — vanilla lacks `GetLocalHalts`
+   and the rest of the halting-analysis API the tests exercise — so build and
+   run the suite (see "Building and testing" above) in the `our-upstream`
+   worktree itself, after carrying the fork's changes onto the new base and
+   before merging `our-upstream` into `master`.
 3. Re-merge the updated `our-upstream` into `master`.
 
 ### Line endings
