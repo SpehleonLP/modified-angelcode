@@ -203,6 +203,8 @@ protected:
 
 	asCScriptEngine *engine;
 	asCModule       *module;
+	asDWORD         *m_accessMaskAccumulator;  // points to compiler's accumulator during compilation
+	asDWORD         *m_missedAccessMaskAccumulator; // name-matches-but-mask-rejects accumulator for enriched diagnostics
 	asCMap<asSNameSpace*, asCArray<asSNameSpace*>>    namespaceVisibility;
 
 #ifndef AS_NO_COMPILER
@@ -249,7 +251,7 @@ protected:
 	int                GetEnumValueFromType(asCEnumType *type, const char *name, asCDataType &outDt, asDWORD &outValue);
 	int                GetEnumValue(const char *name, asCDataType &outDt, asDWORD &outValue, asSNameSpace *ns);
 	bool               DoesTypeExist(const asCString &type);
-	asCObjectProperty *GetObjectProperty(asCDataType &obj, const char *prop);
+	asCObjectProperty *GetObjectProperty(asCDataType &obj, const char *prop, asDWORD *outMaskedAccessMask = 0);
 	asCScriptFunction *GetFunctionDescription(int funcId);
 	void               GetFunctionDescriptions(const char *name, asCArray<int> &funcs, asSNameSpace *ns);
 	void               GetObjectMethodDescriptions(const char *name, asCObjectType *objectType, asCArray<int> &methods, bool objIsConst, const asCString &scope = "", asCScriptNode *errNode = 0, asCScriptCode *script = 0);

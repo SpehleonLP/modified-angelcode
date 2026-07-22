@@ -836,7 +836,10 @@ int CallSystemFunction(int id, asCContext *context)
 			if (sysFunc->returnAutoHandle && context->m_regs.objectRegister)
 			{
 				asASSERT(!(descr->returnType.GetTypeInfo()->flags & asOBJ_NOCOUNT));
-				engine->CallObjectMethod(context->m_regs.objectRegister, CastToObjectType(descr->returnType.GetTypeInfo())->beh.addref);
+				asCObjectType *retObjType = CastToObjectType(descr->returnType.GetTypeInfo());
+				void *refObj = engine->ResolveForRefCount(context->m_regs.objectRegister, retObjType);
+				if (refObj)
+					engine->CallObjectMethod(refObj, retObjType->beh.addref);
 			}
 		}
 		else if (retPointer)
@@ -969,7 +972,9 @@ int CallSystemFunction(int id, asCContext *context)
 			{
 				if( *addr != 0 )
 				{
-					engine->CallObjectMethod(*addr, clean->ot->beh.release);
+					void *refObj = engine->ResolveForRefCount(*addr, clean->ot);
+					if (refObj)
+						engine->CallObjectMethod(refObj, clean->ot->beh.release);
 					*addr = 0;
 				}
 			}

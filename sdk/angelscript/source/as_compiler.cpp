@@ -95,6 +95,14 @@ asCCompiler::asCCompiler(asCScriptEngine *engine) : byteCode(engine)
 
 asCCompiler::~asCCompiler()
 {
+	// Reset() pointed builder->m_accessMaskAccumulator at our m_usedAccessMask
+	// member. Clear it before the member's storage disappears, or the builder
+	// will dereference a dangling stack address on its next access check.
+	if( builder && builder->m_accessMaskAccumulator == &m_usedAccessMask )
+	{
+		builder->m_accessMaskAccumulator = nullptr;
+	}
+
 	while( variables )
 	{
 		asCVariableScope *var = variables;
@@ -122,6 +130,12 @@ void asCCompiler::Reset(asCBuilder *in_builder, asCScriptCode *in_script, asCScr
 	this->outFunc = in_outFunc;
 
 	hasCompileErrors = false;
+
+	m_usedAccessMask = 0;
+	if (builder)
+	{
+		builder->m_accessMaskAccumulator = &m_usedAccessMask;
+	}
 
 	m_isConstructor       = false;
 	m_isConstructorCalled = false;
@@ -454,6 +468,56 @@ void asCCompiler::FinalizeFunction()
 	outFunc->scriptData->byteCode.SetLength(byteCode.GetSize());
 	byteCode.Output(outFunc->scriptData->byteCode.AddressOf());
 	outFunc->AddReferences();
+	outFunc->minLocalAccessMask = m_usedAccessMask;
+
+	// --- Halting analysis ---
+	{
+		asDWORD *bc = outFunc->scriptData->byteCode.AddressOf();
+		asUINT bcLen = (asUINT)outFunc->scriptData->byteCode.GetLength();
+
+		bool hasBackwardJump = false;
+		bool hasConditionalBackwardJump = false;
+		bool hasConditionalJump = false;
+
+		for (asUINT n = 0; n < bcLen; )
+		{
+			asBYTE op = *(asBYTE*)&bc[n];
+			int instrSize = asBCTypeSize[asBCInfo[op].type];
+			if (instrSize == 0) break;
+
+			if (op == asBC_JMP)
+			{
+				int offset = asBC_INTARG(&bc[n]);
+				int target = (int)n + instrSize + offset;
+				if (target <= (int)n)
+				{
+					hasBackwardJump = true;
+				}
+			}
+			else if (op == asBC_JZ || op == asBC_JNZ ||
+			         op == asBC_JS || op == asBC_JNS ||
+			         op == asBC_JP || op == asBC_JNP)
+			{
+				int offset = asBC_INTARG(&bc[n]);
+				int target = (int)n + instrSize + offset;
+				hasConditionalJump = true;
+				if (target <= (int)n)
+				{
+					hasConditionalBackwardJump = true;
+				}
+			}
+
+			n += instrSize;
+		}
+
+		if (!hasBackwardJump && !hasConditionalBackwardJump)
+			outFunc->localHalts = asHALTS_YES;
+		else if (hasBackwardJump && !hasConditionalJump)
+			outFunc->localHalts = asHALTS_NO;    // unconditional backward jump, no conditional jumps at all
+		else
+			outFunc->localHalts = asHALTS_UNKNOWN;
+	}
+
 	outFunc->scriptData->stackNeeded = byteCode.largestStackUsed + outFunc->scriptData->variableSpace;
 	outFunc->scriptData->lineNumbers = byteCode.lineNumbers;
 
@@ -3023,24 +3087,21 @@ bool asCCompiler::CompileAutoType(asCDataType &type, asCExprContext &compiledCtx
 			// Must not have unused ambiguous names
 			if (compiledCtx.IsClassMethod() || compiledCtx.IsGlobalFunc())
 			{
-				// TODO: Should mention that the problem is the ambiguous name
-				Error(TXT_CANNOT_RESOLVE_AUTO, errNode);
+				Error(TXT_CANNOT_RESOLVE_AUTO_AMBIGUOUS, errNode);
 				return false;
 			}
 
 			// Must not have unused anonymous functions
 			if (compiledCtx.IsLambda())
 			{
-				// TODO: Should mention that the problem is the anonymous function
-				Error(TXT_CANNOT_RESOLVE_AUTO, errNode);
+				Error(TXT_CANNOT_RESOLVE_AUTO_LAMBDA, errNode);
 				return false;
 			}
 
 			// Must not be a null handle
 			if (compiledCtx.type.dataType.IsNullHandle())
 			{
-				// TODO: Should mention that the problem is the null pointer
-				Error(TXT_CANNOT_RESOLVE_AUTO, errNode);
+				Error(TXT_CANNOT_RESOLVE_AUTO_NULL, errNode);
 				return false;
 			}
 
@@ -4857,7 +4918,7 @@ void asCCompiler::CompileIfStatement(asCScriptNode *inode, bool *hasReturn, asCB
 				// Jump to the else case
 				bc->InstrINT(asBC_JMP, afterLabel);
 
-				// TODO: Should we warn that the expression will always go to the else?
+				Warning(TXT_UNREACHABLE_CODE, inode->firstChild->next);
 			}
 		}
 	}
@@ -7808,6 +7869,11 @@ asUINT asCCompiler::ImplicitConvObjectToPrimitive(asCExprContext *ctx, const asC
 		if( generateCode )
 		{
 			Dereference(ctx, true);
+			if( ot && ot->resolveHandle )                                                                                               
+			{                                                                                                                           
+				ctx->bc.InstrPTR(asBC_ResolveHandleV, ot);                                                                                
+				ctx->bc.Instr(asBC_CHKREF);                                                                                               
+			}    
 			PerformFunctionCall(funcId, ctx);
 		}
 		else
@@ -8085,7 +8151,13 @@ asUINT asCCompiler::ImplicitConvObjectValue(asCExprContext *ctx, const asCDataTy
 			if( generateCode )
 			{
 				Dereference(ctx, true);
-
+				
+				if( ot && ot->resolveHandle )                                                                                               
+				{                                                                                                                           
+					ctx->bc.InstrPTR(asBC_ResolveHandleV, ot);                                                                                
+					ctx->bc.Instr(asBC_CHKREF);                                                                                               
+				}    
+				
 				bool useVariable = false;
 				int  stackOffset = 0;
 
@@ -8364,6 +8436,11 @@ asUINT asCCompiler::ImplicitConvObjectToObject(asCExprContext *ctx, const asCDat
 					e.bc.InstrSHORT(asBC_VAR, (short)tempObj.stackOffset);
 
 				PrepareFunctionCall(funcs[0], &e.bc, args);
+				if (builder->GetFunctionDescription(funcs[0])->IsVariadic())
+				{
+					// Argument count
+					e.bc.InstrDWORD(asBC_PshC4, (asDWORD)args.GetLength());
+				}
 				MoveArgsToStack(funcs[0], &e.bc, args, false);
 
 				// If the object is allocated on the stack, then call the constructor as a normal function
@@ -8887,6 +8964,11 @@ asUINT asCCompiler::ImplicitConvPrimitiveToObject(asCExprContext *ctx, const asC
 	}
 
 	PrepareFunctionCall(funcs[0], &ctx->bc, args);
+	if (builder->GetFunctionDescription(funcs[0])->IsVariadic())
+	{
+		// Argument count
+		ctx->bc.InstrDWORD(asBC_PshC4, (asDWORD)args.GetLength());
+	}
 	MoveArgsToStack(funcs[0], &ctx->bc, args, false);
 
 	if( !(objType->flags & asOBJ_REF) )
@@ -10589,14 +10671,26 @@ asCCompiler::SYMBOLTYPE asCCompiler::SymbolLookupMember(const asCString &name, a
 
 	// If it is not a property, it may still be the name of a method
 	asCObjectType *ot = objType;
+	asCScriptFunction * candidate = 0L;
 	for (asUINT n = 0; n < ot->methods.GetLength(); n++)
 	{
 		asCScriptFunction *f = engine->scriptFunctions[ot->methods[n]];
-		if (f->name == name &&
-			(builder->module->m_accessMask & f->accessMask))
+		if (f->name == name)
 		{
-			outResult->type.dataType.SetTypeInfo(objType);
-			return SL_CLASSMETHOD;
+			if((builder->module->m_accessMask & f->accessMask) == false)
+				candidate = f;
+			else
+			{
+				// Skip accumulating for methods on script-defined classes — those inherit the
+				// module's default accessMask (0xFFFFFFFF), which is visibility metadata, not a
+				// runtime category. Their real usage flows via call-graph transitive propagation.
+				if (objType->module == nullptr && !(objType->flags & asOBJ_SCRIPT_OBJECT))
+				{
+					m_usedAccessMask |= f->accessMask;
+				}
+				outResult->type.dataType.SetTypeInfo(objType);
+				return SL_CLASSMETHOD;
+			}
 		}
 	}
 
@@ -10608,6 +10702,16 @@ asCCompiler::SYMBOLTYPE asCCompiler::SymbolLookupMember(const asCString &name, a
 			outResult->type.dataType.SetTypeInfo(objType);
 			return SL_CLASSTYPE;
 		}
+	}
+	
+	
+	if(candidate)
+	{
+		asCString msg;
+		asCString smbl;
+		
+		msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, name.AddressOf(), candidate->accessMask, builder->module ? builder->module->m_accessMask : 0);
+		builder->WriteError(script->name, msg, 0, 0);
 	}
 
 	return SL_NOMATCH;
@@ -11000,8 +11104,12 @@ asCCompiler::SYMBOLTYPE asCCompiler::SymbolLookup(const asCString &name, const a
 
 int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &scope, asCExprContext *ctx, asCScriptNode *errNode, bool isOptional, asCObjectType *objType)
 {
+	asDWORD missedAccessMask = 0;
+	asDWORD *prevMissedAccumulator = builder->m_missedAccessMaskAccumulator;
+	builder->m_missedAccessMaskAccumulator = &missedAccessMask;
 	asCExprContext lookupResult(engine);
 	SYMBOLTYPE symbolType = SymbolLookup(name, scope, objType, &lookupResult, errNode);
+	builder->m_missedAccessMaskAccumulator = prevMissedAccumulator;
 	if (symbolType < 0)
 	{
 		// Give dummy value
@@ -11024,7 +11132,10 @@ int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &s
 			else if (scope != "")
 				smbl = scope + "::";
 			smbl += name;
-			msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
+			if (missedAccessMask)
+				msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->module ? builder->module->m_accessMask : 0);
+			else
+				msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
 			Error(msg, errNode);
 		}
 		return -1;
@@ -11598,10 +11709,10 @@ int asCCompiler::CompileExpressionValue(asCScriptNode *node, asCExprContext *ctx
 		{
 			asCString value(&script->code[vnode->tokenPos], vnode->tokenLength);
 
-			// TODO: Check for overflow
-
 			size_t numScanned;
 			float v = float(asStringScanDouble(value.AddressOf(), &numScanned));
+			if( isinf(v) )
+				Warning(TXT_VALUE_TOO_LARGE_FOR_TYPE, vnode);
 			ctx->type.SetConstantF(asCDataType::CreatePrimitive(ttFloat, true), v);
 #ifndef AS_USE_DOUBLE_AS_FLOAT
 			// Don't check this if we have double as float, because then the whole token would be scanned (i.e. no f suffix)
@@ -11612,10 +11723,10 @@ int asCCompiler::CompileExpressionValue(asCScriptNode *node, asCExprContext *ctx
 		{
 			asCString value(&script->code[vnode->tokenPos], vnode->tokenLength);
 
-			// TODO: Check for overflow
-
 			size_t numScanned;
 			double v = asStringScanDouble(value.AddressOf(), &numScanned);
+			if( isinf(v) )
+				Warning(TXT_VALUE_TOO_LARGE_FOR_TYPE, vnode);
 			ctx->type.SetConstantD(asCDataType::CreatePrimitive(ttDouble, true), v);
 			asASSERT(numScanned == vnode->tokenLength);
 		}
@@ -11701,8 +11812,7 @@ int asCCompiler::CompileExpressionValue(asCScriptNode *node, asCExprContext *ctx
 					void *strPtr = const_cast<void*>(engine->stringFactory->GetStringConstant(str.AddressOf(), (asUINT)str.GetLength()));
 					if (strPtr == 0)
 					{
-						// TODO: A better message is needed
-						Error(TXT_NULL_POINTER_ACCESS, vnode);
+						Error(TXT_FAILED_TO_CREATE_STRING_CONSTANT, vnode);
 						ctx->type.SetDummy();
 						return -1;
 					}
@@ -11907,6 +12017,8 @@ asUINT asCCompiler::ProcessStringConstant(asCString &cstr, asCScriptNode *node, 
 					val = '\0';
 				else if( cstr[n] == '\\' )
 					val = '\\';
+				else if( cstr[n] == 'e' )
+					val = '\e';
 				else
 				{
 					// Invalid escape sequence
@@ -12754,12 +12866,17 @@ int asCCompiler::CompileFunctionCall(asCScriptNode *node, asCExprContext *ctx, a
 
 	// Find the matching entities
 	// If objectType is set then this is a post op expression and we shouldn't look for local variables
+	asDWORD missedAccessMask = 0;
+	asDWORD *prevMissedAccumulator = builder->m_missedAccessMaskAccumulator;
+	builder->m_missedAccessMaskAccumulator = &missedAccessMask;
 	asCExprContext lookupResult(engine);
 	SYMBOLTYPE symbolType = SymbolLookup(name, scope, objectType, &lookupResult, node);
+	builder->m_missedAccessMaskAccumulator = prevMissedAccumulator;
 	if (symbolType < 0)
 		return -1;
 	if (symbolType == SL_NOMATCH)
 	{
+//		symbolType = SymbolLookup(name, scope, objectType, &lookupResult, node);
 		// No matching symbol
 		asCString msg;
 		asCString smbl;
@@ -12768,7 +12885,10 @@ int asCCompiler::CompileFunctionCall(asCScriptNode *node, asCExprContext *ctx, a
 		else if (scope != "")
 			smbl = scope + "::";
 		smbl += name;
-		msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
+		if (missedAccessMask)
+			msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->module ? builder->module->m_accessMask : 0);
+		else
+			msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
 		Error(msg, node);
 		return -1;
 	}
@@ -14315,11 +14435,24 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 
 				if( ctx->type.dataType.IsObjectHandle() )
 				{
-					// Convert the handle to a normal object
-					asCDataType dt = ctx->type.dataType;
-					dt.MakeHandle(false);
+					// Flip the type from handle to object so property lookup succeeds.
+					// The actual bytecode resolve (for RegisterHandle types) is emitted
+					// just before the ADDSi below, so both this path and the path where
+					// the handle bit was already stripped earlier (e.g. class members
+					// declared without '@') get a single, consistent resolve site.
+					if( ctx->type.dataType.GetTypeInfo() &&
+						ctx->type.dataType.GetTypeInfo()->resolveHandle )
+					{
+						ctx->type.dataType.MakeHandle(false);
+					}
+					else
+					{
+						// Convert the handle to a normal object
+						asCDataType dt = ctx->type.dataType;
+						dt.MakeHandle(false);
 
-					ImplicitConversion(ctx, dt, node, asIC_IMPLICIT_CONV);
+						ImplicitConversion(ctx, dt, node, asIC_IMPLICIT_CONV);
+					}
 
 					// The handle may not have been an lvalue, but the dereferenced object is
 					ctx->type.isLValue = true;
@@ -14327,7 +14460,8 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 
 				bool isConst = ctx->type.dataType.IsObjectConst();
 
-				asCObjectProperty *prop = builder->GetObjectProperty(ctx->type.dataType, name.AddressOf());
+				asDWORD maskedPropAccessMask = 0;
+				asCObjectProperty *prop = builder->GetObjectProperty(ctx->type.dataType, name.AddressOf(), &maskedPropAccessMask);
 				if( prop )
 				{
 					// Is the property access allowed?
@@ -14339,6 +14473,20 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 						else
 							msg.Format(TXT_PROTECTED_PROP_ACCESS_s, name.AddressOf());
 						Error(msg, node);
+					}
+
+					// For RegisterHandle types, the value on the stack is a packed
+					// handle word (e.g. {generation, slot}), not a raw pointer.
+					// Resolve it before any ADDSi so the offset is applied to the
+					// real object pointer. This covers both handle-typed ctx
+					// (converged via the flip above) and class members declared
+					// without '@' (where the handle bit was stripped in
+					// CompileVariableAccess).
+					if( ctx->type.dataType.GetTypeInfo() &&
+						ctx->type.dataType.GetTypeInfo()->resolveHandle )
+					{
+						ctx->bc.InstrPTR(asBC_ResolveHandleV, ctx->type.dataType.GetTypeInfo());
+						ctx->bc.Instr(asBC_CHKREF);
 					}
 
 					// Adjust the pointer for composite member
@@ -14419,7 +14567,10 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 					else
 					{
 						asCString str;
-						str.Format(TXT_s_NOT_MEMBER_OF_s, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
+						if( maskedPropAccessMask )
+							str.Format(TXT_s_NOT_MEMBER_OF_s_MASK_x_vs_x, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf(), maskedPropAccessMask, builder->module ? builder->module->m_accessMask : 0);
+						else
+							str.Format(TXT_s_NOT_MEMBER_OF_s, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
 						Error(str, node);
 						return -1;
 					}
@@ -15174,6 +15325,13 @@ int asCCompiler::CompileOverloadedDualOperator2(asCScriptNode *node, const char 
 				// Make sure the method is accessible by the module
 				if( builder->module->m_accessMask & func->accessMask )
 				{
+					// Skip script-defined-class methods (owning type is asOBJ_SCRIPT_OBJECT).
+					// Their accessMask is module-default 0xFFFFFFFF visibility noise; real usage
+					// flows via the call-graph transitive propagation.
+					if (ot->module == nullptr && !(ot->flags & asOBJ_SCRIPT_OBJECT))
+					{
+						m_usedAccessMask |= func->accessMask;
+					}
 					funcs.PushLast(func->id);
 				}
 			}
@@ -15337,6 +15495,13 @@ int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType
 {
 	if( objectType )
 		Dereference(ctx, true);
+
+	// Resolve handle bits to real pointer for handle-resolve types
+	if( objectType && objectType->resolveHandle )
+	{
+		ctx->bc.InstrPTR(asBC_ResolveHandleV, objectType);
+		ctx->bc.Instr(asBC_CHKREF);
+	}
 
 	asCScriptFunction* descr = builder->GetFunctionDescription(funcId);
 
@@ -16010,9 +16175,16 @@ void asCCompiler::CompileMathOperator(asCScriptNode *node, asCExprContext *lctx,
 					v = int(lctx->type.GetConstantDW()) * int(rctx->type.GetConstantDW());
 				else if( op == ttSlash )
 				{
-					// TODO: Should probably report an error, rather than silently convert the value to 0
-					if( rctx->type.GetConstantDW() == 0 || (int(rctx->type.GetConstantDW()) == -1 && lctx->type.GetConstantDW() == 0x80000000) )
+					if( rctx->type.GetConstantDW() == 0 )
+					{
+						Warning(TXT_DIVIDE_BY_ZERO, node);
 						v = 0;
+					}
+					else if( int(rctx->type.GetConstantDW()) == -1 && lctx->type.GetConstantDW() == 0x80000000 )
+					{
+						Warning(TXT_DIVIDE_OVERFLOW, node);
+						v = 0;
+					}
 					else
 						if( lctx->type.dataType.IsIntegerType() )
 							v = int(lctx->type.GetConstantDW()) / int(rctx->type.GetConstantDW());
@@ -16021,9 +16193,16 @@ void asCCompiler::CompileMathOperator(asCScriptNode *node, asCExprContext *lctx,
 				}
 				else if( op == ttPercent )
 				{
-					// TODO: Should probably report an error, rather than silently convert the value to 0
-					if( rctx->type.GetConstantDW() == 0 || (int(rctx->type.GetConstantDW()) == -1 && lctx->type.GetConstantDW() == 0x80000000) )
+					if( rctx->type.GetConstantDW() == 0 )
+					{
+						Warning(TXT_DIVIDE_BY_ZERO, node);
 						v = 0;
+					}
+					else if( int(rctx->type.GetConstantDW()) == -1 && lctx->type.GetConstantDW() == 0x80000000 )
+					{
+						Warning(TXT_DIVIDE_OVERFLOW, node);
+						v = 0;
+					}
 					else
 						if( lctx->type.dataType.IsIntegerType() )
 							v = int(lctx->type.GetConstantDW()) % int(rctx->type.GetConstantDW());
@@ -16059,9 +16238,16 @@ void asCCompiler::CompileMathOperator(asCScriptNode *node, asCExprContext *lctx,
 					v = asINT64(lctx->type.GetConstantQW()) * asINT64(rctx->type.GetConstantQW());
 				else if( op == ttSlash )
 				{
-					// TODO: Should probably report an error, rather than silently convert the value to 0
-					if( rctx->type.GetConstantQW() == 0 || (rctx->type.GetConstantQW() == asQWORD(-1) && lctx->type.GetConstantQW() == (asQWORD(1)<<63)) )
+					if( rctx->type.GetConstantQW() == 0 )
+					{
+						Warning(TXT_DIVIDE_BY_ZERO, node);
 						v = 0;
+					}
+					else if( rctx->type.GetConstantQW() == asQWORD(-1) && lctx->type.GetConstantQW() == (asQWORD(1)<<63) )
+					{
+						Warning(TXT_DIVIDE_OVERFLOW, node);
+						v = 0;
+					}
 					else
 						if( lctx->type.dataType.IsIntegerType() )
 							v = asINT64(lctx->type.GetConstantQW()) / asINT64(rctx->type.GetConstantQW());
@@ -16070,9 +16256,16 @@ void asCCompiler::CompileMathOperator(asCScriptNode *node, asCExprContext *lctx,
 				}
 				else if( op == ttPercent )
 				{
-				    // TODO: Should probably report an error, rather than silently convert the value to 0
-					if( rctx->type.GetConstantQW() == 0 || (rctx->type.GetConstantQW() == asQWORD(-1) && lctx->type.GetConstantQW() == (asQWORD(1)<<63)) )
+					if( rctx->type.GetConstantQW() == 0 )
+					{
+						Warning(TXT_DIVIDE_BY_ZERO, node);
 						v = 0;
+					}
+					else if( rctx->type.GetConstantQW() == asQWORD(-1) && lctx->type.GetConstantQW() == (asQWORD(1)<<63) )
+					{
+						Warning(TXT_DIVIDE_OVERFLOW, node);
+						v = 0;
+					}
 					else
 						if( lctx->type.dataType.IsIntegerType() )
 							v = asINT64(lctx->type.GetConstantQW()) % asINT64(rctx->type.GetConstantQW());
@@ -16694,8 +16887,9 @@ void asCCompiler::CompileComparisonOperator(asCScriptNode *node, asCExprContext 
 			}
 			else
 			{
-				// TODO: Use TXT_ILLEGAL_OPERATION_ON
-				Error(TXT_ILLEGAL_OPERATION, node);
+				asCString str;
+				str.Format(TXT_ILLEGAL_OPERATION_ON_s, lctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
+				Error(str, node);
 #if AS_SIZEOF_BOOL == 1
 				ctx->type.SetConstantB(asCDataType::CreatePrimitive(ttBool, true), 0);
 #else
@@ -16788,8 +16982,9 @@ void asCCompiler::CompileComparisonOperator(asCScriptNode *node, asCExprContext 
 			}
 			else
 			{
-				// TODO: Use TXT_ILLEGAL_OPERATION_ON
-				Error(TXT_ILLEGAL_OPERATION, node);
+				asCString str;
+				str.Format(TXT_ILLEGAL_OPERATION_ON_s, lctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
+				Error(str, node);
 			}
 		}
 		else
@@ -17081,6 +17276,12 @@ void asCCompiler::CompileOperatorOnHandles(asCScriptNode *node, asCExprContext *
 	if( opToken == ttUnrecognizedToken )
 		opToken = node->tokenType;
 
+	// Save null-comparison state before implicit conversions destroy it.
+	// For ==/ !=, the implicit conversions below may convert null to the handle type,
+	// making IsNullConstant() return false later.  We need to know which side was null.
+	bool earlyComparingWithNull = lctx->type.IsNullConstant() || rctx->type.IsNullConstant();
+	bool earlyLhsIsNull = lctx->type.IsNullConstant();
+
 	// Warn if not both operands are explicit handles or null handles
 	if( (opToken == ttEqual || opToken == ttNotEqual) &&
 		((!(lctx->type.isExplicitHandle || lctx->type.IsNullConstant()) && !(lctx->type.dataType.GetTypeInfo() && (lctx->type.dataType.GetTypeInfo()->flags & asOBJ_IMPLICIT_HANDLE))) ||
@@ -17224,16 +17425,54 @@ void asCCompiler::CompileOperatorOnHandles(asCScriptNode *node, asCExprContext *
 		int b = lctx->type.stackOffset;
 		int c = rctx->type.stackOffset;
 
-		ctx->bc.InstrW_W(asBC_CmpPtr, b, c);
+		// Check if this is a handle-resolve type comparing with null
+		asCTypeInfo *lhsTypeInfo = lctx->type.dataType.GetTypeInfo();
+		asCTypeInfo *rhsTypeInfo = rctx->type.dataType.GetTypeInfo();
+		bool lhsIsHandleResolve = lhsTypeInfo && lhsTypeInfo->resolveHandle;
+		bool rhsIsHandleResolve = rhsTypeInfo && rhsTypeInfo->resolveHandle;
+		bool comparingWithNull  = lctx->type.IsNullConstant() || rctx->type.IsNullConstant();
+		// ConvertToVariable above may have destroyed the null constant state for all four operators
+		if( !comparingWithNull )
+			comparingWithNull = earlyComparingWithNull;
 
-		if( opToken == ttEqual || opToken == ttIs )
-			ctx->bc.Instr(asBC_TZ);
-		else if( opToken == ttNotEqual || opToken == ttNotIs )
-			ctx->bc.Instr(asBC_TNZ);
+		if( (lhsIsHandleResolve || rhsIsHandleResolve) && comparingWithNull &&
+			(opToken == ttIs || opToken == ttNotIs || opToken == ttEqual || opToken == ttNotEqual) )
+		{
+			// Determine which side is the handle (non-null) and which is null.
+			bool lhsIsHandle;
+			if( (opToken == ttEqual || opToken == ttNotEqual) && earlyComparingWithNull )
+				lhsIsHandle = !earlyLhsIsNull;
+			else
+				lhsIsHandle = lhsIsHandleResolve;
+			int handleVar = lhsIsHandle ? b : c;
+			asCTypeInfo *ti = lhsIsHandle ? lhsTypeInfo : rhsTypeInfo;
 
-		ctx->bc.InstrSHORT(asBC_CpyRtoV4, (short)a);
+			// IsHandleNull reads handle bits, resolves, checks null+dead.
+			// Writes 0 (null/dead) or 1 (alive) to temp register.
+			ctx->bc.InstrW_PTR(asBC_IsHandleNull, (short)handleVar, ti);
 
-		ctx->type.SetVariable(asCDataType::CreatePrimitive(ttBool, true), a, true);
+			if( opToken == ttIs || opToken == ttEqual )
+				ctx->bc.Instr(asBC_TZ);
+			else
+				ctx->bc.Instr(asBC_TNZ);
+
+			ctx->bc.InstrSHORT(asBC_CpyRtoV4, (short)a);
+
+			ctx->type.SetVariable(asCDataType::CreatePrimitive(ttBool, true), a, true);
+		}
+		else
+		{
+			ctx->bc.InstrW_W(asBC_CmpPtr, b, c);
+
+			if( opToken == ttEqual || opToken == ttIs )
+				ctx->bc.Instr(asBC_TZ);
+			else if( opToken == ttNotEqual || opToken == ttNotIs )
+				ctx->bc.Instr(asBC_TNZ);
+
+			ctx->bc.InstrSHORT(asBC_CpyRtoV4, (short)a);
+
+			ctx->type.SetVariable(asCDataType::CreatePrimitive(ttBool, true), a, true);
+		}
 
 		ReleaseTemporaryVariable(lctx->type, &ctx->bc);
 		ReleaseTemporaryVariable(rctx->type, &ctx->bc);
@@ -17241,8 +17480,9 @@ void asCCompiler::CompileOperatorOnHandles(asCScriptNode *node, asCExprContext *
 	}
 	else
 	{
-		// TODO: Use TXT_ILLEGAL_OPERATION_ON
-		Error(TXT_ILLEGAL_OPERATION, node);
+		asCString str;
+		str.Format(TXT_ILLEGAL_OPERATION_ON_s, lctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
+		Error(str, node);
 	}
 }
 
@@ -17443,7 +17683,17 @@ void asCCompiler::PerformFunctionCall(int funcId, asCExprContext *ctx, bool isCo
 				ctx->bc.Call(asBC_CALLSYS , descr->id, argSize);
 		}
 		else if( descr->funcType == asFUNC_FUNCDEF )
+		{
 			ctx->bc.CallPtr(asBC_CallPtr, funcPtrVar, argSize);
+			outFunc->localCallsDelegate = true;
+		}
+	}
+
+	// Accumulate access mask for registered functions
+	if (descr->funcType == asFUNC_SYSTEM ||
+	    descr->funcType == asFUNC_IMPORTED)
+	{
+		m_usedAccessMask |= descr->accessMask;
 	}
 
 	if( (descr->returnType.IsObject() || descr->returnType.IsFuncdef()) && !descr->returnType.IsReference() )

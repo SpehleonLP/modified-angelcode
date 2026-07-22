@@ -402,6 +402,8 @@ protected:
 	asCScriptCode     *script;
 	asCScriptFunction *outFunc;
 
+	asDWORD m_usedAccessMask;  // OR of all registered element access masks referenced
+
 	bool                         m_isConstructor;
 	bool                         m_isConstructorCalled;
 	bool                         m_hasReturned;

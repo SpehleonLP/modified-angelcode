@@ -45,6 +45,18 @@
 
 BEGIN_AS_NAMESPACE
 
+// Resolve obj for GC behaviour calls (gcGetRefCount, gcGetFlag, gcSetFlag,
+// gcEnumReferences, gcReleaseAllReferences).  Returns obj unchanged for normal
+// types.  Unlike ResolveForRefCount this does NOT filter out the dead-handle
+// sentinel, because GC behaviours are implemented by the application and must
+// still run on the real object even when it is the sentinel.
+static void *ResolveForGC(void *obj, asCObjectType *type)
+{
+	if( type->resolveHandle )
+		return type->resolveHandle((asPWORD)obj, type->handleUserData);
+	return obj;
+}
+
 asCGarbageCollector::asCGarbageCollector()
 {
 	engine          = 0;
@@ -83,7 +95,9 @@ int asCGarbageCollector::AddScriptObjectToGC(void *obj, asCObjectType *objType)
 		return asINVALID_ARG;
 	}
 
-	engine->CallObjectMethod(obj, objType->beh.addref);
+	void *refObj = engine->ResolveForRefCount(obj, objType);
+	if (refObj)
+		engine->CallObjectMethod(refObj, objType->beh.addref);
 	asSObjTypePair ot = {obj, objType, 0};
 
 	// Invoke the garbage collector to destroy a little garbage as new comes in
@@ -397,7 +411,8 @@ int asCGarbageCollector::DestroyNewGarbage()
 			if( ++destroyNewIdx < gcNewObjects.GetLength() )
 			{
 				asSObjTypePair gcObj = GetNewObjectAtIdx(destroyNewIdx);
-				if( engine->CallObjectMethodRetInt(gcObj.obj, gcObj.type->beh.gcGetRefCount) == 1 )
+				void *realNewObj = ResolveForGC(gcObj.obj, gcObj.type);
+				if( realNewObj && engine->CallObjectMethodRetInt(realNewObj, gcObj.type->beh.gcGetRefCount) == 1 )
 				{
 					// Release the object immediately
 
@@ -411,7 +426,11 @@ int asCGarbageCollector::DestroyNewGarbage()
 						if( refCount > 0 ) addRef = true;
 					}
 					else
-						engine->CallObjectMethod(gcObj.obj, gcObj.type->beh.release);
+					{
+						void *refObj = engine->ResolveForRefCount(gcObj.obj, gcObj.type);
+						if (refObj)
+							engine->CallObjectMethod(refObj, gcObj.type->beh.release);
+					}
 
 					// Was the object really destroyed?
 					if( !addRef )
@@ -425,14 +444,16 @@ int asCGarbageCollector::DestroyNewGarbage()
 					{
 						// Since the object was resurrected in the
 						// destructor, we must add our reference again
-						engine->CallObjectMethod(gcObj.obj, gcObj.type->beh.addref);
+						void *refObj = engine->ResolveForRefCount(gcObj.obj, gcObj.type);
+						if (refObj)
+							engine->CallObjectMethod(refObj, gcObj.type->beh.addref);
 					}
 
 					destroyNewState = destroyGarbage_haveMore;
 				}
-				// Check if this object has been inspected 3 times already, and if so move it to the 
+				// Check if this object has been inspected 3 times already, and if so move it to the
 				// set of old objects that are less likely to become garbage in a short time
-				// TODO: Is 3 really a good value? Should the number of times be dynamic? 
+				// TODO: Is 3 really a good value? Should the number of times be dynamic?
 				else if( gcObj.seqNbr < seqAtSweepStart[0] )
 				{
 					// We've already verified this object multiple times. It is likely
@@ -480,8 +501,9 @@ int asCGarbageCollector::ReportAndReleaseUndestroyedObjects()
 		asSObjTypePair gcObj = GetOldObjectAtIdx(n);
 
 		int refCount = 0;
-		if( gcObj.type->beh.gcGetRefCount && engine->scriptFunctions[gcObj.type->beh.gcGetRefCount] )
-			refCount = engine->CallObjectMethodRetInt(gcObj.obj, gcObj.type->beh.gcGetRefCount);
+		void *realOldRptObj = ResolveForGC(gcObj.obj, gcObj.type);
+		if( realOldRptObj && gcObj.type->beh.gcGetRefCount && engine->scriptFunctions[gcObj.type->beh.gcGetRefCount] )
+			refCount = engine->CallObjectMethodRetInt(realOldRptObj, gcObj.type->beh.gcGetRefCount);
 
 		// Report the object as not being properly destroyed
 		asCString msg;
@@ -504,7 +526,11 @@ int asCGarbageCollector::ReportAndReleaseUndestroyedObjects()
 
 		// Release the reference that the GC holds if the release functions is still available
 		if( gcObj.type->beh.release && engine->scriptFunctions[gcObj.type->beh.release] )
-			engine->CallObjectMethod(gcObj.obj, gcObj.type->beh.release);
+		{
+			void *refObj = engine->ResolveForRefCount(gcObj.obj, gcObj.type);
+			if (refObj)
+				engine->CallObjectMethod(refObj, gcObj.type->beh.release);
+		}
 
 		items++;
 	}
@@ -561,37 +587,47 @@ int asCGarbageCollector::DestroyOldGarbage()
 					RemoveOldObjectAtIdx(destroyOldIdx);
 					destroyOldIdx--;
 				}
-				else if( engine->CallObjectMethodRetInt(gcObj.obj, gcObj.type->beh.gcGetRefCount) == 1 )
+				else
 				{
-					// Release the object immediately
-
-					// Make sure the refCount is really 0, because the
-					// destructor may have increased the refCount again.
-					bool addRef = false;
-					if( gcObj.type->flags & asOBJ_SCRIPT_OBJECT )
+					void *realOldObj = ResolveForGC(gcObj.obj, gcObj.type);
+					if( realOldObj && engine->CallObjectMethodRetInt(realOldObj, gcObj.type->beh.gcGetRefCount) == 1 )
 					{
-						// Script objects may actually be resurrected in the destructor
-						int refCount = ((asCScriptObject*)gcObj.obj)->Release();
-						if( refCount > 0 ) addRef = true;
-					}
-					else
-						engine->CallObjectMethod(gcObj.obj, gcObj.type->beh.release);
+						// Release the object immediately
 
-					// Was the object really destroyed?
-					if( !addRef )
-					{
-						numDestroyed++;
-						RemoveOldObjectAtIdx(destroyOldIdx);
-						destroyOldIdx--;
-					}
-					else
-					{
-						// Since the object was resurrected in the
-						// destructor, we must add our reference again
-						engine->CallObjectMethod(gcObj.obj, gcObj.type->beh.addref);
-					}
+						// Make sure the refCount is really 0, because the
+						// destructor may have increased the refCount again.
+						bool addRef = false;
+						if( gcObj.type->flags & asOBJ_SCRIPT_OBJECT )
+						{
+							// Script objects may actually be resurrected in the destructor
+							int refCount = ((asCScriptObject*)gcObj.obj)->Release();
+							if( refCount > 0 ) addRef = true;
+						}
+						else
+						{
+							void *refObj = engine->ResolveForRefCount(gcObj.obj, gcObj.type);
+							if (refObj)
+								engine->CallObjectMethod(refObj, gcObj.type->beh.release);
+						}
 
-					destroyOldState = destroyGarbage_haveMore;
+						// Was the object really destroyed?
+						if( !addRef )
+						{
+							numDestroyed++;
+							RemoveOldObjectAtIdx(destroyOldIdx);
+							destroyOldIdx--;
+						}
+						else
+						{
+							// Since the object was resurrected in the
+							// destructor, we must add our reference again
+							void *refObj = engine->ResolveForRefCount(gcObj.obj, gcObj.type);
+							if (refObj)
+								engine->CallObjectMethod(refObj, gcObj.type->beh.addref);
+						}
+
+						destroyOldState = destroyGarbage_haveMore;
+					}
 				}
 
 				// Allow the application to work a little
@@ -646,7 +682,9 @@ int asCGarbageCollector::IdentifyGarbageWithCyclicRefs()
 				void *obj = gcMap.GetKey(cursor);
 				asSIntTypePair it = gcMap.GetValue(cursor);
 
-				engine->CallObjectMethod(obj, it.type->beh.release);
+				void *refObj = engine->ResolveForRefCount(obj, it.type);
+				if (refObj)
+					engine->CallObjectMethod(refObj, it.type->beh.release);
 
 				ReturnNode(gcMap.Remove(cursor));
 
@@ -680,9 +718,10 @@ int asCGarbageCollector::IdentifyGarbageWithCyclicRefs()
 				// Add the gc count for this object
 				asSObjTypePair gcObj = GetOldObjectAtIdx(detectIdx);
 	
+				void *realDetObj = ResolveForGC(gcObj.obj, gcObj.type);
 				int refCount = 0;
-				if( gcObj.type->beh.gcGetRefCount )
-					refCount = engine->CallObjectMethodRetInt(gcObj.obj, gcObj.type->beh.gcGetRefCount);
+				if( realDetObj && gcObj.type->beh.gcGetRefCount )
+					refCount = engine->CallObjectMethodRetInt(realDetObj, gcObj.type->beh.gcGetRefCount);
 
 				if( refCount > 1 )
 				{
@@ -691,11 +730,14 @@ int asCGarbageCollector::IdentifyGarbageWithCyclicRefs()
 					gcMap.Insert(GetNode(gcObj.obj, it));
 
 					// Increment the object's reference counter when putting it in the map
-					engine->CallObjectMethod(gcObj.obj, gcObj.type->beh.addref);
+					// (realDetObj is already resolved; skip addref if it's the dead sentinel)
+					if( realDetObj && realDetObj != gcObj.type->deadHandle )
+						engine->CallObjectMethod(realDetObj, gcObj.type->beh.addref);
 
 					// Mark the object so that we can
 					// see if it has changed since read
-					engine->CallObjectMethod(gcObj.obj, gcObj.type->beh.gcSetFlag);
+					if( realDetObj )
+						engine->CallObjectMethod(realDetObj, gcObj.type->beh.gcSetFlag);
 				}
 
 				detectIdx++; 
@@ -734,9 +776,10 @@ int asCGarbageCollector::IdentifyGarbageWithCyclicRefs()
 				asCObjectType *type = gcMap.GetValue(gcMapCursor).type;
 				gcMap.MoveNext(&gcMapCursor, gcMapCursor);
 
-				if( engine->CallObjectMethodRetBool(obj, type->beh.gcGetFlag) )
+				void *realObj = ResolveForGC(obj, type);
+				if( realObj && engine->CallObjectMethodRetBool(realObj, type->beh.gcGetFlag) )
 				{
-					engine->CallObjectMethod(obj, engine, type->beh.gcEnumReferences);
+					engine->CallObjectMethod(realObj, engine, type->beh.gcEnumReferences);
 				}
 
 				// Allow the application to work a little
@@ -773,7 +816,8 @@ int asCGarbageCollector::IdentifyGarbageWithCyclicRefs()
 				void *obj = gcMap.GetKey(cursor);
 				asSIntTypePair it = gcMap.GetValue(cursor);
 
-				bool gcFlag = engine->CallObjectMethodRetBool(obj, it.type->beh.gcGetFlag);
+				void *realDGObj = ResolveForGC(obj, it.type);
+				bool gcFlag = realDGObj ? engine->CallObjectMethodRetBool(realDGObj, it.type->beh.gcGetFlag) : false;
 				if( !gcFlag || it.i > 0 )
 				{
 					liveObjects.PushLast(obj);
@@ -805,11 +849,16 @@ int asCGarbageCollector::IdentifyGarbageWithCyclicRefs()
 					type = gcMap.GetValue(cursor).type;
 					ReturnNode(gcMap.Remove(cursor));
 
+					// Resolve once, reuse for both release and enum
+					void *realObj = ResolveForGC(gcObj, type);
+
 					// We need to decrease the reference count again as we remove the object from the map
-					engine->CallObjectMethod(gcObj, type->beh.release);
+					if( realObj && realObj != type->deadHandle )
+						engine->CallObjectMethod(realObj, type->beh.release);
 
 					// Enumerate all the object's references so that they too can be marked as alive
-					engine->CallObjectMethod(gcObj, engine, type->beh.gcEnumReferences);
+					if( realObj )
+						engine->CallObjectMethod(realObj, engine, type->beh.gcEnumReferences);
 				}
 
 				// Allow the application to work a little
@@ -835,7 +884,8 @@ int asCGarbageCollector::IdentifyGarbageWithCyclicRefs()
 				void *gcObj = gcMap.GetKey(gcMapCursor);
 				asCObjectType *type = gcMap.GetValue(gcMapCursor).type;
 
-				bool gcFlag = engine->CallObjectMethodRetBool(gcObj, type->beh.gcGetFlag);
+				void *realVUObj = ResolveForGC(gcObj, type);
+				bool gcFlag = realVUObj ? engine->CallObjectMethodRetBool(realVUObj, type->beh.gcGetFlag) : false;
 				if( !gcFlag )
 				{
 					// The unmarked object was touched, rerun the detectGarbage loop
@@ -902,7 +952,11 @@ int asCGarbageCollector::IdentifyGarbageWithCyclicRefs()
 					// be null.
 					reinterpret_cast<asCScriptObject*>(gcObj)->CallDestructor();
 				}
-				engine->CallObjectMethod(gcObj, engine, type->beh.gcReleaseAllReferences);
+				{
+					void *realBCObj = ResolveForGC(gcObj, type);
+					if( realBCObj )
+						engine->CallObjectMethod(realBCObj, engine, type->beh.gcReleaseAllReferences);
+				}
 
 				gcMap.MoveNext(&gcMapCursor, gcMapCursor);
 

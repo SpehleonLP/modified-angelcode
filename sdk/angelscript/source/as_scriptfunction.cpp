@@ -370,6 +370,12 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	gcFlag                 = false;
 	id                     = 0;
 	accessMask             = 0xFFFFFFFF;
+	minLocalAccessMask     = 0;
+	minTransitiveAccessMask = 0;
+	localCallsDelegate     = false;
+	transitiveCallsDelegate = false;
+	localHalts             = asHALTS_YES;
+	transitiveHalts        = asHALTS_YES;
 	nameSpace              = engine->nameSpaces[0];
 	objForDelegate         = 0;
 	funcForDelegate        = 0;
@@ -1554,6 +1560,14 @@ asDWORD asCScriptFunction::GetAccessMask() const
 {
 	return accessMask;
 }
+
+// interface
+asDWORD asCScriptFunction::GetMinLocalAccessMask() const { return minLocalAccessMask; }
+asDWORD asCScriptFunction::GetMinTransitiveAccessMask() const { return minTransitiveAccessMask; }
+bool    asCScriptFunction::GetLocalCallsDelegate() const { return localCallsDelegate; }
+bool    asCScriptFunction::GetTransitiveCallsDelegate() const { return transitiveCallsDelegate; }
+asEHalts asCScriptFunction::GetLocalHalts() const { return (asEHalts)localHalts; }
+asEHalts asCScriptFunction::GetTransitiveHalts() const { return (asEHalts)transitiveHalts; }
 
 // interface
 int asCScriptFunction::SetJITFunction(asJITFunction jitFunc)

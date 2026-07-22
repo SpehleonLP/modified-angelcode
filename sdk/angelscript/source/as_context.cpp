@@ -1362,9 +1362,14 @@ int asCContext::SetArgObject(asUINT arg, void *obj)
 				((asIScriptFunction*)obj)->AddRef();
 			else
 			{
-				asSTypeBehaviour *beh = &CastToObjectType(dt->GetTypeInfo())->beh;
+				asCObjectType *objType = CastToObjectType(dt->GetTypeInfo());
+				asSTypeBehaviour *beh = &objType->beh;
 				if (obj && beh->addref)
-					m_engine->CallObjectMethod(obj, beh->addref);
+				{
+					void *refObj = m_engine->ResolveForRefCount(obj, objType);
+					if (refObj)
+						m_engine->CallObjectMethod(refObj, beh->addref);
+				}
 			}
 		}
 		else
@@ -2271,8 +2276,8 @@ static const void *const dispatch_table[256] = {
 &&INSTRUCTION(asBC_POWd),		&&INSTRUCTION(asBC_POWdi),		&&INSTRUCTION(asBC_POWi64),		&&INSTRUCTION(asBC_POWu64),
 &&INSTRUCTION(asBC_Thiscall1),
 
-								&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),
-&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),
+								&&INSTRUCTION(asBC_ResolveHandleV),	&&INSTRUCTION(asBC_PshHandlePtr),	&&INSTRUCTION(asBC_LoadHRObjR),
+&&INSTRUCTION(asBC_IsHandleNull),	&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),
 &&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),
 &&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),
 &&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),			&&INSTRUCTION(FAULT),
@@ -3222,7 +3227,11 @@ static const void *const dispatch_table[256] = {
 				{
 					asASSERT( (objType->flags & asOBJ_NOCOUNT) || beh->release );
 					if( beh->release )
-						m_engine->CallObjectMethod((void*)(asPWORD)*a, beh->release);
+					{
+						void *refObj = m_engine->ResolveForRefCount((void*)(asPWORD)*a, objType);
+						if( refObj )
+							m_engine->CallObjectMethod(refObj, beh->release);
+					}
 				}
 				else
 				{
@@ -3296,10 +3305,18 @@ static const void *const dispatch_table[256] = {
 			{
 				// Release previous object held by destination pointer
 				if( *d != 0 && beh->release )
-					m_engine->CallObjectMethod(*d, beh->release);
+				{
+					void *refObj = m_engine->ResolveForRefCount(*d, objType);
+					if( refObj )
+						m_engine->CallObjectMethod(refObj, beh->release);
+				}
 				// Increase ref counter of wanted object
 				if( s != 0 && beh->addref )
-					m_engine->CallObjectMethod(s, beh->addref);
+				{
+					void *refObj = m_engine->ResolveForRefCount(s, objType);
+					if( refObj )
+						m_engine->CallObjectMethod(refObj, beh->addref);
+				}
 			}
 
 			// Set the new object in the destination
@@ -4573,10 +4590,18 @@ static const void *const dispatch_table[256] = {
 			{
 				// Release previous object held by destination pointer
 				if( *d != 0 && beh->release )
-					m_engine->CallObjectMethod(*d, beh->release);
+				{
+					void *refObj = m_engine->ResolveForRefCount(*d, objType);
+					if( refObj )
+						m_engine->CallObjectMethod(refObj, beh->release);
+				}
 				// Increase ref counter of wanted object
 				if( s != 0 && beh->addref )
-					m_engine->CallObjectMethod(s, beh->addref);
+				{
+					void *refObj = m_engine->ResolveForRefCount(s, objType);
+					if( refObj )
+						m_engine->CallObjectMethod(refObj, beh->addref);
+				}
 			}
 
 			// Set the new object in the destination
@@ -4882,13 +4907,100 @@ static const void *const dispatch_table[256] = {
 		}
 		NEXT_INSTRUCTION();
 
+	INSTRUCTION(asBC_ResolveHandleV):
+		{
+			// Resolve handle bits on stack top to a real object pointer.
+			// Simply calls the resolve function and pushes the result.
+			asCObjectType *objType = (asCObjectType*)asBC_PTRARG(l_bc);
+			asPWORD handle = *(asPWORD*)l_sp;
+			*(asPWORD*)l_sp = (asPWORD)objType->resolveHandle(handle, objType->handleUserData);
+		}
+		l_bc += 1 + AS_PTR_SIZE;
+		NEXT_INSTRUCTION();
+
+	INSTRUCTION(asBC_PshHandlePtr):
+		{
+			// Fused: PSF + RDSPtr + ResolveHandleV + CHKREF
+			// Read handle bits from variable
+			asPWORD handle = *(asPWORD*)(l_fp - asBC_SWORDARG0(l_bc));
+
+			// Resolve handle bits to real pointer
+			asCObjectType *objType = (asCObjectType*)asBC_PTRARG(l_bc);
+			void *resolved = objType->resolveHandle(handle, objType->handleUserData);
+
+			// Null check the resolved pointer
+			if( resolved == 0 )
+			{
+				m_regs.programPointer    = l_bc;
+				m_regs.stackPointer      = l_sp;
+				m_regs.stackFramePointer = l_fp;
+
+				SetInternalException(TXT_NULL_POINTER_ACCESS);
+				return;
+			}
+
+			// Push resolved pointer onto stack
+			l_sp -= AS_PTR_SIZE;
+			*(asPWORD*)l_sp = (asPWORD)resolved;
+		}
+		l_bc += 1 + AS_PTR_SIZE;
+		NEXT_INSTRUCTION();
+
+	INSTRUCTION(asBC_LoadHRObjR):
+		{
+			// Pop type pointer from stack (pushed by preceding OBJTYPE)
+			asCObjectType *objType = (asCObjectType*)*(asPWORD*)l_sp;
+			l_sp += AS_PTR_SIZE;
+
+			// Read handle bits from variable
+			asPWORD handle = *(asPWORD*)(l_fp - asBC_SWORDARG0(l_bc));
+
+			// Resolve
+			asPWORD tmp = (asPWORD)objType->resolveHandle(handle, objType->handleUserData);
+
+			// Null check
+			if( tmp == 0 )
+			{
+				m_regs.programPointer    = l_bc;
+				m_regs.stackPointer      = l_sp;
+				m_regs.stackFramePointer = l_fp;
+
+				SetInternalException(TXT_NULL_POINTER_ACCESS);
+				return;
+			}
+
+			// Add property offset
+			tmp = tmp + asBC_SWORDARG1(l_bc);
+
+			// Store in temp register
+			*(asPWORD*)&m_regs.valueRegister = tmp;
+			l_bc += 3;  // rW_W_DW_ARG size = 3 DWORDs
+		}
+		NEXT_INSTRUCTION();
+
+	INSTRUCTION(asBC_IsHandleNull):
+		{
+			// Read handle bits from variable
+			asPWORD handle = *(asPWORD*)(l_fp - asBC_SWORDARG0(l_bc));
+
+			// Resolve handle bits to real pointer
+			asCObjectType *objType = (asCObjectType*)asBC_PTRARG(l_bc);
+			void *resolved = objType->resolveHandle(handle, objType->handleUserData);
+
+			// Compare: null or dead sentinel means "is null"
+			// Write to temp register: 0 = null/dead, 1 = alive
+			// (TZ/TNZ after this instruction produces the final bool)
+			if( resolved == 0 || resolved == objType->deadHandle )
+				*(int*)&m_regs.valueRegister = 0;
+			else
+				*(int*)&m_regs.valueRegister = 1;
+		}
+		l_bc += 1 + AS_PTR_SIZE;  // rW_PTR_ARG size
+		NEXT_INSTRUCTION();
+
 	// Don't let the optimizer optimize for size,
 	// since it requires extra conditions and jumps
 #if AS_USE_COMPUTED_GOTOS == 0
-	INSTRUCTION(201): l_bc = (asDWORD*)201; goto case_FAULT;
-	INSTRUCTION(202): l_bc = (asDWORD*)202; goto case_FAULT;
-	INSTRUCTION(203): l_bc = (asDWORD*)203; goto case_FAULT;
-	INSTRUCTION(204): l_bc = (asDWORD*)204; goto case_FAULT;
 	INSTRUCTION(205): l_bc = (asDWORD*)205; goto case_FAULT;
 	INSTRUCTION(206): l_bc = (asDWORD*)206; goto case_FAULT;
 	INSTRUCTION(207): l_bc = (asDWORD*)207; goto case_FAULT;
@@ -4942,7 +5054,7 @@ static const void *const dispatch_table[256] = {
 	INSTRUCTION(255): l_bc = (asDWORD*)255; goto case_FAULT;
 #endif
 
-#ifdef AS_DEBUG
+#if defined(AS_DEBUG) && AS_USE_COMPUTED_GOTOS == 0
 	default:
 		asASSERT(false);
 		SetInternalException(TXT_UNRECOGNIZED_BYTE_CODE);
@@ -5055,13 +5167,18 @@ void asCContext::CleanReturnObject()
 		else
 		{
 			// Call the destructor on the object
-			asSTypeBehaviour *beh = &(CastToObjectType(reinterpret_cast<asCTypeInfo*>(m_regs.objectType))->beh);
+			asCObjectType *ot = CastToObjectType(reinterpret_cast<asCTypeInfo*>(m_regs.objectType));
+			asSTypeBehaviour *beh = &ot->beh;
 			if (m_regs.objectType->GetFlags() & asOBJ_REF)
 			{
 				asASSERT(beh->release || (m_regs.objectType->GetFlags() & asOBJ_NOCOUNT));
 
 				if (beh->release)
-					m_engine->CallObjectMethod(m_regs.objectRegister, beh->release);
+				{
+					void *refObj = m_engine->ResolveForRefCount(m_regs.objectRegister, ot);
+					if( refObj )
+						m_engine->CallObjectMethod(refObj, beh->release);
+				}
 
 				m_regs.objectRegister = 0;
 			}
@@ -5397,7 +5514,11 @@ void asCContext::CleanArgsOnStack()
 					asASSERT( (func->parameterTypes[n].GetTypeInfo()->flags & asOBJ_NOCOUNT) || beh->release );
 
 					if( beh->release )
-						m_engine->CallObjectMethod((void*)*(asPWORD*)&m_regs.stackPointer[offset], beh->release);
+					{
+						void *refObj = m_engine->ResolveForRefCount((void*)*(asPWORD*)&m_regs.stackPointer[offset], func->parameterTypes[n].GetTypeInfo());
+						if( refObj )
+							m_engine->CallObjectMethod(refObj, beh->release);
+					}
 				}
 				else
 				{
@@ -5562,10 +5683,15 @@ bool asCContext::CleanStackFrame(bool catchException)
 						}
 						else if (m_currentFunction->scriptData->variables[n]->type.GetTypeInfo()->flags & asOBJ_REF)
 						{
-							asSTypeBehaviour* beh = &CastToObjectType(m_currentFunction->scriptData->variables[n]->type.GetTypeInfo())->beh;
+							asCObjectType *ot = CastToObjectType(m_currentFunction->scriptData->variables[n]->type.GetTypeInfo());
+							asSTypeBehaviour* beh = &ot->beh;
 							asASSERT((m_currentFunction->scriptData->variables[n]->type.GetTypeInfo()->flags & asOBJ_NOCOUNT) || beh->release);
 							if( beh->release )
-								m_engine->CallObjectMethod((void*)*(asPWORD*)&m_regs.stackFramePointer[-pos], beh->release);
+							{
+								void *refObj = m_engine->ResolveForRefCount((void*)*(asPWORD*)&m_regs.stackFramePointer[-pos], ot);
+								if( refObj )
+									m_engine->CallObjectMethod(refObj, beh->release);
+							}
 						}
 						else
 						{
@@ -5634,7 +5760,11 @@ bool asCContext::CleanStackFrame(bool catchException)
 					asASSERT( (m_currentFunction->parameterTypes[n].GetTypeInfo()->flags & asOBJ_NOCOUNT) || beh->release );
 
 					if( beh->release )
-						m_engine->CallObjectMethod((void*)*(asPWORD*)&m_regs.stackFramePointer[offset], beh->release);
+					{
+						void *refObj = m_engine->ResolveForRefCount((void*)*(asPWORD*)&m_regs.stackFramePointer[offset], m_currentFunction->parameterTypes[n].GetTypeInfo());
+						if( refObj )
+							m_engine->CallObjectMethod(refObj, beh->release);
+					}
 				}
 				else
 				{
@@ -5894,7 +6024,10 @@ int asCContext::CallGeneric(asCScriptFunction *descr)
 	if (sysFunc->returnAutoHandle && m_engine->ep.genericCallMode == 1 && m_regs.objectRegister)
 	{
 		asASSERT(!(descr->returnType.GetTypeInfo()->flags & asOBJ_NOCOUNT));
-		m_engine->CallObjectMethod(m_regs.objectRegister, CastToObjectType(descr->returnType.GetTypeInfo())->beh.addref);
+		asCObjectType *retObjType = CastToObjectType(descr->returnType.GetTypeInfo());
+		void *refObj = m_engine->ResolveForRefCount(m_regs.objectRegister, retObjType);
+		if (refObj)
+			m_engine->CallObjectMethod(refObj, retObjType->beh.addref);
 	}
 
 	// Clean up arguments
@@ -5909,7 +6042,9 @@ int asCContext::CallGeneric(asCScriptFunction *descr)
 			{
 				if( *addr != 0 )
 				{
-					m_engine->CallObjectMethod(*addr, clean->ot->beh.release);
+					void *refObj = m_engine->ResolveForRefCount(*addr, clean->ot);
+					if (refObj)
+						m_engine->CallObjectMethod(refObj, clean->ot->beh.release);
 					*addr = 0;
 				}
 			}

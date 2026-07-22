@@ -768,6 +768,23 @@ void asCByteCode::OptimizeLocally(const asCArray<int> &tempVariableOffsets)
 				// Delete CHKREF since PGA always pushes a valid address on the stack
 				instr = GoForward(DeleteInstruction(curr));
 			}
+			// PSF v, RDSPtr, ResolveHandleV, CHKREF -> PshHandlePtr
+			else if( curr->prev && curr->prev->op == asBC_ResolveHandleV &&
+			         curr->prev->prev && curr->prev->prev->op == asBC_RDSPtr &&
+			         curr->prev->prev->prev && curr->prev->prev->prev->op == asBC_PSF )
+			{
+				asCByteInstruction *psf = curr->prev->prev->prev;
+				asCByteInstruction *resolveHV = curr->prev;
+
+				psf->op = asBC_PshHandlePtr;
+				psf->size = asBCTypeSize[asBCInfo[asBC_PshHandlePtr].type];
+				psf->stackInc = asBCInfo[asBC_PshHandlePtr].stackInc;
+				*ARG_PTR(psf->arg) = *ARG_PTR(resolveHV->arg);       // type pointer from ResolveHandleV
+				DeleteInstruction(curr->prev->prev);                   // RDSPtr
+				DeleteInstruction(curr->prev);                         // ResolveHandleV
+				DeleteInstruction(curr);                               // CHKREF
+				instr = GoForward(psf);
+			}
 		}
 		else if( currOp == asBC_PopPtr )
 		{
@@ -938,6 +955,41 @@ void asCByteCode::OptimizeLocally(const asCArray<int> &tempVariableOffsets)
 				DeleteInstruction(instr->next);
 				DeleteInstruction(curr);
 				instr = GoForward(instr);
+			}
+			// PSF v, RDSPtr, ResolveHandleV, CHKREF, ADDSi, PopRPtr -> OBJTYPE <typePtr> + LoadHRObjR
+			else if( instr && instr->op == asBC_ADDSi &&
+			         instr->prev && instr->prev->op == asBC_CHKREF &&
+			         instr->prev->prev && instr->prev->prev->op == asBC_ResolveHandleV &&
+			         instr->prev->prev->prev && instr->prev->prev->prev->op == asBC_RDSPtr &&
+			         instr->prev->prev->prev->prev && instr->prev->prev->prev->prev->op == asBC_PSF )
+			{
+				asCByteInstruction *psf      = instr->prev->prev->prev->prev;
+				asCByteInstruction *rdsptr   = instr->prev->prev->prev;
+				asCByteInstruction *resolveHV = instr->prev->prev;
+				asCByteInstruction *chkref   = instr->prev;
+
+				// Save PSF's variable offset before we overwrite it
+				short varOffset = psf->wArg[0];
+
+				// Turn PSF into OBJTYPE carrying the type pointer from ResolveHandleV
+				psf->op = asBC_OBJTYPE;
+				psf->size = asBCTypeSize[asBCInfo[asBC_OBJTYPE].type];
+				psf->stackInc = asBCInfo[asBC_OBJTYPE].stackInc;
+				*ARG_PTR(psf->arg) = *ARG_PTR(resolveHV->arg);
+
+				// Turn RDSPtr into LoadHRObjR
+				rdsptr->op = asBC_LoadHRObjR;
+				rdsptr->size = asBCTypeSize[asBCInfo[asBC_LoadHRObjR].type];
+				rdsptr->stackInc = asBCInfo[asBC_LoadHRObjR].stackInc;
+				rdsptr->wArg[0] = varOffset;         // variable offset (from original PSF)
+				rdsptr->wArg[1] = instr->wArg[0];    // property offset (from ADDSi)
+				rdsptr->wArg[2] = 0;				 // unused DW slot in rW_W_DW_ARG
+
+				DeleteInstruction(resolveHV);         // ResolveHandleV
+				DeleteInstruction(chkref);            // CHKREF
+				DeleteInstruction(instr);             // ADDSi
+				DeleteInstruction(curr);              // PopRPtr
+				instr = GoForward(rdsptr);
 			}
 		}
 		else if( currOp == asBC_REFCPY )
@@ -2565,7 +2617,12 @@ int asCByteCode::InstrW_W(asEBCInstr bc, int a, int b)
 
 int asCByteCode::InstrW_PTR(asEBCInstr bc, short a, void *param)
 {
-	asASSERT(asBCInfo[bc].type == asBCTYPE_wW_PTR_ARG);
+	// The assertion itself is overzealous:
+	//   wW_PTR_ARG and rW_PTR_ARG are layout-identical (one short + one ptr) 
+	// the helper just stuffs bytes; wW vs rW is purely optimizer metadata. 
+	// relax it:     
+	asASSERT(asBCInfo[bc].type == asBCTYPE_wW_PTR_ARG ||                                                                                        
+			 asBCInfo[bc].type == asBCTYPE_rW_PTR_ARG);     
 	asASSERT(asBCInfo[bc].stackInc != 0xFFFF);
 
 	if( AddInstruction() < 0 )

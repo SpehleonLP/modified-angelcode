@@ -467,9 +467,14 @@ int asCGeneric::SetReturnObject(void *obj)
 		}
 		else
 		{
-			asSTypeBehaviour *beh = &CastToObjectType(dt->GetTypeInfo())->beh;
+			asCObjectType *ot = CastToObjectType(dt->GetTypeInfo());
+			asSTypeBehaviour *beh = &ot->beh;
 			if (obj && beh && beh->addref)
-				engine->CallObjectMethod(obj, beh->addref);
+			{
+				void *refObj = engine->ResolveForRefCount(obj, ot);
+				if (refObj)
+					engine->CallObjectMethod(refObj, beh->addref);
+			}
 		}
 	}
 	else
@@ -741,9 +746,14 @@ int asCGenericVariadic::SetReturnObject(void* obj)
 		}
 		else
 		{
-			asSTypeBehaviour* beh = &CastToObjectType(dt->GetTypeInfo())->beh;
+			asCObjectType *ot = CastToObjectType(dt->GetTypeInfo());
+			asSTypeBehaviour* beh = &ot->beh;
 			if (obj && beh && beh->addref)
-				engine->CallObjectMethod(obj, beh->addref);
+			{
+				void *refObj = engine->ResolveForRefCount(obj, ot);
+				if (refObj)
+					engine->CallObjectMethod(refObj, beh->addref);
+			}
 		}
 	}
 	else

@@ -1447,6 +1447,18 @@ asCScriptFunction *asCReader::ReadFunction(bool &isNew, bool addToModule, bool a
 					for (asUINT n = 0; n < countParam; n++)
 						ReadString(&func->parameterNames[n]);
 				}
+
+				// Read function metadata
+				ReadData(&func->minLocalAccessMask, sizeof(asDWORD));
+				ReadData(&func->minTransitiveAccessMask, sizeof(asDWORD));
+				asBYTE metaFlags;
+				ReadData(&metaFlags, 1);
+				func->localCallsDelegate = (metaFlags & 1) != 0;
+				func->transitiveCallsDelegate = (metaFlags & 2) != 0;
+				asBYTE metaHalts[2];
+				ReadData(metaHalts, 2);
+				func->localHalts = metaHalts[0] <= asHALTS_NO ? metaHalts[0] : asHALTS_UNKNOWN;
+				func->transitiveHalts = metaHalts[1] <= asHALTS_NO ? metaHalts[1] : asHALTS_UNKNOWN;
 			}
 		}
 	}
@@ -2913,7 +2925,10 @@ void asCReader::TranslateFunction(asCScriptFunction *func)
 		int c = *(asBYTE*)&bc[n];
 		if( c == asBC_REFCPY ||
 			c == asBC_RefCpyV ||
-			c == asBC_OBJTYPE )
+			c == asBC_OBJTYPE ||
+			c == asBC_ResolveHandleV ||
+			c == asBC_PshHandlePtr ||
+			c == asBC_IsHandleNull )
 		{
 			// Translate the index to the true object type
 			asPWORD *ot = (asPWORD*)&bc[n+1];
@@ -4469,6 +4484,15 @@ void asCWriter::WriteFunction(asCScriptFunction* func)
 			for( asUINT n = 0; n < count; n++ )
 				WriteString(&func->parameterNames[n]);
 		}
+
+		// Store function metadata
+		WriteData(&func->minLocalAccessMask, sizeof(asDWORD));
+		WriteData(&func->minTransitiveAccessMask, sizeof(asDWORD));
+		asBYTE flags = (func->localCallsDelegate ? 1 : 0) |
+		               (func->transitiveCallsDelegate ? 2 : 0);
+		WriteData(&flags, 1);
+		asBYTE halts[2] = { (asBYTE)func->localHalts, (asBYTE)func->transitiveHalts };
+		WriteData(halts, 2);
 	}
 	else if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
 	{
@@ -5182,9 +5206,12 @@ void asCWriter::WriteByteCode(asCScriptFunction *func)
 				*(int*)&tmpBC[1+AS_PTR_SIZE] = 1+FindFunctionIndex(engine->scriptFunctions[*(int*)&tmpBC[1+AS_PTR_SIZE]]);
 			}
 		}
-		else if( c == asBC_REFCPY  || // PTR_ARG
-				 c == asBC_RefCpyV || // wW_PTR_ARG
-				 c == asBC_OBJTYPE )  // PTR_ARG
+		else if( c == asBC_REFCPY  ||        // PTR_ARG
+				 c == asBC_RefCpyV ||        // wW_PTR_ARG
+				 c == asBC_OBJTYPE ||        // PTR_ARG
+				 c == asBC_ResolveHandleV || // PTR_ARG
+				 c == asBC_PshHandlePtr ||   // rW_PTR_ARG
+				 c == asBC_IsHandleNull )    // wW_PTR_ARG
 		{
 			// Translate object type pointers into indices
 			*(asPWORD*)(tmpBC+1) = FindTypeInfoIdx(*(asCObjectType**)(tmpBC+1));

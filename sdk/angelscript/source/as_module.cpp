@@ -309,6 +309,8 @@ int asCModule::Build()
 		return r;
 	}
 
+	ComputeTransitiveFunctionMetadata();
+
 	JITCompile();
 
 	m_engine->PrepareEngine();
@@ -489,7 +491,11 @@ void asCModule::UninitializeGlobalProp(asCGlobalProperty *prop)
 			{
 				asASSERT((ot->flags & asOBJ_NOCOUNT) || ot->beh.release);
 				if (ot->beh.release)
-					m_engine->CallObjectMethod(*obj, ot->beh.release);
+				{
+					void *refObj = m_engine->ResolveForRefCount(*obj, ot);
+					if (refObj)
+						m_engine->CallObjectMethod(refObj, ot->beh.release);
+				}
 			}
 			else
 			{
@@ -932,7 +938,9 @@ asIScriptFunction *asCModule::GetFunctionByDecl(const char *decl) const
 	if( r < 0 )
 	{
 		// Invalid declaration
-		// TODO: Write error to message stream
+		asCString msg;
+		msg.Format(TXT_INVALID_DECLARATION_s, decl);
+		m_engine->WriteMessage("", 0, 0, asMSGTYPE_ERROR, msg.AddressOf());
 		return 0;
 	}
 
@@ -1856,6 +1864,248 @@ asDWORD asCModule::SetAccessMask(asDWORD mask)
 	asDWORD old = m_accessMask;
 	m_accessMask = mask;
 	return old;
+}
+
+void asCModule::BuildCalleeList(asCScriptFunction *func,
+                                const asCMap<int, asUINT> &funcIdToIndex,
+                                asCArray<asUINT> &outCallees)
+{
+	if (!func || !func->scriptData) return;
+
+	asDWORD *bc = func->scriptData->byteCode.AddressOf();
+	asUINT bcLen = (asUINT)func->scriptData->byteCode.GetLength();
+
+	for (asUINT n = 0; n < bcLen; )
+	{
+		int op = *(asBYTE*)&bc[n];
+		int instrSize = asBCTypeSize[asBCInfo[op].type];
+		if (instrSize == 0) break;
+
+		if (op == asBC_CALL)
+		{
+			int funcId = asBC_INTARG(&bc[n]);
+			asSMapNode<int, asUINT> *cursor = 0;
+			if (funcIdToIndex.MoveTo(&cursor, funcId))
+				outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+		}
+		else if (op == asBC_CALLINTF)
+		{
+			int funcId = asBC_INTARG(&bc[n]);
+			asCScriptFunction *calledFunc = m_engine->GetScriptFunction(funcId);
+			if (calledFunc && calledFunc->objectType && calledFunc->objectType->IsShared())
+			{
+				// Shared interface - implementations may come from other modules
+				func->localCallsDelegate = true;
+			}
+			else if (calledFunc && calledFunc->objectType)
+			{
+				// Non-shared interface - find all implementations in this module.
+				// Safe because ComputeTransitiveFunctionMetadata runs after Build() completes,
+				// so m_classTypes contains all declared classes. (Init funcs never implement
+				// interfaces, so this branch is a no-op for them; the code path is still correct.)
+				asCObjectType *ifaceType = calledFunc->objectType;
+				int vfIdx = calledFunc->vfTableIdx;
+
+				for (asUINT c = 0; c < m_classTypes.GetLength(); c++)
+				{
+					asCObjectType *classType = m_classTypes[c];
+					if (!classType) continue;
+
+					for (asUINT k = 0; k < classType->interfaces.GetLength(); k++)
+					{
+						if (classType->interfaces[k] == ifaceType)
+						{
+							asUINT vtableOffset = classType->interfaceVFTOffsets[k] + vfIdx;
+							if (vtableOffset < classType->virtualFunctionTable.GetLength())
+							{
+								asCScriptFunction *implFunc = classType->virtualFunctionTable[vtableOffset];
+								if (implFunc)
+								{
+									asSMapNode<int, asUINT> *cursor = 0;
+									if (funcIdToIndex.MoveTo(&cursor, implFunc->id))
+										outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+								}
+							}
+							break;
+						}
+					}
+				}
+			}
+			else
+			{
+				// Can't resolve - treat as delegate
+				func->localCallsDelegate = true;
+			}
+		}
+		else if (op == asBC_CALLBND)
+		{
+			// Imported function - treat as delegate call
+			func->localCallsDelegate = true;
+		}
+		else if (op == asBC_ALLOC)
+		{
+			// ALLOC calls a constructor/factory. Function ID is at offset AS_PTR_SIZE.
+			int funcId = asBC_INTARG(&bc[n + AS_PTR_SIZE]);
+			if (funcId > 0)
+			{
+				asSMapNode<int, asUINT> *cursor = 0;
+				if (funcIdToIndex.MoveTo(&cursor, funcId))
+					outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+			}
+		}
+
+		n += instrSize;
+	}
+
+	// Deduplicate
+	for (asUINT d = 0; d < outCallees.GetLength(); d++)
+	{
+		for (asUINT e = d + 1; e < outCallees.GetLength(); )
+		{
+			if (outCallees[e] == outCallees[d])
+				outCallees.RemoveIndex(e);
+			else
+				e++;
+		}
+	}
+}
+
+void asCModule::ComputeTransitiveFunctionMetadata()
+{
+	asUINT funcCount = (asUINT)m_scriptFunctions.GetLength();
+
+	// Build id -> index map over m_scriptFunctions only. Init funcs are never
+	// callees (no bytecode CALL targets them), so they don't need to be in this map.
+	asCMap<int, asUINT> funcIdToIndex;
+	for (asUINT i = 0; i < funcCount; i++)
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if (func && func->scriptData)
+			funcIdToIndex.Insert(func->id, i);
+	}
+
+	// Phase 1: build callee lists for regular script functions
+	asCArray<asCArray<asUINT>> callees;
+	callees.SetLength(funcCount);
+	for (asUINT i = 0; i < funcCount; i++)
+		BuildCalleeList(m_scriptFunctions[i], funcIdToIndex, callees[i]);
+
+	// Phase 2: init transitive fields from local
+	for (asUINT i = 0; i < funcCount; i++)
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if (!func) continue;
+		func->minTransitiveAccessMask = func->minLocalAccessMask;
+		func->transitiveCallsDelegate = func->localCallsDelegate;
+		func->transitiveHalts = func->localHalts;
+	}
+
+	// Phase 3: recursion check - any regular function that can reach itself in the
+	// call graph has unknown halting (unless already NO). Must run before fixed-point
+	// so UNKNOWN values from cycles propagate to callers outside the cycle.
+	for (asUINT i = 0; i < funcCount; i++)
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if (!func || !func->scriptData) continue;
+		if (func->transitiveHalts >= asHALTS_UNKNOWN) continue;
+
+		asCArray<bool> visited;
+		visited.SetLength(funcCount);
+		for (asUINT v = 0; v < funcCount; v++) visited[v] = false;
+
+		asCArray<asUINT> stack;
+		for (asUINT j = 0; j < callees[i].GetLength(); j++)
+			stack.PushLast(callees[i][j]);
+
+		bool selfReachable = false;
+		while (stack.GetLength() > 0)
+		{
+			asUINT cur = stack[stack.GetLength() - 1];
+			stack.PopLast();
+
+			if (cur == i) { selfReachable = true; break; }
+			if (visited[cur]) continue;
+			visited[cur] = true;
+
+			for (asUINT j = 0; j < callees[cur].GetLength(); j++)
+				stack.PushLast(callees[cur][j]);
+		}
+
+		if (selfReachable && func->transitiveHalts < asHALTS_UNKNOWN)
+			func->transitiveHalts = asHALTS_UNKNOWN;
+	}
+
+	// Phase 4: Fixed-point iteration - propagate transitive metadata along the
+	// call graph for regular funcs.
+	bool changed = true;
+	while (changed)
+	{
+		changed = false;
+		for (asUINT i = 0; i < funcCount; i++)
+		{
+			asCScriptFunction *func = m_scriptFunctions[i];
+			if (!func || !func->scriptData) continue;
+
+			for (asUINT j = 0; j < callees[i].GetLength(); j++)
+			{
+				asUINT calleeIdx = callees[i][j];
+				asCScriptFunction *callee = m_scriptFunctions[calleeIdx];
+				if (!callee) continue;
+
+				asDWORD newMask = func->minTransitiveAccessMask | callee->minTransitiveAccessMask;
+				if (newMask != func->minTransitiveAccessMask)
+				{
+					func->minTransitiveAccessMask = newMask;
+					changed = true;
+				}
+
+				if (!func->transitiveCallsDelegate && callee->transitiveCallsDelegate)
+				{
+					func->transitiveCallsDelegate = true;
+					changed = true;
+				}
+
+				int newHalts = func->transitiveHalts > callee->transitiveHalts
+					? func->transitiveHalts : callee->transitiveHalts;
+				if (newHalts != func->transitiveHalts)
+				{
+					func->transitiveHalts = newHalts;
+					changed = true;
+				}
+			}
+		}
+	}
+
+	// Phase 5: Global-property init funcs. These are pure sources — no bytecode
+	// CALLs them, so they cannot appear in any cycle. Their callees live in
+	// m_scriptFunctions and are fully settled after phase 4, so one propagation
+	// pass is sufficient.
+	asCSymbolTableIterator<asCGlobalProperty> globIt = m_scriptGlobals.List();
+	while (globIt)
+	{
+		asCScriptFunction *initFunc = (*globIt)->GetInitFunc();
+		globIt++;
+		if (!initFunc) continue;
+
+		asCArray<asUINT> initCallees;
+		BuildCalleeList(initFunc, funcIdToIndex, initCallees);
+
+		initFunc->minTransitiveAccessMask = initFunc->minLocalAccessMask;
+		initFunc->transitiveCallsDelegate = initFunc->localCallsDelegate;
+		initFunc->transitiveHalts = initFunc->localHalts;
+
+		for (asUINT j = 0; j < initCallees.GetLength(); j++)
+		{
+			asCScriptFunction *callee = m_scriptFunctions[initCallees[j]];
+			if (!callee) continue;
+
+			initFunc->minTransitiveAccessMask |= callee->minTransitiveAccessMask;
+			if (callee->transitiveCallsDelegate)
+				initFunc->transitiveCallsDelegate = true;
+			if (callee->transitiveHalts > initFunc->transitiveHalts)
+				initFunc->transitiveHalts = callee->transitiveHalts;
+		}
+	}
 }
 
 END_AS_NAMESPACE

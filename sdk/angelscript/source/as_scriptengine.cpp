@@ -1627,6 +1627,12 @@ int asCScriptEngine::RegisterObjectProperty(const char *obj, const char *declara
 	if( (r = bld.VerifyProperty(&dt, declaration, name, type, 0)) < 0 )
 		return ConfigError(r, "RegisterObjectProperty", obj, declaration);
 
+	// Types with a dead-handle sentinel cannot have writable properties,
+	// because the sentinel is shared and writes would cross-contaminate.
+	// Use const properties or get/set accessors instead.
+	if( dt.GetTypeInfo()->deadHandle && !type.IsReadOnly() )
+		return ConfigError(asINVALID_DECLARATION, "RegisterObjectProperty", obj, "Non-const property not allowed on type with dead handle; use const or accessors");
+
 	// The VM currently only supports 16bit offsets
 	// TODO: The VM needs to have support for 32bit offsets. Probably with a second ADDSi instruction
 	//       However, when implementing this it is necessary for the bytecode serialization to support
@@ -1669,6 +1675,61 @@ int asCScriptEngine::RegisterObjectProperty(const char *obj, const char *declara
 
 	// Return the index of the property to signal success
 	return idx;
+}
+
+// interface
+int asCScriptEngine::RegisterHandle(const char *typeName, asRESOLVEHANDLEFUNC_t resolveFunc, void *userData, void *dead)
+{
+	if( typeName == 0 ) return ConfigError(asINVALID_NAME, "RegisterHandle", typeName, 0);
+	if( resolveFunc == 0 ) return ConfigError(asINVALID_ARG, "RegisterHandle", typeName, 0);
+
+	// Find the object type
+	asCTypeInfo *type = 0;
+	for( asUINT n = 0; n < registeredObjTypes.GetLength(); n++ )
+	{
+		if( registeredObjTypes[n]->name == typeName &&
+		    registeredObjTypes[n]->nameSpace == defaultNamespace )
+		{
+			type = registeredObjTypes[n];
+			break;
+		}
+	}
+
+	if( type == 0 )
+		return ConfigError(asINVALID_NAME, "RegisterHandle", typeName, 0);
+
+	// Reject double-registration
+	if( type->resolveHandle )
+		return ConfigError(asALREADY_REGISTERED, "RegisterHandle", typeName, 0);
+
+	// Validate incompatible flags
+	if( type->flags & asOBJ_VALUE )
+		return ConfigError(asINVALID_TYPE, "RegisterHandle", typeName, "Handle resolution is a ref-type concept");
+	if( type->flags & asOBJ_NOHANDLE )
+		return ConfigError(asINVALID_TYPE, "RegisterHandle", typeName, "Type registered with asOBJ_NOHANDLE");
+	if( type->flags & asOBJ_SCOPED )
+		return ConfigError(asINVALID_TYPE, "RegisterHandle", typeName, "Scoped types cannot have handle resolution");
+
+	// A dead-handle sentinel is incompatible with writable (non-const) properties,
+	// because the sentinel is shared and writes would cross-contaminate.
+	if( dead )
+	{
+		asCObjectType *ot = CastToObjectType(type);
+		if( ot )
+		{
+			for( asUINT n = 0; n < ot->properties.GetLength(); n++ )
+			{
+				if( !ot->properties[n]->type.IsReadOnly() )
+					return ConfigError(asINVALID_DECLARATION, "RegisterHandle", typeName, "Dead handle not allowed: type has non-const properties");
+			}
+		}
+	}
+
+	type->resolveHandle = resolveFunc;
+	type->handleUserData = userData;
+	type->deadHandle = dead;
+
+	return asSUCCESS;
 }
 
 // interface
@@ -2236,6 +2297,20 @@ int asCScriptEngine::RegisterBehaviourToObjectType(asCObjectType *objectType, as
 			}
 
 			// TODO: Verify that the same constructor hasn't been registered already
+
+			// Templates pass the object type in a hidden first parameter (the subtype
+			// id, an int reference). If the first parameter is instead the object type
+			// itself - e.g. a copy constructor mistakenly written as
+			// 'void f(const T<U> &in)' without the hidden parameter - it would be
+			// silently misclassified as the default constructor below, and
+			// default-initialisation would then invoke it with the type pointer as a
+			// bogus source object (a crash). Reject it with a clear error instead.
+			if( (objectType->flags & asOBJ_TEMPLATE) &&
+				func.parameterTypes[0].GetTypeInfo() == objectType )
+			{
+				WriteMessage("", 0, 0, asMSGTYPE_ERROR, TXT_TEMPLATE_CTOR_FIRST_PARAM_MUST_BE_SUBTYPE);
+				return ConfigError(asINVALID_DECLARATION, "RegisterObjectBehaviour", objectType->name.AddressOf(), decl);
+			}
 
 			// Store all constructors in a list
 			func.id = AddBehaviourFunction(func, internal);
@@ -3714,6 +3789,27 @@ asCObjectType *asCScriptEngine::GetTemplateInstanceType(asCObjectType *templateT
 	ot->name             = templateType->name;
 	ot->nameSpace        = templateType->nameSpace;
 
+	// Inherit the template's accessMask and OR in each subtype's accessMask so the
+	// specialization counts as both "what the template is" and "what its subtypes are".
+	// Without this the specialization would keep the asCTypeInfo default of 0xFFFFFFFF
+	// and saturate any m_usedAccessMask that OR's it in.
+	//
+	// Skip script-defined subtypes (module != nullptr): the builder never assigns an
+	// accessMask to script-created object types, so they always carry the asCTypeInfo
+	// ctor default of 0xFFFFFFFF. ORing that in would saturate every template instance
+	// (and every inherited method accessMask at line 4214/4387) any time a script class
+	// parameterizes an engine-registered template — e.g. Gui::Markup<ActionHelper>::open
+	// would inherit 0xFFFFFFFF from ActionHelper and pollute callers' m_usedAccessMask.
+	// Script-type visibility isn't a runtime category; their actual usage flows via
+	// transitive call-graph propagation on the script methods themselves.
+	ot->accessMask = templateType->accessMask;
+	for (asUINT i = 0; i < subTypes.GetLength(); i++)
+	{
+		asCTypeInfo *sub = subTypes[i].GetTypeInfo();
+		if (sub && sub->module == nullptr)
+			ot->accessMask |= sub->accessMask;
+	}
+
 	// If the template is being requested from a module, then the module should hold a reference to the type
 	if( requestingModule )
 	{
@@ -4136,6 +4232,10 @@ asCScriptFunction *asCScriptEngine::GenerateFactoryStubForTemplateObjectInstance
 	func->id = GetNextScriptFunctionId();
 	AddScriptFunction(func);
 
+	// Inherit the template instance's accessMask so callers' usage accumulators see
+	// a meaningful category instead of the asCScriptFunction default of 0xFFFFFFFF.
+	func->accessMask = ot->accessMask;
+
 	func->traits = factory->traits;
 	func->SetShared(true);
 	if( templateType->flags & asOBJ_REF )
@@ -4304,6 +4404,10 @@ bool asCScriptEngine::GenerateFunctionForTemplateObjectInstance(asCObjectType *t
 
 	func2->id       = GetNextScriptFunctionId();
 	AddScriptFunction(func2);
+
+	// Inherit the template instance's accessMask so callers' usage accumulators see
+	// a meaningful category instead of the asCScriptFunction default of 0xFFFFFFFF.
+	func2->accessMask = ot->accessMask;
 
 	// Return the new function
 	*newFunc = func2;
@@ -5711,6 +5815,22 @@ int asCScriptEngine::AssignScriptObject(void *dstObj, void *srcObj, const asITyp
 	return asSUCCESS;
 }
 
+void *asCScriptEngine::ResolveForRefCount(void *obj, const asCTypeInfo *ti) const
+{
+	if (!ti->resolveHandle)
+		return obj;
+
+	void *resolved = ti->resolveHandle((asPWORD)obj, ti->handleUserData);
+
+	// Sentinel means dead handle in sentinel mode - skip addref/release (sentinel is nocount)
+	if (resolved == ti->deadHandle)
+		return 0;
+
+	// null means dead handle in Erlang mode - skip addref/release
+	// (null pointer exception will happen at access time, not refcount time)
+	return resolved;
+}
+
 // interface
 void asCScriptEngine::AddRefScriptObject(void *obj, const asITypeInfo *type)
 {
@@ -5727,8 +5847,10 @@ void asCScriptEngine::AddRefScriptObject(void *obj, const asITypeInfo *type)
 		asCObjectType *objType = CastToObjectType(const_cast<asCTypeInfo*>(ti));
 		if (objType && objType->beh.addref)
 		{
-			// Call the addref behaviour
-			CallObjectMethod(obj, objType->beh.addref);
+			// Resolve handle to real pointer for handle-resolve types
+			void *refObj = ResolveForRefCount(obj, objType);
+			if (refObj)
+				CallObjectMethod(refObj, objType->beh.addref);
 		}
 	}
 }
@@ -5752,8 +5874,10 @@ void asCScriptEngine::ReleaseScriptObject(void *obj, const asITypeInfo *type)
 			asASSERT((objType->flags & asOBJ_NOCOUNT) || objType->beh.release);
 			if (objType->beh.release)
 			{
-				// Call the release behaviour
-				CallObjectMethod(obj, objType->beh.release);
+				// Resolve handle to real pointer for handle-resolve types
+				void *refObj = ResolveForRefCount(obj, objType);
+				if (refObj)
+					CallObjectMethod(refObj, objType->beh.release);
 			}
 		}
 		else if( objType )
