@@ -2002,8 +2002,19 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			// Per-site resolution via the compile-time table (final
 			// bytecode order). Missing/short table (e.g. a function
 			// restored from saved bytecode) fails closed.
+			//
+			// The stamp site (as_compiler.cpp, the const-global read) only
+			// records a target when unsafe references are disallowed, but
+			// asEP_ALLOW_UNSAFE_REFERENCES is an engine-global property that
+			// can be flipped after the compile that stamped the table. Re-check
+			// the same condition here, at consumption time, so a stamp made
+			// while the property was off is not trusted while it is on; the
+			// site then poisons as unresolved. Defense in depth: with the pass
+			// running only once per Build() nothing re-reads the table after a
+			// flip today, but any future re-run (module bind/unbind) would.
 			asCScriptFunction *target = 0;
-			if (func->scriptData && callPtrOrdinal < func->scriptData->funcdefCallTargets.GetLength())
+			if (!m_engine->ep.allowUnsafeReferences &&
+			    func->scriptData && callPtrOrdinal < func->scriptData->funcdefCallTargets.GetLength())
 				target = func->scriptData->funcdefCallTargets[callPtrOrdinal];
 			callPtrOrdinal++;
 			if (target)
@@ -2288,29 +2299,14 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		}
 	}
 
-	// funcdefCallTargets is build-time-only metadata: BuildCalleeList (above)
-	// is its only reader, and every read happens inside this function, which
-	// runs exactly once per Build() right after the compile that populates
-	// it (as_bytecode.cpp: ExtractFuncdefCallTargets, called per-function
-	// during builder->Build()). A second Build() on this module recompiles
-	// every function from scratch before this pass runs again, so the table
-	// is never stale-read. Drop the raw un-refcounted asCScriptFunction*
-	// entries now rather than let every script function carry them for the
-	// rest of its life.
-	for (asUINT i = 0; i < funcCount; i++)
-	{
-		asCScriptFunction *func = m_scriptFunctions[i];
-		if (func && func->scriptData)
-			func->scriptData->funcdefCallTargets.SetLength(0);
-	}
-	globIt = m_scriptGlobals.List();
-	while (globIt)
-	{
-		asCScriptFunction *initFunc = (*globIt)->GetInitFunc();
-		globIt++;
-		if (initFunc && initFunc->scriptData)
-			initFunc->scriptData->funcdefCallTargets.SetLength(0);
-	}
+	// funcdefCallTargets is deliberately NOT cleared here. This pass is
+	// specified to be idempotent - a pure function of current state that can
+	// be re-run at any time and reproduce the same verdicts - and the table
+	// is part of that state: clearing it would make the pass consume its own
+	// input, so a second run would demote every resolved funcdef call site to
+	// "unresolved" and downgrade an otherwise YES caller to UNKNOWN. The cost
+	// of retention is a handful of pointers per script function, which is not
+	// worth trading a substrate guarantee for.
 }
 
 END_AS_NAMESPACE

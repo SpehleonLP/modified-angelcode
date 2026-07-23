@@ -190,6 +190,9 @@ public:
 	// Called after Build() completes, so all class types and function bodies are finalized.
 	// Metadata is stored in function fields and persists through serialization,
 	// so this is not needed in compiler-free (load-only) builds.
+	// Idempotent: a pure function of current module state, re-runnable at any
+	// time. In particular it must never consume the per-function inputs it
+	// reads (asCScriptFunction::funcdefCallTargets).
 	void ComputeTransitiveFunctionMetadata();
 	// Scans func's bytecode, appending indices into m_scriptFunctions (via funcIdToIndex)
 	// for each CALL/CALLINTF/ALLOC target. Analysis-time poisons (unmapped/unresolvable
@@ -197,8 +200,14 @@ public:
 	// derives the transitive flag from it, keeping the whole pass idempotent and
 	// re-runnable. The function always initializes outUnresolved = false as its first
 	// statement (before the func/scriptData guard), so callers need not pre-initialize it.
-	// Caller must dedup outCallees if desired. outExternalCallees is
-	// plumbed for future use and currently always left empty.
+	// Caller must dedup outCallees if desired. outExternalCallees receives
+	// call targets that live outside this module's function map but whose
+	// metadata is nevertheless final and foldable as a constant: shared
+	// script functions reached by asBC_CALL/asBC_ALLOC, and, at an
+	// asBC_CallPtr site with a statically-known target, that target when it
+	// is a system function or a shared script function. The caller folds it
+	// like a resolved edge; it is not deduped (the fold is a join of
+	// idempotent max()-style operations).
 	void BuildCalleeList(asCScriptFunction *func,
 	                     const asCMap<int, asUINT> &funcIdToIndex,
 	                     asCArray<asUINT> &outCallees,

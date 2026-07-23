@@ -370,15 +370,18 @@ public:
 		// Holds information on try/catch blocks for exception handling
 		asCArray<asSTryCatchInfo>       tryCatchInfo;
 
-		// Build-time-only metadata: one entry per asBC_CallPtr in final
+		// Compile-time metadata: one entry per asBC_CallPtr in final
 		// bytecode order, holding the statically-known callee (or null if
-		// the target isn't provable). Not serialized — a function restored
+		// the target isn't provable). Not serialized - a function restored
 		// from saved bytecode has this empty, which the consumer
 		// (BuildCalleeList) must treat as "every site unknown", never as
-		// "no call sites". Cleared by asCModule::ComputeTransitiveFunctionMetadata
-		// once its one and only reader (BuildCalleeList) has consumed it for
-		// this Build() — any read of this array outside that pass is invalid
-		// and will observe it empty, not stale.
+		// "no call sites". Written once, by the compile that produced this
+		// function's bytecode (as_bytecode.cpp: ExtractFuncdefCallTargets),
+		// and never cleared afterwards: asCModule::ComputeTransitiveFunctionMetadata
+		// is specified to be idempotent, so it must not consume this table.
+		// Entries are raw and un-refcounted; they are only valid while the
+		// module that compiled this function is alive, which is the only
+		// window in which the pass runs.
 		asCArray<asCScriptFunction*>    funcdefCallTargets;
 
 		// The stack needed to execute the function

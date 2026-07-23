@@ -228,7 +228,29 @@ HANDLE itself immutable) whose initializer bytecode contains exactly one
 registered native's own behavior — the same trust level the rest of this
 analysis extends to `asFUNC_SYSTEM` functions. Script-side aliasing under
 `asEP_ALLOW_UNSAFE_REFERENCES` is explicitly guarded against (previous
-paragraph), not merely assumed away.
+paragraph) *for script compiled in the same pass as the read*, not merely
+assumed away; the guard is a compile-time and analysis-time check, so it
+cannot see script that does not exist yet.
+
+Consequently, on the same trust level as `GetAddressOfGlobalVar`, each of the
+following **invalidates every `asHALTS_YES` a module has already reported**,
+and the application must not act on those verdicts afterwards:
+
+- Flipping `asEP_ALLOW_UNSAFE_REFERENCES` on the engine after that module's
+  `Build()`. The property is engine-global and settable at any time; verdicts
+  were computed under the value in force during `Build()`.
+- Adding script to a module after its verdicts were computed — i.e.
+  `asIScriptModule::CompileFunction` with `asCOMP_ADD_TO_MODULE` (likewise
+  `CompileGlobalVar`). Newly added code can alias or reassign a global that
+  earlier verdicts assumed fixed, and nothing recomputes those verdicts.
+
+Together these mean a `YES` is only meaningful for a module that is built
+once and then left alone, under an engine whose properties are set before the
+build. `BuildCalleeList` additionally re-checks
+`!engine->ep.allowUnsafeReferences` when consuming the stamped per-site
+funcdef targets, so any *future* re-run of the metadata pass fails those
+sites closed; that is defense in depth for re-running, not a substitute for
+the contract above, because nothing re-runs the pass today.
 
 **Per-site scoping (not per-global):** the resolved target is carried as a
 per-`asBC_CallPtr`-site value (`ctx->knownFuncdefTarget`, reset to 0 after
@@ -262,7 +284,7 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting*` tests (currently 75, across the `AsHalting` and
+All `AsHalting*` tests (currently 76, across the `AsHalting` and
 `AsHaltingConstGlobalFuncdef` fixtures — the latter builds its engine
 *without* `asEP_ALLOW_UNSAFE_REFERENCES`, see "Const-global funcdef call
 resolution" above) should pass; this is the suite every later

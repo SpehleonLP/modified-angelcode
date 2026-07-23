@@ -644,16 +644,39 @@ TEST_F(AsHalting, ComputeTransitiveFunctionMetadataIsIdempotent) {
 	// the pass and asserts every function's four fields are bitwise
 	// unchanged. This is the substrate guarantee Task 5 exists to establish:
 	// the pass must be a pure, re-runnable function of current state.
+	//
+	// The module also carries a RESOLVED const-global funcdef call site
+	// (viaConst -> cg -> target). That is the only shape whose verdict is
+	// derived from per-function state the pass itself could consume
+	// destructively (asCScriptFunction::funcdefCallTargets), so without it
+	// this test is green for the wrong reason: a module with no resolved
+	// site is trivially insensitive to what the pass does with that table.
+	// The resolve only fires with unsafe references OFF (see
+	// AsHaltingConstGlobalFuncdef's fixture comment), so turn the fixture's
+	// engine-global flag off for this test before compiling anything.
+	ASSERT_GE(engine->SetEngineProperty(asEP_ALLOW_UNSAFE_REFERENCES, false), 0);
+
 	asIScriptModule* mod = engine->GetModule("halts", asGM_ALWAYS_CREATE);
 	mod->AddScriptSection("s",
 		"shared class S { void m() {} }\n"
 		"funcdef void CB();\n"
 		"void loop() { while (true) {} }\n"
 		"void g() {}\n"
-		"void f(CB@ cb, bool b) { S s; s.m(); g(); if (b) loop(); cb(); }\n");
+		"void f(CB@ cb, bool b) { S s; s.m(); g(); if (b) loop(); cb(); }\n"
+		"funcdef int F();\n"
+		"int target() { return 7; }\n"
+		"F@ const cg = @target;\n"
+		"int viaConst() { return cg(); }\n");
 	ASSERT_GE(mod->Build(), 0);
 
 	asCModule* cmod = static_cast<asCModule*>(mod);
+
+	// Precondition: the resolved site really did resolve on the Build()-time
+	// run, so the re-run below has something non-trivial to preserve.
+	asIScriptFunction* viaConst = mod->GetFunctionByName("viaConst");
+	ASSERT_NE(viaConst, nullptr);
+	ASSERT_EQ(viaConst->GetTransitiveHalts(), asHALTS_YES);
+	ASSERT_FALSE(viaConst->GetTransitiveCallsDelegate());
 
 	asUINT count = mod->GetFunctionCount();
 	ASSERT_GT(count, 0u);
@@ -676,6 +699,11 @@ TEST_F(AsHalting, ComputeTransitiveFunctionMetadataIsIdempotent) {
 		EXPECT_EQ(fn->GetLocalCallsDelegate(), localDelegate[i])      << i;
 		EXPECT_EQ(fn->GetTransitiveCallsDelegate(), transitiveDelegate[i]) << i;
 	}
+
+	// Spelled out separately from the loop above so a regression names the
+	// shape that broke rather than an opaque function index.
+	EXPECT_EQ(viaConst->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_FALSE(viaConst->GetTransitiveCallsDelegate());
 }
 
 TEST_F(AsHalting, LocalCallsDelegateReflectsOwnBytecodeNotUnresolvedPoison) {
@@ -1109,6 +1137,39 @@ TEST_F(AsHalting, UnsafeReferenceAliasCannotForgeConstGlobalFuncdefYes) {
 	ASSERT_NE(f, nullptr);
 	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
 	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHaltingConstGlobalFuncdef, ConsumptionTimeUnsafeReferencesGuardPoisonsResolvedSite) {
+	// asEP_ALLOW_UNSAFE_REFERENCES is engine-global and settable at any time,
+	// so the stamp-site guard (compile time) cannot be the only one: a module
+	// built with unsafe references off carries stamped per-site funcdef
+	// targets that are no longer trustworthy once the property is flipped on.
+	// BuildCalleeList therefore re-checks the property when it CONSUMES the
+	// stamped table, and fails the site closed.
+	//
+	// Scope note: with the pass running once per Build(), flipping the
+	// property does not by itself change any already-published verdict (see
+	// the README soundness contract). This test drives the pass directly to
+	// pin the consumption-time behaviour, which is what a later re-run of the
+	// pass (module bind/unbind) will depend on.
+	asIScriptModule* mod = engine->GetModule("halts_cgf", asGM_ALWAYS_CREATE);
+	mod->AddScriptSection("s",
+		"funcdef int F();\n"
+		"int target() { return 7; }\n"
+		"F@ const g = @target;\n"
+		"int f() { return g(); }\n");
+	ASSERT_GE(mod->Build(), 0);
+
+	asIScriptFunction* f = mod->GetFunctionByName("f");
+	ASSERT_NE(f, nullptr);
+	ASSERT_EQ(f->GetTransitiveHalts(), asHALTS_YES);
+	ASSERT_FALSE(f->GetTransitiveCallsDelegate());
+
+	ASSERT_GE(engine->SetEngineProperty(asEP_ALLOW_UNSAFE_REFERENCES, true), 0);
+	static_cast<asCModule*>(mod)->ComputeTransitiveFunctionMetadata();
+
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_TRUE(f->GetTransitiveCallsDelegate());
 }
 
 } // namespace
