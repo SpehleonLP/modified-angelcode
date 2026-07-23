@@ -1667,4 +1667,173 @@ TEST_F(AsHalting, LiteralGuardIsFoldedOutOfBytecode) {
 	EXPECT_EQ(f->GetLocalHalts(), asHALTS_NO);   // verdict unchanged by folding
 }
 
+// Same three functions as ByteCodeRoundTripPreservesHaltsMetadata, but over a
+// funcdef call site: the shape whose local verdict is capped at UNKNOWN by
+// localCallsDelegate and whose call target table (funcdefCallTargets) has to
+// survive the byte code round trip for BuildCalleeList to walk it again. Save,
+// load, then save the loaded module and load that too -- a field that is
+// written but not read back would survive one hop and drop on the second.
+TEST_F(AsHalting, ByteCodeRoundTripPreservesFuncdefCallMetadata) {
+	const char* code =
+		"funcdef void CB();\n"
+		"void leaf() {}\n"
+		"void viaFuncdef(CB@ cb) { cb(); }\n"
+		"void callsIt() { viaFuncdef(@leaf); }\n";
+
+	asIScriptModule* mod = engine->GetModule("halts", asGM_ALWAYS_CREATE);
+	mod->AddScriptSection("s", code);
+	ASSERT_GE(mod->Build(), 0);
+
+	MemStream stream;
+	ASSERT_GE(mod->SaveByteCode(&stream), 0);
+	asIScriptModule* mod2 = engine->GetModule("restored", asGM_ALWAYS_CREATE);
+	ASSERT_GE(mod2->LoadByteCode(&stream), 0);
+
+	MemStream stream2;
+	ASSERT_GE(mod2->SaveByteCode(&stream2), 0);
+	asIScriptModule* mod3 = engine->GetModule("restored2", asGM_ALWAYS_CREATE);
+	ASSERT_GE(mod3->LoadByteCode(&stream2), 0);
+
+	const char* names[3] = { "leaf", "viaFuncdef", "callsIt" };
+	for (int i = 0; i < 3; i++) {
+		asIScriptFunction* a = mod->GetFunctionByName(names[i]);
+		asIScriptFunction* b = mod2->GetFunctionByName(names[i]);
+		asIScriptFunction* c = mod3->GetFunctionByName(names[i]);
+		ASSERT_NE(a, nullptr) << names[i];
+		ASSERT_NE(b, nullptr) << names[i];
+		ASSERT_NE(c, nullptr) << names[i];
+		EXPECT_EQ(a->GetLocalHalts(),              b->GetLocalHalts())              << names[i];
+		EXPECT_EQ(a->GetLocalHalts(),              c->GetLocalHalts())              << names[i];
+		EXPECT_EQ(a->GetTransitiveHalts(),         b->GetTransitiveHalts())         << names[i];
+		EXPECT_EQ(a->GetTransitiveHalts(),         c->GetTransitiveHalts())         << names[i];
+		EXPECT_EQ(a->GetLocalCallsDelegate(),      b->GetLocalCallsDelegate())      << names[i];
+		EXPECT_EQ(a->GetLocalCallsDelegate(),      c->GetLocalCallsDelegate())      << names[i];
+		EXPECT_EQ(a->GetTransitiveCallsDelegate(), b->GetTransitiveCallsDelegate()) << names[i];
+		EXPECT_EQ(a->GetTransitiveCallsDelegate(), c->GetTransitiveCallsDelegate()) << names[i];
+	}
+
+	// Pin the values too, not just their stability: an unresolved funcdef call
+	// site poisons the caller and the call site itself, and never reports YES.
+	asIScriptFunction* viaFuncdef = mod3->GetFunctionByName("viaFuncdef");
+	asIScriptFunction* callsIt    = mod3->GetFunctionByName("callsIt");
+	ASSERT_NE(viaFuncdef, nullptr);
+	ASSERT_NE(callsIt, nullptr);
+	EXPECT_TRUE(viaFuncdef->GetLocalCallsDelegate());
+	EXPECT_EQ(viaFuncdef->GetLocalHalts(),      asHALTS_UNKNOWN);
+	EXPECT_EQ(viaFuncdef->GetTransitiveHalts(), asHALTS_UNKNOWN);
+	EXPECT_EQ(callsIt->GetTransitiveHalts(),    asHALTS_UNKNOWN);
+}
+
+// ---- Constant guards with asEP_OPTIMIZE_BYTECODE OFF ----
+//
+// With the optimizer on, a literal loop guard is fused (ClrHi + JZ -> JLowZ by
+// OptimizeLocally) and then folded away entirely by Optimize(). With it off
+// neither happens, and the guard reaches the halting walk as four adjacent
+// instructions: SetV1 v,1 ; CpyVtoR4 v ; ClrHi ; JZ end. The walk must elide
+// the dead edge of that shape too -- and, much more importantly, must not
+// elide anything else.
+class AsHaltingNoOptimizer : public ::testing::Test {
+protected:
+	asIScriptEngine* engine = nullptr;
+
+	void SetUp() override {
+		engine = asCreateScriptEngine();
+		ASSERT_NE(engine, nullptr);
+		engine->SetEngineProperty(asEP_OPTIMIZE_BYTECODE, false);
+	}
+	void TearDown() override {
+		if (engine) engine->ShutDownAndRelease();
+	}
+
+	asIScriptFunction* Fn(const char* code, const char* name) {
+		asIScriptModule* mod = engine->GetModule("halts_noopt", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("s", code);
+		if (mod->Build() < 0) { ADD_FAILURE() << "build failed:\n" << code; return nullptr; }
+		asIScriptFunction* f = mod->GetFunctionByName(name);
+		if (!f) ADD_FAILURE() << "function not found: " << name;
+		return f;
+	}
+
+	// Number of `ClrHi ; JZ|JNZ` pairs in the finalized byte code. Every test
+	// below asserts on this so that none of them can quietly stop exercising
+	// the unfused shape (e.g. if the optimizer property stopped taking).
+	static int CountClrHiJumps(asIScriptFunction* f) {
+		asUINT len = 0;
+		asDWORD* bc = f->GetByteCode(&len);
+		if (!bc) return -1;
+		int count = 0;
+		asUINT prev = len;
+		for (asUINT n = 0; n < len; ) {
+			asBYTE op = *(asBYTE*)&bc[n];
+			int sz = asBCTypeSize[asBCInfo[op].type];
+			if ((op == asBC_JZ || op == asBC_JNZ) &&
+			    prev < len && *(asBYTE*)&bc[prev] == asBC_ClrHi)
+				count++;
+			if (sz == 0) return -1;
+			prev = n;
+			n += (asUINT)sz;
+		}
+		return count;
+	}
+};
+
+// Positive: the unfused literal guard is recognised, so the exit edge of
+// `while (true)` is dead, no RET is reachable, and the verdict is NO -- the
+// same verdict the optimizer-on build reaches by folding the guard away.
+// Emitted shape (measured): SetV1 v1,1 ; CpyVtoR4 v1 ; ClrHi ; JZ end.
+TEST_F(AsHaltingNoOptimizer, LiteralGuardIsElidedWithoutOptimizer) {
+	asIScriptFunction* f = Fn("void f() { while (true) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_EQ(CountClrHiJumps(f), 1);   // unfused shape really is present
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_NO);
+}
+
+// Negative, and the one that matters: `while (false || a)` emits a constant
+// guard AND a genuine one, back to back (measured):
+//     SetV1 v1,0 ; CpyVtoR4 v1 ; ClrHi ; JZ  -> 21   <- constant, elidable
+//     SetV1 v1,1 ; JMP -> 23 ; CpyVtoV4      <- the two operand paths
+//     CpyVtoR4 v1 ; ClrHi ; JZ  -> RET            <- genuine, must keep BOTH
+// The second guard's value depends on the parameter, so its exit edge is live
+// and the function halts whenever `a` is false: UNKNOWN. If the matcher
+// over-matches and kills that exit edge, the RET stops being reachable and the
+// verdict becomes NO -- a claim that a function which plainly can return never
+// returns. Nothing about the four-instruction window is loose enough to match
+// here: the slot where a SetV would have to sit holds a CpyVtoV4.
+TEST_F(AsHaltingNoOptimizer, GenuineGuardAfterConstantGuardKeepsBothEdges) {
+	asIScriptFunction* f = Fn("void f(bool a) { while (false || a) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_EQ(CountClrHiJumps(f), 2);   // one constant guard, one genuine
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_UNKNOWN);
+}
+
+// The plain runtime guard, with no constant guard anywhere near it.
+TEST_F(AsHaltingNoOptimizer, RuntimeGuardKeepsBothEdgesWithoutOptimizer) {
+	asIScriptFunction* f = Fn("void f(bool a) { while (a) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_EQ(CountClrHiJumps(f), 1);
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_UNKNOWN);
+}
+
+// A genuine guard whose loop body writes the variable the guard reads: the
+// SetV that initialises it is not adjacent to the CpyVtoR4, and the loop's
+// back edge re-enters at the test. Both edges must stay live.
+TEST_F(AsHaltingNoOptimizer, LoopVariableGuardKeepsBothEdgesWithoutOptimizer) {
+	asIScriptFunction* f = Fn("void f(bool a) { bool b = true; while (b) { b = a; } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_EQ(CountClrHiJumps(f), 1);
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_UNKNOWN);
+}
+
+// A genuine guard in the middle of a loop body, i.e. one whose CpyVtoR4 is NOT
+// a jump target -- the case where the SetV opcode whitelist is the only thing
+// standing between the matcher and a live edge. "if (a) return;" puts the RET
+// on the guard's fall-through path, so a wrongly elided fall-through makes a
+// function that returns whenever a is true look like one that never returns.
+TEST_F(AsHaltingNoOptimizer, MidLoopGuardKeepsBothEdgesWithoutOptimizer) {
+	asIScriptFunction* f = Fn("void f(bool a) { while (true) { if (a) return; } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_EQ(CountClrHiJumps(f), 2);   // the literal guard and the genuine one
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_UNKNOWN);
+}
+
 } // namespace

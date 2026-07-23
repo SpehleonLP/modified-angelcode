@@ -1951,7 +1951,11 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 	{
 		int op = *(asBYTE*)&bc[n];
 		int instrSize = asBCTypeSize[asBCInfo[op].type];
-		if (instrSize == 0) break;
+		// An opcode the decoder cannot size ends the scan, which hides every
+		// call site past this point - including the ones that would otherwise
+		// poison. Fail closed, exactly as the analysis walker in
+		// asCCompiler::FinalizeFunction does.
+		if (instrSize == 0) { outUnresolved = true; break; }
 
 		if (op == asBC_CALL)
 		{

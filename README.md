@@ -408,10 +408,11 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting*` tests (currently 89, across the `AsHalting` and
-`AsHaltingConstGlobalFuncdef` fixtures — the latter builds its engine
-*without* `asEP_ALLOW_UNSAFE_REFERENCES`, see "Const-global funcdef call
-resolution" above) should pass; this is the suite every later
+All `AsHalting*` tests (currently 95, across the `AsHalting`,
+`AsHaltingConstGlobalFuncdef` and `AsHaltingNoOptimizer` fixtures — the second
+builds its engine *without* `asEP_ALLOW_UNSAFE_REFERENCES`, see "Const-global
+funcdef call resolution" above, and the third builds it with
+`asEP_OPTIMIZE_BYTECODE` off) should pass; this is the suite every later
 halting-analysis change adds to, in `tests/test_as_halting.cpp`.
 
 ## Branch layout

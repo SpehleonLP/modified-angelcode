@@ -795,15 +795,18 @@ void asCCompiler::FinalizeFunction()
 	// ClrHi+JZ/JNZ into these) and asBC_JMPP (switch dispatch into the run of
 	// JMP instructions that follows it). A funcdef/delegate call site caps the
 	// result at UNKNOWN: the callee is unknown, so YES cannot be promised.
-	// A literal loop guard emits SetV1(const) -> CpyVtoR4 -> JLowZ whose exit
-	// edge is statically dead. asCByteCode::Optimize() folds exactly that
-	// adjacent triple away, so with byte code optimization enabled (the default)
-	// this walk normally never sees one. The elision below is still load-bearing
-	// because asEP_OPTIMIZE_BYTECODE can be turned off, in which case the triple
-	// reaches the walk intact. Exactly that adjacent triple (no jump entering
-	// mid-pattern) has its dead edge elided from the reachability walk; any other
+	// A literal loop guard emits SetV*(const) -> CpyVtoR4 -> ClrHi -> JZ/JNZ,
+	// whose exit edge is statically dead. Both halves of the byte code
+	// optimizer act on it: OptimizeLocally fuses ClrHi + JZ/JNZ into
+	// JLowZ/JLowNZ, and Optimize() then folds the resulting adjacent triple to
+	// unconditional flow - so with byte code optimization enabled (the default)
+	// this walk normally sees no guard at all. With asEP_OPTIMIZE_BYTECODE off
+	// neither step runs and the four-instruction shape reaches the walk intact.
+	// The elision below matches both shapes: the fused triple (which the fold
+	// normally consumes first) and the unfused quadruple. Only an exactly
+	// adjacent run with no jump entering mid-pattern qualifies; any other
 	// conditional keeps both edges. Elision only when the register value is
-	// provably the immediate constant — never on doubt.
+	// provably the immediate constant - never on doubt.
 	{
 		asDWORD *bc  = outFunc->scriptData->byteCode.AddressOf();
 		asUINT bcLen = (asUINT)outFunc->scriptData->byteCode.GetLength();
@@ -859,43 +862,70 @@ void asCCompiler::FinalizeFunction()
 
 		// Pass 2: resolve statically-constant guards. forced[n] for a
 		// conditional jump at n: 0 = both edges live, 1 = fall-through only,
-		// 2 = jump-target only. Elision requires the exact adjacent triple
-		// SetV1/SetV2/SetV4(var, imm) -> CpyVtoR4(same var) -> JLowZ/JLowNZ
-		// with no jump entering at the CpyVtoR4 or the jump itself (a jump
-		// into the SetV is fine — the constant still gets written). Anything
-		// else leaves forced[n] == 0.
+		// 2 = jump-target only. Exactly two adjacent shapes qualify:
+		//   fused (what the optimizer leaves):
+		//     SetV1/SetV2/SetV4(var, imm) -> CpyVtoR4(same var) -> JLowZ/JLowNZ
+		//   unfused (what the compiler emits with the optimizer off):
+		//     SetV1/SetV2/SetV4(var, imm) -> CpyVtoR4(same var) -> ClrHi -> JZ/JNZ
+		// with no jump entering at the CpyVtoR4, at the ClrHi, or at the jump
+		// itself (a jump into the SetV is fine - the constant still gets
+		// written). Anything else leaves forced[n] == 0. Over-matching here is
+		// unsound: forced[] tells the reachability walk that an edge is dead,
+		// so a live edge marked dead can make a function that plainly returns
+		// look like one that never can.
 		asCArray<asBYTE> forced;
 		forced.SetLength(bcLen);
 		for (asUINT v = 0; v < bcLen; v++) forced[v] = 0;
 
 		if (decodeOk)
 		{
-			asUINT p2 = bcLen, p1 = bcLen; // the two preceding instruction addresses
+			// The three preceding instruction addresses.
+			asUINT p3 = bcLen, p2 = bcLen, p1 = bcLen;
 			for (asUINT n = 0; n < bcLen; )
 			{
 				asBYTE op = *(asBYTE*)&bc[n];
 				int instrSize = asBCTypeSize[asBCInfo[op].type];
 
-				if ((op == asBC_JLowZ || op == asBC_JLowNZ) &&
-				    p1 < bcLen && p2 < bcLen &&
-				    !isJumpTarget[p1] && !isJumpTarget[n])
+				bool viaClrHi = (op == asBC_JZ || op == asBC_JNZ) &&
+				                p1 < bcLen && *(asBYTE*)&bc[p1] == asBC_ClrHi &&
+				                !isJumpTarget[p1];
+				bool viaLow   = (op == asBC_JLowZ || op == asBC_JLowNZ);
+				// The pair sits one slot further back when the unfused ClrHi
+				// is still between the load and the jump.
+				asUINT q1 = viaClrHi ? p2 : p1;   // expected CpyVtoR4
+				asUINT q2 = viaClrHi ? p3 : p2;   // expected SetV*
+
+				if ((viaLow || viaClrHi) &&
+				    q1 < bcLen && q2 < bcLen &&
+				    !isJumpTarget[q1] && !isJumpTarget[n])
 				{
-					asBYTE op1 = *(asBYTE*)&bc[p1];
-					asBYTE op2 = *(asBYTE*)&bc[p2];
+					asBYTE op1 = *(asBYTE*)&bc[q1];
+					asBYTE op2 = *(asBYTE*)&bc[q2];
 					if (op1 == asBC_CpyVtoR4 &&
 					    (op2 == asBC_SetV1 || op2 == asBC_SetV2 || op2 == asBC_SetV4) &&
-					    asBC_SWORDARG0(&bc[p1]) == asBC_SWORDARG0(&bc[p2]))
+					    asBC_SWORDARG0(&bc[q1]) == asBC_SWORDARG0(&bc[q2]))
 					{
-						// JLowZ/JLowNZ test only the low byte of the value
-						// register, which CpyVtoR4 loaded from the var the
-						// SetV wrote — so the outcome is the constant's.
-						asDWORD c = asBC_DWORDARG(&bc[p2]);
-						bool jumpTaken = (op == asBC_JLowZ) ? ((c & 0xFF) == 0)
-						                                    : ((c & 0xFF) != 0);
-						forced[n] = jumpTaken ? (asBYTE)2 : (asBYTE)1;
+						// SetV1/SetV2/SetV4 all store the whole immediate dword
+						// and CpyVtoR4 loads the whole dword back, so the value
+						// register holds exactly c. JLowZ/JLowNZ test its low
+						// byte. JZ/JNZ test all four bytes, of which ClrHi has
+						// zeroed the upper three - but ClrHi only does that
+						// where AS_SIZEOF_BOOL == 1; elsewhere it is a runtime
+						// no-op and the jump sees all of c. Refuse the elision
+						// unless the two readings agree, so the verdict cannot
+						// depend on the build configuration. (Guard constants
+						// are 0 or 1, so this costs nothing in practice.)
+						asDWORD c = asBC_DWORDARG(&bc[q2]);
+						if (!viaClrHi || c == 0 || (c & 0xFF) != 0)
+						{
+							bool zeroJump  = (op == asBC_JLowZ || op == asBC_JZ);
+							bool jumpTaken = zeroJump ? ((c & 0xFF) == 0)
+							                          : ((c & 0xFF) != 0);
+							forced[n] = jumpTaken ? (asBYTE)2 : (asBYTE)1;
+						}
 					}
 				}
-				p2 = p1; p1 = n;
+				p3 = p2; p2 = p1; p1 = n;
 				n += (asUINT)instrSize;
 			}
 		}
