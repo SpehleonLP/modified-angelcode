@@ -1891,7 +1891,20 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			if (funcIdToIndex.MoveTo(&cursor, funcId))
 				outCallees.PushLast(funcIdToIndex.GetValue(cursor));
 			else
-				outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
+			{
+				// A direct call whose target is a shared script function is
+				// frozen: shared entities are created by the first module
+				// that compiles them, that module's Build() (and metadata
+				// pass) completed before any other module could reference
+				// them, and shared code can only call shared code - so the
+				// target's transitive metadata is final. Fold it as a
+				// constant. Anything else stays unresolved.
+				asCScriptFunction *calledFunc = m_engine->GetScriptFunction(funcId);
+				if (calledFunc && calledFunc->funcType == asFUNC_SCRIPT && calledFunc->IsShared())
+					outExternalCallees.PushLast(calledFunc);
+				else
+					outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
+			}
 		}
 		else if (op == asBC_CALLINTF)
 		{
@@ -1995,7 +2008,16 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 				if (funcIdToIndex.MoveTo(&cursor, funcId))
 					outCallees.PushLast(funcIdToIndex.GetValue(cursor));
 				else
-					outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
+				{
+					// Same reasoning as the CALL branch: a shared class's
+					// constructor/factory living in another module is frozen
+					// too, so fold it as a constant instead of poisoning.
+					asCScriptFunction *calledFunc = m_engine->GetScriptFunction(funcId);
+					if (calledFunc && calledFunc->funcType == asFUNC_SCRIPT && calledFunc->IsShared())
+						outExternalCallees.PushLast(calledFunc);
+					else
+						outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
+				}
 			}
 			else
 				outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
@@ -2056,6 +2078,23 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		// verdict cannot promise YES.
 		func->transitiveCallsDelegate = func->localCallsDelegate || unresolved[i];
 		func->transitiveHalts = func->localHalts;
+
+		// External fixed callees: targets outside this module whose metadata
+		// is already final (shared functions are frozen at first compile).
+		// Constants - folded once here; they cannot change during the fixed
+		// point, and they cannot form cycles back into this module.
+		for (asUINT j = 0; j < externalCallees[i].GetLength(); j++)
+		{
+			asCScriptFunction *ext = externalCallees[i][j];
+			func->minTransitiveAccessMask |= ext->minTransitiveAccessMask;
+			if (ext->transitiveCallsDelegate)
+				func->transitiveCallsDelegate = true;
+			// Same NO-doesn't-cross-a-call-edge rule as phase 4.
+			int extHalts = ext->transitiveHalts == asHALTS_NO
+				? (int)asHALTS_UNKNOWN : (int)ext->transitiveHalts;
+			if (extHalts > (int)func->transitiveHalts)
+				func->transitiveHalts = extHalts;
+		}
 
 		// BuildCalleeList's poisonings (shared targets, imports,
 		// unresolvable dispatch) contribute no call edges, so an
@@ -2174,6 +2213,22 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		initFunc->minTransitiveAccessMask = initFunc->minLocalAccessMask;
 		initFunc->transitiveCallsDelegate = initFunc->localCallsDelegate || initUnresolved;
 		initFunc->transitiveHalts = initFunc->localHalts;
+
+		// External fixed callees: same constant fold as phase 2 (shared
+		// functions are frozen at first compile, so this cannot form a
+		// cycle back into this module's init funcs).
+		for (asUINT j = 0; j < initExternalCallees.GetLength(); j++)
+		{
+			asCScriptFunction *ext = initExternalCallees[j];
+			initFunc->minTransitiveAccessMask |= ext->minTransitiveAccessMask;
+			if (ext->transitiveCallsDelegate)
+				initFunc->transitiveCallsDelegate = true;
+			// Same NO-doesn't-cross-a-call-edge rule as phase 4.
+			int extHalts = ext->transitiveHalts == asHALTS_NO
+				? (int)asHALTS_UNKNOWN : (int)ext->transitiveHalts;
+			if (extHalts > (int)initFunc->transitiveHalts)
+				initFunc->transitiveHalts = extHalts;
+		}
 
 		// BuildCalleeList's poisonings (shared targets, imports,
 		// unresolvable dispatch) contribute no call edges, so an

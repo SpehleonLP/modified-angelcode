@@ -74,6 +74,16 @@ protected:
 		return mod->Build() >= 0;
 	}
 
+	// Build `code` as a named module and return the named function.
+	asIScriptFunction* FnIn(const char* moduleName, const char* code, const char* name) {
+		asIScriptModule* mod = engine->GetModule(moduleName, asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("s", code);
+		if (mod->Build() < 0) { ADD_FAILURE() << "build failed:\n" << code; return nullptr; }
+		asIScriptFunction* f = mod->GetFunctionByName(name);
+		if (!f) ADD_FAILURE() << "function not found: " << name;
+		return f;
+	}
+
 	// Dump finalized bytecode as op names — use when a classification test
 	// fails to see what the optimizer actually emitted.
 	static void Dump(asIScriptFunction* f) {
@@ -404,12 +414,80 @@ TEST_F(AsHalting, DoWhileContinueSkippingIncrementIsNotYes) {
 }
 
 TEST_F(AsHalting, SharedClassMethodCallIsNotTransitivelyYes) {
-	// A shared class's overrides may live in other modules; BuildCalleeList
-	// poisons the call site instead of resolving it. The poison must cap
-	// the caller's transitive YES.
+	// S is a non-final shared class, so `s.m()` is a virtual call: it compiles
+	// to asBC_CALLINTF (funcType asFUNC_VIRTUAL), not asBC_CALL. That op is
+	// untouched by Task 6's direct-call resolution — Task 6 only folds direct
+	// (asBC_CALL/asBC_ALLOC) targets to shared *script* functions, because
+	// only those are frozen; virtual dispatch on a shared type can still be
+	// overridden by an implementation this module never saw, so it must stay
+	// poisoned. This test now pins that virtual-dispatch case specifically.
+	// See SharedFinalClassMethodCallStillPoisonedViaVirtualDispatch below:
+	// even a `final` class's methods go through this same CALLINTF path (an
+	// external module holding only a forward declaration has no method body
+	// to call directly — it can only reach the method through the shared
+	// type's vftable), so shared class-method dispatch is untouched by
+	// Task 6 regardless of finality; only free functions and constructors
+	// (asBC_CALL/asBC_ALLOC) are in scope here.
 	asIScriptFunction* f = Fn(
 		"shared class S { void m() {} }\n"
 		"void f() { S s; s.m(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, DirectCallToSharedFreeFunctionIsTransitivelyYes) {
+	// sh() is a shared free function, frozen once "owner" builds it. "user"
+	// only has an `external shared` declaration, so its funcIdToIndex map
+	// misses the call target — but the target is a shared script function,
+	// so Task 6 resolves it by folding the callee's already-final metadata
+	// instead of poisoning the call site.
+	ASSERT_NE(FnIn("owner", "shared int sh() { return 1; }", "sh"), nullptr);
+	asIScriptFunction* f = FnIn("user",
+		"external shared int sh();\n"
+		"int f() { return sh(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_EQ(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, DirectCallToLoopingSharedFunctionIsNotYes) {
+	// Adversarial: the resolved callee's own verdict is NOT asHALTS_YES
+	// (it is asHALTS_NO, an infinite loop), so the fold must propagate
+	// that — not silently pass through YES because the call resolved.
+	ASSERT_NE(FnIn("owner", "shared void loopy(int n) { while (n > 0) { } }", "loopy"), nullptr);
+	asIScriptFunction* f = FnIn("user",
+		"external shared void loopy(int n);\n"
+		"void f() { loopy(3); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, SharedFinalClassMethodCallStillPoisonedViaVirtualDispatch) {
+	// DEVIATION FROM BRIEF (documented in task-6-report.md): the brief's
+	// Step 1 proposed this test under the name
+	// "DirectCallToSharedFinalClassMethodIsTransitivelyYes", expecting `final`
+	// on the class to make c.m() compile to a direct asBC_CALL. Empirically
+	// (confirmed by running this test against the Task 6 implementation) that
+	// is not how this fork's builder works: EVERY class method — final class
+	// or not — is unconditionally wrapped into the class's virtual function
+	// table (as_builder.cpp, class-declaration pass, unguarded by any
+	// final/NOINHERIT check), and PerformFunctionCall emits asBC_CALLINTF for
+	// any funcType==asFUNC_VIRTUAL target. This is not an oversight: it is
+	// how cross-module dispatch to a shared class's methods works at all —
+	// "user" here only has an `external shared class C;` forward declaration
+	// with no method body, so the vftable slot is the *only* way it can reach
+	// C::m() at all. So `final` provides no direct-call path to fold; per the
+	// brief's own scope line ("Modify: ...BuildCalleeList CALL and ALLOC
+	// map-miss branches") and its virtual-dispatch-stays-poisoned rule, this
+	// case is out of Task 6's scope. No later task in the plan (7-11)
+	// addresses CALLINTF/shared-class-method resolution either, so this is
+	// left poisoned; this test pins that as current, correct behavior rather
+	// than asserting the brief's unachievable expectation.
+	asIScriptModule* owner = engine->GetModule("owner", asGM_ALWAYS_CREATE);
+	owner->AddScriptSection("s", "shared final class C { int m() { return 1; } }");
+	ASSERT_GE(owner->Build(), 0);
+	asIScriptFunction* f = FnIn("user",
+		"external shared class C;\n"
+		"int f() { C c; return c.m(); }", "f");
 	ASSERT_NE(f, nullptr);
 	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
 }
