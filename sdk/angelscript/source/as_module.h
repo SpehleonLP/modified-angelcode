@@ -192,11 +192,16 @@ public:
 	// so this is not needed in compiler-free (load-only) builds.
 	void ComputeTransitiveFunctionMetadata();
 	// Scans func's bytecode, appending indices into m_scriptFunctions (via funcIdToIndex)
-	// for each CALL/CALLINTF/ALLOC target, and sets func->localCallsDelegate for
-	// CALLBND / unresolvable-CALLINTF cases. Caller must dedup outCallees if desired.
+	// for each CALL/CALLINTF/ALLOC target. Analysis-time poisons (unmapped/unresolvable
+	// call sites) are reported via outUnresolved rather than mutating func; the caller
+	// derives the transitive flag from it, keeping the whole pass idempotent and
+	// re-runnable. Caller must dedup outCallees if desired. outExternalCallees is
+	// plumbed for future use and currently always left empty.
 	void BuildCalleeList(asCScriptFunction *func,
 	                     const asCMap<int, asUINT> &funcIdToIndex,
-	                     asCArray<asUINT> &outCallees);
+	                     asCArray<asUINT> &outCallees,
+	                     asCArray<asCScriptFunction*> &outExternalCallees,
+	                     bool &outUnresolved);
 	int  AddScriptFunction(int sectionIdx, int declaredAt, int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asCString> &paramNames, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, bool isInterface, asCObjectType *objType = 0, bool isGlobalFunction = false, asSFunctionTraits funcTraits = asSFunctionTraits(), asSNameSpace *ns = 0);
 	int  AddScriptFunction(asCScriptFunction *func);
 	int  AddImportedFunction(int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, asSFunctionTraits funcTraits, asSNameSpace *ns, const asCString &moduleName);

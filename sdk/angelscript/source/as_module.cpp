@@ -1868,7 +1868,9 @@ asDWORD asCModule::SetAccessMask(asDWORD mask)
 
 void asCModule::BuildCalleeList(asCScriptFunction *func,
                                 const asCMap<int, asUINT> &funcIdToIndex,
-                                asCArray<asUINT> &outCallees)
+                                asCArray<asUINT> &outCallees,
+                                asCArray<asCScriptFunction*> &outExternalCallees,
+                                bool &outUnresolved)
 {
 	if (!func || !func->scriptData) return;
 
@@ -1888,7 +1890,7 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			if (funcIdToIndex.MoveTo(&cursor, funcId))
 				outCallees.PushLast(funcIdToIndex.GetValue(cursor));
 			else
-				func->localCallsDelegate = true; // Unmapped target: no edge can be recorded, so the site must poison.
+				outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
 		}
 		else if (op == asBC_CALLINTF)
 		{
@@ -1897,7 +1899,7 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			if (calledFunc && calledFunc->objectType && calledFunc->objectType->IsShared())
 			{
 				// Shared interface - implementations may come from other modules
-				func->localCallsDelegate = true;
+				outUnresolved = true;
 			}
 			else if (calledFunc && calledFunc->objectType && calledFunc->objectType->IsInterface())
 			{
@@ -1952,7 +1954,7 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 
 					if (vfIdx < 0 || (asUINT)vfIdx >= classType->virtualFunctionTable.GetLength())
 					{
-						func->localCallsDelegate = true; // out of contract - stay conservative
+						outUnresolved = true; // out of contract - stay conservative
 						continue;
 					}
 					asCScriptFunction *implFunc = classType->virtualFunctionTable[vfIdx];
@@ -1962,19 +1964,25 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 					if (funcIdToIndex.MoveTo(&cursor, implFunc->id))
 						outCallees.PushLast(funcIdToIndex.GetValue(cursor));
 					else
-						func->localCallsDelegate = true; // impl not in this module's map
+						outUnresolved = true; // impl not in this module's map
 				}
 			}
 			else
 			{
 				// Can't resolve - treat as delegate
-				func->localCallsDelegate = true;
+				outUnresolved = true;
 			}
 		}
 		else if (op == asBC_CALLBND)
 		{
 			// Imported function - treat as delegate call
-			func->localCallsDelegate = true;
+			outUnresolved = true;
+		}
+		else if (op == asBC_CallPtr)
+		{
+			// Funcdef/delegate call - target unknown at this level (Task 8
+			// adds per-site resolution; until then every site is unresolved).
+			outUnresolved = true;
 		}
 		else if (op == asBC_ALLOC)
 		{
@@ -1986,10 +1994,10 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 				if (funcIdToIndex.MoveTo(&cursor, funcId))
 					outCallees.PushLast(funcIdToIndex.GetValue(cursor));
 				else
-					func->localCallsDelegate = true; // Unmapped target: no edge can be recorded, so the site must poison.
+					outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
 			}
 			else
-				func->localCallsDelegate = true; // Unmapped target: no edge can be recorded, so the site must poison.
+				outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
 		}
 
 		n += instrSize;
@@ -2024,9 +2032,16 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 
 	// Phase 1: build callee lists for regular script functions
 	asCArray<asCArray<asUINT>> callees;
+	asCArray<asCArray<asCScriptFunction*>> externalCallees;
+	asCArray<bool> unresolved;
 	callees.SetLength(funcCount);
+	externalCallees.SetLength(funcCount);
+	unresolved.SetLength(funcCount);
 	for (asUINT i = 0; i < funcCount; i++)
-		BuildCalleeList(m_scriptFunctions[i], funcIdToIndex, callees[i]);
+	{
+		unresolved[i] = false;
+		BuildCalleeList(m_scriptFunctions[i], funcIdToIndex, callees[i], externalCallees[i], unresolved[i]);
+	}
 
 	// Phase 2: init transitive fields from local
 	for (asUINT i = 0; i < funcCount; i++)
@@ -2034,7 +2049,11 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		asCScriptFunction *func = m_scriptFunctions[i];
 		if (!func) continue;
 		func->minTransitiveAccessMask = func->minLocalAccessMask;
-		func->transitiveCallsDelegate = func->localCallsDelegate;
+		// localCallsDelegate = the compiler saw a funcdef call site it could
+		// not resolve (caps the LOCAL verdict). unresolved = this pass found
+		// a call site it could not model. Either one means the transitive
+		// verdict cannot promise YES.
+		func->transitiveCallsDelegate = func->localCallsDelegate || unresolved[i];
 		func->transitiveHalts = func->localHalts;
 
 		// BuildCalleeList's poisonings (shared targets, imports,
@@ -2147,10 +2166,12 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		if (!initFunc) continue;
 
 		asCArray<asUINT> initCallees;
-		BuildCalleeList(initFunc, funcIdToIndex, initCallees);
+		asCArray<asCScriptFunction*> initExternalCallees;
+		bool initUnresolved = false;
+		BuildCalleeList(initFunc, funcIdToIndex, initCallees, initExternalCallees, initUnresolved);
 
 		initFunc->minTransitiveAccessMask = initFunc->minLocalAccessMask;
-		initFunc->transitiveCallsDelegate = initFunc->localCallsDelegate;
+		initFunc->transitiveCallsDelegate = initFunc->localCallsDelegate || initUnresolved;
 		initFunc->transitiveHalts = initFunc->localHalts;
 
 		// BuildCalleeList's poisonings (shared targets, imports,

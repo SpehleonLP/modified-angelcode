@@ -10,6 +10,12 @@
 #include <string>
 #include <cstring>
 
+// Internal header: gives ComputeTransitiveFunctionMetadataIsIdempotent below a
+// way to re-invoke the analysis pass directly (no public API triggers it a
+// second time on an already-built module). asCModule derives publicly from
+// asIScriptModule with no other bases, so the static_cast is safe.
+#include "as_module.h"
+
 namespace {
 
 class MemStream : public asIBinaryStream {
@@ -444,6 +450,47 @@ TEST_F(AsHalting, ByteCodeRoundTripPreservesHaltsMetadata) {
 		EXPECT_EQ(a->GetTransitiveHalts(),          b->GetTransitiveHalts())          << names[i];
 		EXPECT_EQ(a->GetLocalCallsDelegate(),       b->GetLocalCallsDelegate())       << names[i];
 		EXPECT_EQ(a->GetTransitiveCallsDelegate(),  b->GetTransitiveCallsDelegate())  << names[i];
+	}
+}
+
+TEST_F(AsHalting, ComputeTransitiveFunctionMetadataIsIdempotent) {
+	// Exercises every BuildCalleeList poison path in one module (unresolved
+	// funcdef call, shared-class dispatch, plain call, looping callee) so
+	// unresolved[] and transitiveCallsDelegate are non-trivial, then re-runs
+	// the pass and asserts every function's four fields are bitwise
+	// unchanged. This is the substrate guarantee Task 5 exists to establish:
+	// the pass must be a pure, re-runnable function of current state.
+	asIScriptModule* mod = engine->GetModule("halts", asGM_ALWAYS_CREATE);
+	mod->AddScriptSection("s",
+		"shared class S { void m() {} }\n"
+		"funcdef void CB();\n"
+		"void loop() { while (true) {} }\n"
+		"void g() {}\n"
+		"void f(CB@ cb, bool b) { S s; s.m(); g(); if (b) loop(); cb(); }\n");
+	ASSERT_GE(mod->Build(), 0);
+
+	asCModule* cmod = static_cast<asCModule*>(mod);
+
+	asUINT count = mod->GetFunctionCount();
+	ASSERT_GT(count, 0u);
+	std::vector<asEHalts> localHalts(count), transitiveHalts(count);
+	std::vector<bool> localDelegate(count), transitiveDelegate(count);
+	for (asUINT i = 0; i < count; i++) {
+		asIScriptFunction* fn = mod->GetFunctionByIndex(i);
+		localHalts[i]         = fn->GetLocalHalts();
+		transitiveHalts[i]    = fn->GetTransitiveHalts();
+		localDelegate[i]      = fn->GetLocalCallsDelegate();
+		transitiveDelegate[i] = fn->GetTransitiveCallsDelegate();
+	}
+
+	cmod->ComputeTransitiveFunctionMetadata();
+
+	for (asUINT i = 0; i < count; i++) {
+		asIScriptFunction* fn = mod->GetFunctionByIndex(i);
+		EXPECT_EQ(fn->GetLocalHalts(),         localHalts[i])         << i;
+		EXPECT_EQ(fn->GetTransitiveHalts(),    transitiveHalts[i])    << i;
+		EXPECT_EQ(fn->GetLocalCallsDelegate(), localDelegate[i])      << i;
+		EXPECT_EQ(fn->GetTransitiveCallsDelegate(), transitiveDelegate[i]) << i;
 	}
 }
 
