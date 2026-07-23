@@ -79,6 +79,14 @@ this maps to). Grouped by theme, citing the primary files:
   `asCModule::GetFunctionByDecl()` reports invalid declarations to the message
   stream instead of silently dropping them; a registered object property on a
   handle-resolve type must be const or absent.
+- **`hasReturn` threaded through loops** (`as_compiler.cpp`, `CompileStatement`/
+  `CompileWhileStatement`/`CompileDoWhileStatement`/`CompileForStatement`/
+  `CompileBreakStatement`) — a non-void function ending in `while(true){...}`,
+  `do{...}while(true);`, or `for(;;){...}` no longer wrongly demands a trailing
+  `return`: a loop whose guard is a compile-time-constant true (or, for `for`,
+  absent) and whose body never reaches a `break` is recognized as making the
+  code after it unreachable. Confirmed present in vanilla upstream 2.38.0
+  (`next-version` branch, same `CompileStatement`) — worth reporting upstream.
 - Callback signature changes: `SetTranslateAppExceptionCallback`,
   `asIScriptContext::SetExceptionCallback`/`SetLineCallback` take `asSFuncPtr`
   by value instead of `const asSFuncPtr&`.
@@ -175,7 +183,7 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting.*` tests (currently 30) should pass; this is the suite every
+All `AsHalting.*` tests (currently 37) should pass; this is the suite every
 later halting-analysis change adds to, in `tests/test_as_halting.cpp`.
 
 ## Branch layout

@@ -4784,13 +4784,13 @@ void asCCompiler::CompileStatement(asCScriptNode *statement, bool *hasReturn, as
 	else if (statement->nodeType == snIf)
 		CompileIfStatement(statement, hasReturn, bc);
 	else if (statement->nodeType == snFor)
-		CompileForStatement(statement, bc);
+		CompileForStatement(statement, hasReturn, bc);
 	else if (statement->nodeType == snForEach)
 		CompileForEachStatement(statement, bc);
 	else if (statement->nodeType == snWhile)
-		CompileWhileStatement(statement, bc);
+		CompileWhileStatement(statement, hasReturn, bc);
 	else if (statement->nodeType == snDoWhile)
-		CompileDoWhileStatement(statement, bc);
+		CompileDoWhileStatement(statement, hasReturn, bc);
 	else if (statement->nodeType == snExpressionStatement)
 		CompileExpressionStatement(statement, bc);
 	else if (statement->nodeType == snBreak)
@@ -4819,6 +4819,7 @@ void asCCompiler::CompileSwitchStatement(asCScriptNode *snode, bool *hasReturn, 
 	// Reserve label for break statements
 	int breakLabel = nextLabel++;
 	breakLabels.PushLast(breakLabel);
+	breakEmitted.PushLast(false);
 
 	// Add a variable scope that will be used by CompileBreak
 	// to know where to stop deallocating variables
@@ -5122,6 +5123,7 @@ void asCCompiler::CompileSwitchStatement(asCScriptNode *snode, bool *hasReturn, 
 	bc->Label((short)breakLabel);
 
 	breakLabels.PopLast();
+	breakEmitted.PopLast();
 	RemoveVariableScope();
 }
 
@@ -5420,8 +5422,10 @@ void asCCompiler::CompileIfStatement(asCScriptNode *inode, bool *hasReturn, asCB
 	}
 }
 
-void asCCompiler::CompileForStatement(asCScriptNode *fnode, asCByteCode *bc)
+void asCCompiler::CompileForStatement(asCScriptNode *fnode, bool *hasReturn, asCByteCode *bc)
 {
+	*hasReturn = false;
+
 	// Add a variable scope that will be used by CompileBreak/Continue to know where to stop deallocating variables
 	bc->Block(true);
 	AddVariableScope(true, true);
@@ -5434,6 +5438,7 @@ void asCCompiler::CompileForStatement(asCScriptNode *fnode, asCByteCode *bc)
 
 	continueLabels.PushLast(continueLabel);
 	breakLabels.PushLast(afterLabel);
+	breakEmitted.PushLast(false);
 
 	//---------------------------------------
 	// Compile the initialization statement
@@ -5448,6 +5453,8 @@ void asCCompiler::CompileForStatement(asCScriptNode *fnode, asCByteCode *bc)
 	// Compile the condition statement
 	asCExprContext expr(engine);
 	asCScriptNode *second = fnode->firstChild->next;
+	// The condition is vacuously true when absent (e.g. `for(;;)`)
+	bool condIsConstantTrue = (second->firstChild == 0);
 	if( second->firstChild )
 	{
 		int r = CompileAssignment(second->firstChild, &expr);
@@ -5471,6 +5478,7 @@ void asCCompiler::CompileForStatement(asCScriptNode *fnode, asCByteCode *bc)
 			}
 			else
 			{
+				condIsConstantTrue = expr.type.isConstant && expr.type.GetConstantB() != 0;
 				ConvertToVariable(&expr);
 				ProcessDeferredParams(&expr);
 
@@ -5504,9 +5512,9 @@ void asCCompiler::CompileForStatement(asCScriptNode *fnode, asCByteCode *bc)
 
 	//------------------------------
 	// Compile loop statement
-	bool hasReturn;
+	bool bodyHasReturn;
 	asCByteCode forBC(engine);
-	CompileStatement(fnode->lastChild, &hasReturn, &forBC);
+	CompileStatement(fnode->lastChild, &bodyHasReturn, &forBC);
 
 	//-------------------------------
 	// Join the code pieces
@@ -5535,8 +5543,14 @@ void asCCompiler::CompileForStatement(asCScriptNode *fnode, asCByteCode *bc)
 
 	bc->Label((short)afterLabel);
 
+	// A loop whose guard is a compile-time constant true (or absent) and whose
+	// body emitted no break against it never exits normally, so the statement
+	// after it is unreachable: for return-path purposes it counts as returning.
+	*hasReturn = condIsConstantTrue && !breakEmitted[breakEmitted.GetLength()-1];
+
 	continueLabels.PopLast();
 	breakLabels.PopLast();
+	breakEmitted.PopLast();
 
 	// Deallocate variables in this block, in reverse order
 	for( int n = (int)variables->variables.GetLength() - 1; n >= 0; n-- )
@@ -5830,6 +5844,7 @@ void asCCompiler::CompileForEachStatement(asCScriptNode* node, asCByteCode* bc)
 
 	continueLabels.PushLast(continueLabel);
 	breakLabels.PushLast(afterLabel);
+	breakEmitted.PushLast(false);
 
 	//---------------------------------------
 	// Compile the initialization statement
@@ -6063,6 +6078,7 @@ void asCCompiler::CompileForEachStatement(asCScriptNode* node, asCByteCode* bc)
 
 	continueLabels.PopLast();
 	breakLabels.PopLast();
+	breakEmitted.PopLast();
 
 	// Deallocate variables in this block, in reverse order
 	for (int n = (int)variables->variables.GetLength() - 1; n >= 0; n--)
@@ -6078,8 +6094,10 @@ void asCCompiler::CompileForEachStatement(asCScriptNode* node, asCByteCode* bc)
 	bc->Block(false);
 }
 
-void asCCompiler::CompileWhileStatement(asCScriptNode *wnode, asCByteCode *bc)
+void asCCompiler::CompileWhileStatement(asCScriptNode *wnode, bool *hasReturn, asCByteCode *bc)
 {
+	*hasReturn = false;
+
 	// Add a variable scope that will be used by CompileBreak/Continue to know where to stop deallocating variables
 	AddVariableScope(true, true);
 
@@ -6089,12 +6107,14 @@ void asCCompiler::CompileWhileStatement(asCScriptNode *wnode, asCByteCode *bc)
 
 	continueLabels.PushLast(beforeLabel);
 	breakLabels.PushLast(afterLabel);
+	breakEmitted.PushLast(false);
 
 	// Add label before the expression
 	bc->Label((short)beforeLabel);
 
 	// Compile expression
 	asCExprContext expr(engine);
+	bool condIsConstantTrue = false;
 	int r = CompileAssignment(wnode->firstChild, &expr);
 	if( r == 0 )
 	{
@@ -6116,6 +6136,7 @@ void asCCompiler::CompileWhileStatement(asCScriptNode *wnode, asCByteCode *bc)
 		}
 		else
 		{
+			condIsConstantTrue = expr.type.isConstant && expr.type.GetConstantB() != 0;
 			ConvertToVariable(&expr);
 			ProcessDeferredParams(&expr);
 
@@ -6136,9 +6157,9 @@ void asCCompiler::CompileWhileStatement(asCScriptNode *wnode, asCByteCode *bc)
 	bc->InstrPTR(asBC_JitEntry, 0);
 
 	// Compile statement
-	bool hasReturn;
+	bool bodyHasReturn;
 	asCByteCode whileBC(engine);
-	CompileStatement(wnode->lastChild, &hasReturn, &whileBC);
+	CompileStatement(wnode->lastChild, &bodyHasReturn, &whileBC);
 
 	// Add byte code for the statement
 	LineInstr(bc, wnode->lastChild->tokenPos);
@@ -6150,14 +6171,23 @@ void asCCompiler::CompileWhileStatement(asCScriptNode *wnode, asCByteCode *bc)
 	// Add label after the statement
 	bc->Label((short)afterLabel);
 
+	// A loop whose guard is a compile-time constant true and whose body
+	// emitted no break against it never exits normally, so the statement
+	// after it is unreachable: for return-path purposes it counts as
+	// returning.
+	*hasReturn = condIsConstantTrue && !breakEmitted[breakEmitted.GetLength()-1];
+
 	continueLabels.PopLast();
 	breakLabels.PopLast();
+	breakEmitted.PopLast();
 
 	RemoveVariableScope();
 }
 
-void asCCompiler::CompileDoWhileStatement(asCScriptNode *wnode, asCByteCode *bc)
+void asCCompiler::CompileDoWhileStatement(asCScriptNode *wnode, bool *hasReturn, asCByteCode *bc)
 {
+	*hasReturn = false;
+
 	// Add a variable scope that will be used by CompileBreak/Continue to know where to stop deallocating variables
 	AddVariableScope(true, true);
 
@@ -6168,14 +6198,15 @@ void asCCompiler::CompileDoWhileStatement(asCScriptNode *wnode, asCByteCode *bc)
 
 	continueLabels.PushLast(beforeTest);
 	breakLabels.PushLast(afterLabel);
+	breakEmitted.PushLast(false);
 
 	// Add label before the statement
 	bc->Label((short)beforeLabel);
 
 	// Compile statement
-	bool hasReturn;
+	bool bodyHasReturn;
 	asCByteCode whileBC(engine);
-	CompileStatement(wnode->firstChild, &hasReturn, &whileBC);
+	CompileStatement(wnode->firstChild, &bodyHasReturn, &whileBC);
 
 	// Add byte code for the statement
 	LineInstr(bc, wnode->firstChild->tokenPos);
@@ -6194,6 +6225,7 @@ void asCCompiler::CompileDoWhileStatement(asCScriptNode *wnode, asCByteCode *bc)
 
 	// Compile expression
 	asCExprContext expr(engine);
+	bool condIsConstantTrue = false;
 	CompileAssignment(wnode->lastChild, &expr);
 
 	if (ProcessPropertyGetAccessor(&expr, wnode) < 0)
@@ -6214,9 +6246,10 @@ void asCCompiler::CompileDoWhileStatement(asCScriptNode *wnode, asCByteCode *bc)
 	}
 	else
 	{
+		condIsConstantTrue = expr.type.isConstant && expr.type.GetConstantB() != 0;
 		ConvertToVariable(&expr);
 		ProcessDeferredParams(&expr);
-		
+
 		// Jump to next iteration if expression is true
 		expr.bc.InstrSHORT(asBC_CpyVtoR4, (short)expr.type.stackOffset);
 		expr.bc.Instr(asBC_ClrHi);
@@ -6230,8 +6263,17 @@ void asCCompiler::CompileDoWhileStatement(asCScriptNode *wnode, asCByteCode *bc)
 	// Add label after the statement
 	bc->Label((short)afterLabel);
 
+	// A loop whose guard is a compile-time constant true and whose body
+	// emitted no break against it never exits normally, so the statement
+	// after it is unreachable: for return-path purposes it counts as
+	// returning. A do-while body also always executes at least once, so
+	// a body that itself always returns makes the loop return too.
+	*hasReturn = bodyHasReturn ||
+	             (condIsConstantTrue && !breakEmitted[breakEmitted.GetLength()-1]);
+
 	continueLabels.PopLast();
 	breakLabels.PopLast();
+	breakEmitted.PopLast();
 
 	RemoveVariableScope();
 }
@@ -6243,6 +6285,8 @@ void asCCompiler::CompileBreakStatement(asCScriptNode *node, asCByteCode *bc)
 		Error(TXT_INVALID_BREAK, node);
 		return;
 	}
+
+	breakEmitted[breakEmitted.GetLength()-1] = true;
 
 	// Add destructor calls for all variables that will go out of scope
 	// Put this clean up in a block to allow exception handler to understand them

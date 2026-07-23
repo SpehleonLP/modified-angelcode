@@ -249,10 +249,10 @@ protected:
 	void CompileIfStatement(asCScriptNode *node, bool *hasReturn, asCByteCode *bc);
 	void CompileSwitchStatement(asCScriptNode *node, bool *hasReturn, asCByteCode *bc);
 	void CompileCase(asCScriptNode *node, asCByteCode *bc, bool *hasReturn, bool *hasBreak);
-	void CompileForStatement(asCScriptNode *node, asCByteCode *bc);
+	void CompileForStatement(asCScriptNode *node, bool *hasReturn, asCByteCode *bc);
 	void CompileForEachStatement(asCScriptNode* node, asCByteCode* bc);
-	void CompileWhileStatement(asCScriptNode *node, asCByteCode *bc);
-	void CompileDoWhileStatement(asCScriptNode *node, asCByteCode *bc);
+	void CompileWhileStatement(asCScriptNode *node, bool *hasReturn, asCByteCode *bc);
+	void CompileDoWhileStatement(asCScriptNode *node, bool *hasReturn, asCByteCode *bc);
 	void CompileBreakStatement(asCScriptNode *node, asCByteCode *bc);
 	void CompileContinueStatement(asCScriptNode *node, asCByteCode *bc);
 	void CompileReturnStatement(asCScriptNode *node, asCByteCode *bc);
@@ -416,6 +416,7 @@ protected:
 
 	asCArray<int> breakLabels;
 	asCArray<int> continueLabels;
+	asCArray<bool> breakEmitted;
 
 	int AllocateVariable(const asCDataType &type, bool isTemporary, bool forceOnHeap = false, bool asReference = false);
 	int AllocateVariableNotIn(const asCDataType &type, bool isTemporary, bool forceOnHeap, asCExprContext *ctx);

@@ -36,6 +36,13 @@ protected:
 		return f;
 	}
 
+	// True if the code builds as a fresh module.
+	bool Builds(const char* code) {
+		asIScriptModule* mod = engine->GetModule("halts", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("s", code);
+		return mod->Build() >= 0;
+	}
+
 	// Dump finalized bytecode as op names — use when a classification test
 	// fails to see what the optimizer actually emitted.
 	static void Dump(asIScriptFunction* f) {
@@ -99,21 +106,44 @@ TEST_F(AsHalting, OptimizedConditionalBackedgeIsNotYes) {
 
 TEST_F(AsHalting, SwitchReturnInInfiniteLoopIsNotNo) {
 	// JMPP dispatch can reach a RET, so this can halt: claiming NO is wrong.
-	// Trailing `return 0;` works around a pre-existing, unrelated fork limitation:
-	// CompileStatement never threads hasReturn through loop constructs (while/for/
-	// do-while), so any non-void function ending in a loop fails "not all paths
-	// return a value" regardless of what the loop body does. The extra return is
-	// dead code (Warning only, not Error) and CFG-unreachable from entry — the
-	// only predecessor is an unconditional backward JMP, which this analysis
-	// never treats as falling through — so it cannot affect the classification
-	// under test.
-	// Tracked in the plan's Follow-ups (loop hasReturn-threading defect).
 	asIScriptFunction* f = Fn(
 		"int f(int x) { while(true) { switch(x) {"
-		" case 0: return 1; case 1: return 2; case 2: return 3; } x = 0; } return 0; }", "f");
+		" case 0: return 1; case 1: return 2; case 2: return 3; } x = 0; } }", "f");
 	ASSERT_NE(f, nullptr);
 	if (f->GetLocalHalts() == asHALTS_NO) Dump(f);
 	EXPECT_NE(f->GetLocalHalts(), asHALTS_NO);
+}
+
+TEST_F(AsHalting, ReturnInsideWhileTrueCompiles) {
+	EXPECT_TRUE(Builds("int f() { while(true) { return 1; } }"));
+}
+
+TEST_F(AsHalting, WhileTrueWithBreakStillRequiresReturn) {
+	EXPECT_FALSE(Builds("bool g() { return false; }\n"
+	                    "int f() { while(true) { if (g()) break; return 1; } }"));
+}
+
+TEST_F(AsHalting, ReturnInsideDoWhileTrueCompiles) {
+	EXPECT_TRUE(Builds("int f() { do { return 1; } while(true); }"));
+}
+
+TEST_F(AsHalting, DoWhileBodyAlwaysReturnsCompiles) {
+	EXPECT_TRUE(Builds("int f() { do { return 1; } while(false); }"));
+}
+
+TEST_F(AsHalting, ReturnInsideForEverCompiles) {
+	EXPECT_TRUE(Builds("int f() { for(;;) { return 1; } }"));
+}
+
+TEST_F(AsHalting, ForEverWithBreakStillRequiresReturn) {
+	EXPECT_FALSE(Builds("bool g() { return false; }\n"
+	                    "int f() { for(;;) { if (g()) break; return 1; } }"));
+}
+
+TEST_F(AsHalting, NonVoidPureInfiniteLoopCompilesAndIsNo) {
+	asIScriptFunction* f = Fn("int f() { while(true) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_NO);
 }
 
 TEST_F(AsHalting, BranchyInfiniteLoopIsNo) {
