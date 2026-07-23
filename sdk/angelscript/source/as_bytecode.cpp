@@ -1172,6 +1172,42 @@ void asCByteCode::Optimize()
 			continue;
 		}
 
+		// SetV1/2/4 v, const ; CpyVtoR4 v ; JLowZ/JLowNZ -> unconditional flow.
+		// SetV1/2/4 all carry their constant in the DWORD arg slot and write it
+		// to the low bytes of the variable; CpyVtoR4 loads the variable into the
+		// value register; JLowZ/JLowNZ test only the low byte of that register.
+		// The low byte therefore holds the constant's low byte in every case, so
+		// the branch outcome is known here.
+		//
+		// Adjacency is the safety condition: labels are instructions in this IR,
+		// so requiring ->next adjacency proves no jump can enter the middle of
+		// the triple. This mirrors the halting analysis's constant-guard elision.
+		//
+		// The SetV/CpyVtoR4 pair is deliberately kept, so variable and value
+		// register state after the fold is bit-identical; only the branch changes.
+		// Both JMP and JLowZ/JLowNZ are asBCTYPE_DW_ARG with stackInc 0, so
+		// neither the instruction size nor the stack accounting moves, and the
+		// jump's label argument is preserved in place. PostProcess() has already
+		// run by this point (see Finalize), so no reachability state is invalidated.
+		if( (currOp == asBC_SetV1 || currOp == asBC_SetV2 || currOp == asBC_SetV4) &&
+			curr->next && curr->next->op == asBC_CpyVtoR4 &&
+			curr->next->wArg[0] == curr->wArg[0] &&
+			curr->next->next &&
+			(curr->next->next->op == asBC_JLowZ || curr->next->next->op == asBC_JLowNZ) )
+		{
+			asCByteInstruction *jcc = curr->next->next;
+			asBYTE low = asBYTE(*ARG_DW(curr->arg) & 0xFF);
+			bool taken = (jcc->op == asBC_JLowZ) ? (low == 0) : (low != 0);
+			if( taken )
+				jcc->op = asBC_JMP;      // label argument preserved
+			else
+				DeleteInstruction(jcc);  // branch never taken; fall through
+
+			// instr already points at the CpyVtoR4, which neither branch of the
+			// fold touches, so it remains a valid resume point.
+			continue;
+		}
+
 		if( instr )
 		{
 			const asEBCInstr instrOp = instr->op;

@@ -795,12 +795,15 @@ void asCCompiler::FinalizeFunction()
 	// ClrHi+JZ/JNZ into these) and asBC_JMPP (switch dispatch into the run of
 	// JMP instructions that follows it). A funcdef/delegate call site caps the
 	// result at UNKNOWN: the callee is unknown, so YES cannot be promised.
-	// Literal loop guards are not constant-folded by this compiler: while(true)
-	// emits SetV1(const) -> CpyVtoR4 -> JLowZ whose exit edge is statically
-	// dead. Exactly that adjacent triple (no jump entering mid-pattern) has its
-	// dead edge elided from the reachability walk; any other conditional keeps
-	// both edges. Elision only when the register value is provably the
-	// immediate constant — never on doubt.
+	// A literal loop guard emits SetV1(const) -> CpyVtoR4 -> JLowZ whose exit
+	// edge is statically dead. asCByteCode::Optimize() folds exactly that
+	// adjacent triple away, so with byte code optimization enabled (the default)
+	// this walk normally never sees one. The elision below is still load-bearing
+	// because asEP_OPTIMIZE_BYTECODE can be turned off, in which case the triple
+	// reaches the walk intact. Exactly that adjacent triple (no jump entering
+	// mid-pattern) has its dead edge elided from the reachability walk; any other
+	// conditional keeps both edges. Elision only when the register value is
+	// provably the immediate constant — never on doubt.
 	{
 		asDWORD *bc  = outFunc->scriptData->byteCode.AddressOf();
 		asUINT bcLen = (asUINT)outFunc->scriptData->byteCode.GetLength();

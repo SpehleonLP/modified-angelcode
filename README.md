@@ -360,6 +360,31 @@ unsafe. The window in which the pass may read the un-refcounted
 `asCScriptFunction::funcdefCallTargets` entries is documented at their
 declaration in `as_scriptfunction.h`.
 
+## Literal loop-guard folding in the bytecode optimizer
+
+`asCByteCode::Optimize()` folds the triple `SetV1/SetV2/SetV4 v, const ;
+CpyVtoR4 v ; JLowZ|JLowNZ` to unconditional flow: the branch becomes an
+`asBC_JMP` when the constant makes it taken, and is deleted when it does not.
+All three `SetV*` variants carry the constant in the DWORD argument slot and
+write it to the low bytes of the variable, `CpyVtoR4` loads the variable into
+the value register, and `JLowZ`/`JLowNZ` test only that register's low byte, so
+the outcome is decided at compile time.
+
+The safety condition is `->next` adjacency. Labels are instructions in this IR,
+so requiring the three to be immediately adjacent proves no jump can enter the
+middle of the pattern — the same reasoning the halting analysis uses when it
+elides constant loop guards. The `SetV`/`CpyVtoR4` pair is kept, so variable and
+value-register state after the fold is bit-identical; only control flow changes.
+`asBC_JMP` and `asBC_JLowZ`/`asBC_JLowNZ` are all `asBCTYPE_DW_ARG` with a stack
+increase of zero, so instruction size and stack accounting are unaffected, and
+`PostProcess()` has already run by the time `Optimize()` is called (see
+`asCByteCode::Finalize`), so no reachability or stack-size state is invalidated.
+
+This is a size/speed optimization only. Halting verdicts do not depend on it:
+the analysis elides constant guards on its own side, so `while (true) {}` is
+`asHALTS_NO` with or without the fold. `LiteralGuardIsFoldedOutOfBytecode` pins
+both halves — no `JLowZ`/`JLowNZ` survives, and the verdict is unchanged.
+
 The full design/implementation record for this hardening pass lives in the
 engine repository at
 `docs/superpowers/plans/2026-07-22-as-halting-analysis-hardening.md`.
@@ -383,7 +408,7 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting*` tests (currently 88, across the `AsHalting` and
+All `AsHalting*` tests (currently 89, across the `AsHalting` and
 `AsHaltingConstGlobalFuncdef` fixtures — the latter builds its engine
 *without* `asEP_ALLOW_UNSAFE_REFERENCES`, see "Const-global funcdef call
 resolution" above) should pass; this is the suite every later

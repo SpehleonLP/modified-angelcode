@@ -1644,4 +1644,27 @@ TEST_F(AsHalting, TargetInAModuleThatMerelyDeclaresAnImportIsNotFolded) {
 	EXPECT_EQ(f->GetTransitiveHalts(), asHALTS_UNKNOWN);
 }
 
+// A literal loop guard (`while (true)`) compiles to SetV1 v,1 ; CpyVtoR4 v ;
+// JLowZ end -- a conditional branch whose outcome is fixed at compile time.
+// asCByteCode::Optimize() folds that triple to unconditional flow, so no
+// asBC_JLowZ/asBC_JLowNZ survives in the emitted bytecode. The halting verdict
+// is unaffected: the analysis elides constant guards on its own side.
+TEST_F(AsHalting, LiteralGuardIsFoldedOutOfBytecode) {
+	asIScriptFunction* f = Fn("void f() { while (true) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	asUINT len = 0;
+	asDWORD* bc = f->GetByteCode(&len);
+	ASSERT_NE(bc, nullptr);
+	bool sawLowJump = false;
+	for (asUINT n = 0; n < len; ) {
+		asBYTE op = *(asBYTE*)&bc[n];
+		if (op == asBC_JLowZ || op == asBC_JLowNZ) sawLowJump = true;
+		int sz = asBCTypeSize[asBCInfo[op].type];
+		if (sz == 0) break;
+		n += (asUINT)sz;
+	}
+	EXPECT_FALSE(sawLowJump);
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_NO);   // verdict unchanged by folding
+}
+
 } // namespace
