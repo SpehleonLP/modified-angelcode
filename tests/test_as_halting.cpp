@@ -6,8 +6,33 @@
 #include <gtest/gtest.h>
 #include <angelscript.h>
 #include <cstdio>
+#include <vector>
+#include <string>
+#include <cstring>
 
 namespace {
+
+class MemStream : public asIBinaryStream {
+public:
+	std::vector<asBYTE> data;
+	size_t pos = 0;
+	int Write(const void *ptr, asUINT size) override {
+		data.insert(data.end(), (const asBYTE*)ptr, (const asBYTE*)ptr + size);
+		return 0;
+	}
+	int Read(void *ptr, asUINT size) override {
+		if (pos + size > data.size()) return -1;
+		memcpy(ptr, &data[pos], size);
+		pos += size;
+		return 0;
+	}
+};
+
+static std::string g_asMessages;
+static void CollectMessages(const asSMessageInfo *msg, void*) {
+	g_asMessages += msg->message;
+	g_asMessages += '\n';
+}
 
 class AsHalting : public ::testing::Test {
 protected:
@@ -393,6 +418,48 @@ TEST_F(AsHalting, VirtualCallSeesGrandchildOverride) {
 		"void f(B@ b) { b.m(); }", "f");
 	ASSERT_NE(f, nullptr);
 	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, ByteCodeRoundTripPreservesHaltsMetadata) {
+	asIScriptModule* mod = engine->GetModule("halts", asGM_ALWAYS_CREATE);
+	mod->AddScriptSection("s",
+		"int yes() { return 1; }\n"
+		"void unk(int n) { while (n > 0) { } }\n"
+		"void no() { while (true) { } }\n");
+	ASSERT_GE(mod->Build(), 0);
+
+	MemStream stream;
+	ASSERT_GE(mod->SaveByteCode(&stream), 0);
+
+	asIScriptModule* mod2 = engine->GetModule("restored", asGM_ALWAYS_CREATE);
+	ASSERT_GE(mod2->LoadByteCode(&stream), 0);
+
+	const char* names[3] = { "yes", "unk", "no" };
+	for (int i = 0; i < 3; i++) {
+		asIScriptFunction* a = mod->GetFunctionByName(names[i]);
+		asIScriptFunction* b = mod2->GetFunctionByName(names[i]);
+		ASSERT_NE(a, nullptr) << names[i];
+		ASSERT_NE(b, nullptr) << names[i];
+		EXPECT_EQ(a->GetLocalHalts(),               b->GetLocalHalts())               << names[i];
+		EXPECT_EQ(a->GetTransitiveHalts(),          b->GetTransitiveHalts())          << names[i];
+		EXPECT_EQ(a->GetLocalCallsDelegate(),       b->GetLocalCallsDelegate())       << names[i];
+		EXPECT_EQ(a->GetTransitiveCallsDelegate(),  b->GetTransitiveCallsDelegate())  << names[i];
+	}
+}
+
+TEST_F(AsHalting, HeaderlessByteCodeRefusesToLoad) {
+	engine->SetMessageCallback(asFUNCTION(CollectMessages), 0, asCALL_CDECL);
+	g_asMessages.clear();
+
+	// Pre-header streams start with the encoded debug-info flag (byte 0 or 1),
+	// never 'A'. One zero byte is the minimal old-format prefix.
+	MemStream stream;
+	asBYTE oldPrefix[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+	stream.Write(oldPrefix, 8);
+
+	asIScriptModule* mod = engine->GetModule("stale", asGM_ALWAYS_CREATE);
+	EXPECT_LT(mod->LoadByteCode(&stream), 0);
+	EXPECT_NE(g_asMessages.find("format"), std::string::npos) << g_asMessages;
 }
 
 } // namespace

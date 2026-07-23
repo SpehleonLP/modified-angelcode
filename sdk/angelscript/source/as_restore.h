@@ -43,6 +43,13 @@
 #include "as_context.h"
 #include "as_map.h"
 
+// Saved-bytecode format version. Any change to what asCWriter emits (or the
+// order it emits it in) MUST bump this: the reader refuses non-matching
+// streams instead of misparsing them. The halting/access-mask metadata made
+// the format incompatible with stock AngelScript long before this header
+// existed; version 1 is the first self-identifying format.
+#define AS_BYTECODE_FORMAT_VERSION 1
+
 BEGIN_AS_NAMESPACE
 
 class asCReader

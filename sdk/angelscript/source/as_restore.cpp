@@ -149,6 +149,25 @@ int asCReader::ReadInner()
 	unsigned long i, count;
 	asCScriptFunction* func;
 
+	// Format header check - must mirror asCWriter::Write exactly.
+	asBYTE magic[4] = { 0, 0, 0, 0 };
+	for (int m = 0; m < 4; m++)
+		ReadData(&magic[m], 1);
+	if (error) return asERROR;
+	if (magic[0] != 'A' || magic[1] != 'S' || magic[2] != 'B' || magic[3] != 'C')
+	{
+		engine->WriteMessage("", 0, 0, asMSGTYPE_WARNING, TXT_BYTECODE_NO_FORMAT_HEADER);
+		return Error(TXT_INVALID_BYTECODE_d);
+	}
+	asUINT formatVersion = ReadEncodedUInt();
+	if (formatVersion != AS_BYTECODE_FORMAT_VERSION)
+	{
+		asCString verMsg;
+		verMsg.Format(TXT_BYTECODE_FORMAT_VERSION_d, formatVersion);
+		engine->WriteMessage("", 0, 0, asMSGTYPE_WARNING, verMsg.AddressOf());
+		return Error(TXT_INVALID_BYTECODE_d);
+	}
+
 	// Read the flag as 1 byte even on platforms with 4byte booleans
 	noDebugInfo = ReadEncodedUInt() ? VALUE_OF_BOOLEAN_TRUE : 0;
 
@@ -3977,6 +3996,12 @@ int asCWriter::Write()
 	TimeIt("asCWriter::Write");
 
 	unsigned long i, count;
+
+	// Format header: magic + version (see AS_BYTECODE_FORMAT_VERSION).
+	const asBYTE magic[4] = { 'A', 'S', 'B', 'C' };
+	for (int m = 0; m < 4; m++)
+		WriteData(&magic[m], 1);
+	WriteEncodedInt64(AS_BYTECODE_FORMAT_VERSION);
 
 	// Store everything in the same order that the builder parses scripts
 
