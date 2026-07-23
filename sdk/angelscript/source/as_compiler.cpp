@@ -541,6 +541,57 @@ static bool asCountedLoopWindowOk(int step, bool boundIsVar, asBYTE cmpOp, int i
 // `for (int i = 0; i < 0x7fffffff; i += 2)` never halts, because even i
 // skips the exit window entirely — the window is the single value
 // 0x7fffffff, width 1 < step 2 — and wraps to negative forever.
+// Forward CFG walk from `start`, marking every address that can execute into
+// `visited` (caller sizes it to bcLen and clears it). `forced` carries pass 2's
+// proven-constant guard decisions: 1 = fall-through only, 2 = jump-target only,
+// 0 = both edges live.
+//
+// The walk over-approximates - it follows every edge it cannot rule out - so an
+// address it does NOT visit provably cannot execute. Callers may only draw
+// conclusions from a miss, never from a hit. Catch-handler edges are not
+// modeled, so callers must refuse when the function has try/catch info.
+static void asHaltsReachFrom(asDWORD *bc, asUINT bcLen, asUINT start,
+                             const asCArray<asBYTE> &forced,
+                             asCArray<bool> &visited)
+{
+	asCArray<asUINT> work;
+	work.PushLast(start);
+	while (work.GetLength() > 0)
+	{
+		asUINT n = work[work.GetLength() - 1];
+		work.PopLast();
+		if (n >= bcLen || visited[n]) continue;
+		visited[n] = true;
+
+		asBYTE op = *(asBYTE*)&bc[n];
+		int instrSize = asBCTypeSize[asBCInfo[op].type];
+		if (instrSize == 0) continue;
+
+		if (op == asBC_RET)
+			continue;
+		else if (op == asBC_JMP)
+			work.PushLast((asUINT)((int)n + instrSize + asBC_INTARG(&bc[n])));
+		else if ((op >= asBC_JZ && op <= asBC_JNP) ||
+		         op == asBC_JLowZ || op == asBC_JLowNZ)
+		{
+			if (forced[n] != 1)
+				work.PushLast((asUINT)((int)n + instrSize + asBC_INTARG(&bc[n])));
+			if (forced[n] != 2)
+				work.PushLast(n + (asUINT)instrSize);
+		}
+		else if (op == asBC_JMPP)
+		{
+			// Switch dispatch: every JMP in the table that follows.
+			for (asUINT t = n + (asUINT)instrSize;
+			     t < bcLen && *(asBYTE*)&bc[t] == asBC_JMP;
+			     t += (asUINT)asBCTypeSize[asBCInfo[asBC_JMP].type])
+				work.PushLast(t);
+		}
+		else
+			work.PushLast(n + (asUINT)instrSize);
+	}
+}
+
 static bool asProveCountedLoop(asDWORD *bc, asUINT bcLen, asUINT target, asUINT backJump,
                                const asCArray<bool> &isJumpTarget)
 {
@@ -930,6 +981,70 @@ void asCCompiler::FinalizeFunction()
 			}
 		}
 
+		// Reachability closure from entry over the real CFG, honouring the
+		// guards pass 2 proved constant. The walk over-approximates: it visits
+		// at least everything that can execute, so an address it does not visit
+		// provably cannot. Used twice below - to discard back edges in dead
+		// code, and to decide whether a RET can be reached at all.
+		//
+		// Catch handlers are CFG edges from every potentially-throwing
+		// instruction in the try range and are not modeled here, so with any
+		// try/catch present the walk understates reachability. Both consumers
+		// below therefore refuse to draw a conclusion in that case.
+		const bool hasTryCatch = outFunc->scriptData->tryCatchInfo.GetLength() > 0;
+		bool retReachable = false;
+		if (decodeOk)
+		{
+			asCArray<bool> reachable;
+			reachable.SetLength(bcLen);
+			for (asUINT v = 0; v < bcLen; v++) reachable[v] = false;
+			asHaltsReachFrom(bc, bcLen, 0, forced, reachable);
+
+			for (asUINT v = 0; v < bcLen && !retReachable; v++)
+				if (reachable[v] && *(asBYTE*)&bc[v] == asBC_RET)
+					retReachable = true;
+
+			// Pass 1 flagged every jump that goes backward in address order.
+			// That is a superset of the real loops: the standard for-loop
+			// layout puts the condition/increment block after the body and
+			// enters it with a forward jump, so the block's jump back to the
+			// body is backward in address while nothing in the body returns to
+			// it. `for(;;) { return; }` is exactly that shape. Counting such an
+			// edge as a cycle costs YES on code whose termination is obvious on
+			// sight.
+			//
+			// An edge from -> to is a real loop only if `to` can reach `from`.
+			// Also drop edges no path reaches at all - `while(false) { }`
+			// leaves a genuine back edge behind a guard pass 2 proved constant.
+			//
+			// Both filters can only move the verdict toward YES, so both are
+			// gated on decodeOk and on the absence of try/catch (whose handler
+			// edges asHaltsReachFrom does not model, making it understate
+			// reachability), and both inherit pass 2's guarantee that `forced`
+			// kills an edge only for a provably constant guard.
+			if (!hasTryCatch)
+			{
+				asCArray<bool> fromTarget;
+				fromTarget.SetLength(bcLen);
+				asUINT keep = 0;
+				for (asUINT e = 0; e < backEdgeFrom.GetLength(); e++)
+				{
+					if (!reachable[backEdgeFrom[e]]) continue;
+
+					for (asUINT v = 0; v < bcLen; v++) fromTarget[v] = false;
+					asHaltsReachFrom(bc, bcLen, backEdgeTo[e], forced, fromTarget);
+					if (!fromTarget[backEdgeFrom[e]]) continue;
+
+					backEdgeFrom[keep] = backEdgeFrom[e];
+					backEdgeTo[keep]   = backEdgeTo[e];
+					keep++;
+				}
+				backEdgeFrom.SetLength(keep);
+				backEdgeTo.SetLength(keep);
+				hasCycle = (keep > 0);
+			}
+		}
+
 		// Counted-loop prover: YES survives cycles when every back edge is a
 		// proven-bounded counted loop and no two back edges share a target
 		// (a shared target means a continue-style edge can bypass the
@@ -948,60 +1063,17 @@ void asCCompiler::FinalizeFunction()
 			outFunc->localHalts = asHALTS_UNKNOWN;
 		else if (!hasCycle || allCyclesBounded)
 			outFunc->localHalts = asHALTS_YES;
-		else if (outFunc->scriptData->tryCatchInfo.GetLength() > 0)
+		else if (hasTryCatch)
 		{
 			// Catch handlers are CFG edges from every potentially-throwing
-			// instruction in the try range; those edges are not modeled
-			// here, so NO must never be claimed for such a function.
+			// instruction in the try range; those edges are not modeled by the
+			// walk above, so NO must never be claimed for such a function.
 			outFunc->localHalts = asHALTS_UNKNOWN;
 		}
 		else
 		{
-			// RET-reachability from entry over the real CFG. If no RET can
-			// be reached the function cannot return normally: NO.
-			asCArray<bool> visited;
-			visited.SetLength(bcLen);
-			for (asUINT v = 0; v < bcLen; v++) visited[v] = false;
-
-			asCArray<asUINT> work;
-			work.PushLast(0);
-			bool retReachable = false;
-
-			while (work.GetLength() > 0 && !retReachable)
-			{
-				asUINT n = work[work.GetLength() - 1];
-				work.PopLast();
-				if (n >= bcLen || visited[n]) continue;
-				visited[n] = true;
-
-				asBYTE op = *(asBYTE*)&bc[n];
-				int instrSize = asBCTypeSize[asBCInfo[op].type];
-
-				if (op == asBC_RET)
-					retReachable = true;
-				else if (op == asBC_JMP)
-					work.PushLast((asUINT)((int)n + instrSize + asBC_INTARG(&bc[n])));
-				else if ((op >= asBC_JZ && op <= asBC_JNP) ||
-				         op == asBC_JLowZ || op == asBC_JLowNZ)
-				{
-					// A guard pass 2 proved constant contributes only its
-					// live edge; forced == 0 means both edges are live.
-					if (forced[n] != 1)
-						work.PushLast((asUINT)((int)n + instrSize + asBC_INTARG(&bc[n])));
-					if (forced[n] != 2)
-						work.PushLast(n + (asUINT)instrSize);
-				}
-				else if (op == asBC_JMPP)
-				{
-					for (asUINT t = n + (asUINT)instrSize;
-					     t < bcLen && *(asBYTE*)&bc[t] == asBC_JMP;
-					     t += (asUINT)asBCTypeSize[asBCInfo[asBC_JMP].type])
-						work.PushLast(t);
-				}
-				else
-					work.PushLast(n + (asUINT)instrSize);
-			}
-
+			// If the walk above reached no RET the function cannot return
+			// normally: NO.
 			outFunc->localHalts = retReachable ? asHALTS_UNKNOWN : asHALTS_NO;
 		}
 

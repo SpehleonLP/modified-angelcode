@@ -129,7 +129,13 @@ best-effort:
   finalized bytecode: `YES` only if there's no cycle, or every cycle is
   proven bounded; `NO` only if there is an unbounded cycle, no try/catch, and
   no `RET` reachable from entry; everything else — including anything the
-  decoder can't classify — is `UNKNOWN`. It recognizes `asBC_JLowZ`/
+  decoder can't classify — is `UNKNOWN`. A backward jump is only a cycle if
+  it can execute at all and its target can reach it again: the standard
+  for-loop layout puts the condition block after the body and enters it with a
+  forward jump, so `for(;;) { return; }` leaves an address-backward jump that
+  closes no loop, and `while(false) { }` leaves one no path reaches. Both
+  filters need the reachability walk and so are suppressed when the function
+  has try/catch info, whose handler edges the walk does not model. It recognizes `asBC_JLowZ`/
   `asBC_JLowNZ` (the optimizer's ClrHi+JZ/JNZ fusion) and `asBC_JMPP` (switch
   dispatch) as conditional/computed jumps, and elides the dead edge of a
   statically-constant guard in both the optimized and unoptimized instruction
@@ -506,14 +512,42 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All 95 tests should pass. They live in `tests/test_as_halting.cpp`, across
-three fixtures that differ only in engine properties: `AsHalting` enables
-`asEP_ALLOW_UNSAFE_REFERENCES` (one test needs `int &inout` on a script
+All 97 tests should pass. 95 of them live in `tests/test_as_halting.cpp`,
+across three fixtures that differ only in engine properties: `AsHalting`
+enables `asEP_ALLOW_UNSAFE_REFERENCES` (one test needs `int &inout` on a script
 function); `AsHaltingConstGlobalFuncdef` leaves it at its default of off,
 which is the precondition for const-global funcdef resolution to fire at all
 (see that section above); and `AsHaltingNoOptimizer` turns
 `asEP_OPTIMIZE_BYTECODE` off. This is the suite every later halting-analysis
 change adds to.
+
+### The obviousness audit
+
+The remaining two tests are `tests/test_as_halting_obvious.cpp`, which is a
+measurement rather than a behavioural spec. It holds a corpus of scripts
+annotated with the answer a human gets from reading the source, and reports
+every case where the analysis disagrees. The bar it enforces has two halves:
+
+- **Soundness** — a `YES` or `NO` verdict must be true. A case whose obvious
+  answer is `YES` must never report `NO`, and vice versa. This half is never
+  allowlisted; a failure is a real bug.
+- **Obviousness** — `UNKNOWN` on a case a human answers instantly is a defect,
+  not acceptable conservatism. The goal is not a maximally clever prover; it is
+  that the easy cases are never wrong and never unknown.
+
+Cases the analysis currently misses carry a `knownGap` string explaining why,
+so the suite stays green while the gap list stays visible; running the audit
+prints the full table and a summary line. A disagreement with no recorded
+reason fails, and so does a `knownGap` on a case that now passes — closing a
+gap means deleting its string, never editing the expected answer.
+
+At the current commit the audit reads 28/31 exact with 3 documented gaps: a
+`shared final` class method call is `UNKNOWN` because a shared class's virtual
+targets are treated as open to override from a module not yet loaded and
+`final` is not consulted to close that question, and the two callee-divergence
+cases are `UNKNOWN` because a callee's `NO` is weakened to `UNKNOWN` before
+folding into a caller (recovering `NO` there needs a must-reach analysis, not
+just the call graph).
 
 ## Branch layout
 
