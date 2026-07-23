@@ -53,6 +53,12 @@ BEGIN_AS_NAMESPACE
 // TODO: import: Remove this when the imported functions are removed
 const int FUNC_IMPORTED = 0x40000000;
 
+// Stands in for a module function index in BuildCalleeList's direct-call site
+// table when the target is outside m_scriptFunctions and its verdict is
+// already frozen at asHALTS_NO - a shared script function, whose transitive
+// metadata was final before any other module could reference it.
+const asUINT asMODULE_SITE_DIVERGES = 0xFFFFFFFF;
+
 class asCScriptEngine;
 class asCCompiler;
 class asCBuilder;
@@ -208,11 +214,22 @@ public:
 	// is a system function or a shared script function. The caller folds it
 	// like a resolved edge; it is not deduped (the fold is a join of
 	// idempotent max()-style operations).
+	//
+	// outDirectSiteAddr/outDirectSiteIndex additionally record, per direct
+	// asBC_CALL site with a single resolved target, the site's byte code
+	// address and where that target's verdict comes from: an index into
+	// m_scriptFunctions, or asMODULE_SITE_DIVERGES for a frozen shared target
+	// already known to be asHALTS_NO. These let phase 4b ask whether a call
+	// that never returns is on every path to a RET. Only single-target direct
+	// calls appear; virtual dispatch, imports, delegates and unresolved sites
+	// are deliberately absent, so they are always treated as returning.
 	void BuildCalleeList(asCScriptFunction *func,
 	                     const asCMap<int, asUINT> &funcIdToIndex,
 	                     asCArray<asUINT> &outCallees,
 	                     asCArray<asCScriptFunction*> &outExternalCallees,
-	                     bool &outUnresolved);
+	                     bool &outUnresolved,
+	                     asCArray<asUINT> &outDirectSiteAddr,
+	                     asCArray<asUINT> &outDirectSiteIndex);
 	int  AddScriptFunction(int sectionIdx, int declaredAt, int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asCString> &paramNames, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, bool isInterface, asCObjectType *objType = 0, bool isGlobalFunction = false, asSFunctionTraits funcTraits = asSFunctionTraits(), asSNameSpace *ns = 0);
 	int  AddScriptFunction(asCScriptFunction *func);
 	int  AddImportedFunction(int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, asSFunctionTraits funcTraits, asSNameSpace *ns, const asCString &moduleName);

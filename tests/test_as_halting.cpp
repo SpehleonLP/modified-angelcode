@@ -553,18 +553,33 @@ TEST_F(AsHalting, ExternalFoldOfGenuineNoCalleeDowngradesToUnknown) {
 	// of the phase-2 downgrade under test. Asserting on a() directly is
 	// the only way this test can go red if the phase-2 downgrade line is
 	// deleted; confirmed by hand (see task-6-report.md).
+	//
+	// a() calls spin() from *one branch*, so UNKNOWN is the truthful answer
+	// and the downgrade is what produces it: delete the phase-2 downgrade and
+	// a() folds to NO, which is wrong, and this test goes red. The shape has
+	// to be conditional — with an unconditional `a() { spin(); }` phase 4b
+	// proves NO from the byte code (every path to a RET crosses the call), so
+	// NO would be correct there and the test could no longer tell the two
+	// apart. That unconditional case is asserted below.
 	ASSERT_NE(FnIn("owner",
 		"shared void spin() { while (true) { } }\n"
-		"shared void a() { spin(); }", "a"), nullptr);
+		"shared void a(bool c) { if( c ) spin(); }\n"
+		"shared void b() { spin(); }", "a"), nullptr);
 	asIScriptFunction* userF = FnIn("user",
-		"external shared void a();\n"
-		"void f() { a(); }", "f");
+		"external shared void a(bool c);\n"
+		"external shared void b();\n"
+		"void f() { a(true); }", "f");
 	ASSERT_NE(userF, nullptr);
 	asIScriptModule* userMod = engine->GetModule("user", asGM_ONLY_IF_EXISTS);
 	ASSERT_NE(userMod, nullptr);
 	asIScriptFunction* userA = userMod->GetFunctionByName("a");
 	ASSERT_NE(userA, nullptr);
 	EXPECT_EQ(userA->GetTransitiveHalts(), asHALTS_UNKNOWN);
+
+	// Same fold, unconditional call site: phase 4b recovers the accurate NO.
+	asIScriptFunction* userB = userMod->GetFunctionByName("b");
+	ASSERT_NE(userB, nullptr);
+	EXPECT_EQ(userB->GetTransitiveHalts(), asHALTS_NO);
 }
 
 TEST_F(AsHalting, SharedFinalClassMethodCallStillPoisonedViaVirtualDispatch) {

@@ -1930,11 +1930,84 @@ asDWORD asCModule::SetAccessMask(asDWORD mask)
 // live inside the same guard or an AS_NO_COMPILER build fails to compile with
 // "no declaration matches".
 #ifndef AS_NO_COMPILER
+// True if no asBC_RET is reachable from entry once every byte code address in
+// `cut` is treated as never returning. Phase 4b uses it to ask whether a call
+// that cannot return sits on every path to a RET, which is what turns a
+// callee's asHALTS_NO into the caller's asHALTS_NO.
+//
+// Deliberately weaker than the walk in asCCompiler::FinalizeFunction: the
+// constant-guard decisions that walk computes are local to it and not stored
+// on the function, so both edges of every conditional are followed here. That
+// over-approximates reachability, which makes a RET easier to find and this
+// function harder to satisfy - the safe direction. Every refusal path likewise
+// returns false, never true.
+static bool asNoRetReachableWithout(asCScriptFunction *func, const asCArray<asUINT> &cut)
+{
+	if (!func || !func->scriptData) return false;
+
+	// Catch handler edges are not modeled here. A throw inside the try range
+	// routes around the cut, so no conclusion is available.
+	if (func->scriptData->tryCatchInfo.GetLength() > 0) return false;
+
+	asDWORD *bc = func->scriptData->byteCode.AddressOf();
+	asUINT bcLen = (asUINT)func->scriptData->byteCode.GetLength();
+	if (bcLen == 0) return false;
+
+	asCArray<bool> isCut;
+	isCut.SetLength(bcLen);
+	for (asUINT v = 0; v < bcLen; v++) isCut[v] = false;
+	for (asUINT c = 0; c < cut.GetLength(); c++)
+		if (cut[c] < bcLen) isCut[cut[c]] = true;
+
+	asCArray<bool> visited;
+	visited.SetLength(bcLen);
+	for (asUINT v = 0; v < bcLen; v++) visited[v] = false;
+
+	asCArray<asUINT> work;
+	work.PushLast(0);
+	while (work.GetLength() > 0)
+	{
+		asUINT n = work[work.GetLength() - 1];
+		work.PopLast();
+		if (n >= bcLen || visited[n]) continue;
+		visited[n] = true;
+
+		asBYTE op = *(asBYTE*)&bc[n];
+		int instrSize = asBCTypeSize[asBCInfo[op].type];
+		// An opcode the decoder cannot size hides the rest of the function.
+		if (instrSize == 0) return false;
+
+		if (op == asBC_RET) return false;
+		if (isCut[n]) continue;
+
+		if (op == asBC_JMP)
+			work.PushLast((asUINT)((int)n + instrSize + asBC_INTARG(&bc[n])));
+		else if ((op >= asBC_JZ && op <= asBC_JNP) ||
+		         op == asBC_JLowZ || op == asBC_JLowNZ)
+		{
+			work.PushLast((asUINT)((int)n + instrSize + asBC_INTARG(&bc[n])));
+			work.PushLast(n + (asUINT)instrSize);
+		}
+		else if (op == asBC_JMPP)
+		{
+			for (asUINT t = n + (asUINT)instrSize;
+			     t < bcLen && *(asBYTE*)&bc[t] == asBC_JMP;
+			     t += (asUINT)asBCTypeSize[asBCInfo[asBC_JMP].type])
+				work.PushLast(t);
+		}
+		else
+			work.PushLast(n + (asUINT)instrSize);
+	}
+	return true;
+}
+
 void asCModule::BuildCalleeList(asCScriptFunction *func,
                                 const asCMap<int, asUINT> &funcIdToIndex,
                                 asCArray<asUINT> &outCallees,
                                 asCArray<asCScriptFunction*> &outExternalCallees,
-                                bool &outUnresolved)
+                                bool &outUnresolved,
+                                asCArray<asUINT> &outDirectSiteAddr,
+                                asCArray<asUINT> &outDirectSiteIndex)
 {
 	outUnresolved = false;
 	if (!func || !func->scriptData) return;
@@ -1962,7 +2035,12 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			int funcId = asBC_INTARG(&bc[n]);
 			asSMapNode<int, asUINT> *cursor = 0;
 			if (funcIdToIndex.MoveTo(&cursor, funcId))
+			{
 				outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+				// Single resolved target: usable as a must-reach cut point.
+				outDirectSiteAddr.PushLast(n);
+				outDirectSiteIndex.PushLast(funcIdToIndex.GetValue(cursor));
+			}
 			else
 			{
 				// A direct call whose target is a shared script function is
@@ -1974,7 +2052,16 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 				// constant. Anything else stays unresolved.
 				asCScriptFunction *calledFunc = m_engine->GetScriptFunction(funcId);
 				if (calledFunc && calledFunc->funcType == asFUNC_SCRIPT && calledFunc->IsShared())
+				{
 					outExternalCallees.PushLast(calledFunc);
+					// Frozen verdict: if it never returns it never will, so the
+					// site is a permanent cut point.
+					if (calledFunc->transitiveHalts == asHALTS_NO)
+					{
+						outDirectSiteAddr.PushLast(n);
+						outDirectSiteIndex.PushLast(asMODULE_SITE_DIVERGES);
+					}
+				}
 				else
 					outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
 			}
@@ -2228,13 +2315,18 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	asCArray<asCArray<asUINT>> callees;
 	asCArray<asCArray<asCScriptFunction*>> externalCallees;
 	asCArray<bool> unresolved;
+	asCArray<asCArray<asUINT>> directSiteAddr;
+	asCArray<asCArray<asUINT>> directSiteIndex;
 	callees.SetLength(funcCount);
 	externalCallees.SetLength(funcCount);
 	unresolved.SetLength(funcCount);
+	directSiteAddr.SetLength(funcCount);
+	directSiteIndex.SetLength(funcCount);
 	for (asUINT i = 0; i < funcCount; i++)
 	{
 		unresolved[i] = false;
-		BuildCalleeList(m_scriptFunctions[i], funcIdToIndex, callees[i], externalCallees[i], unresolved[i]);
+		BuildCalleeList(m_scriptFunctions[i], funcIdToIndex, callees[i], externalCallees[i], unresolved[i],
+		                directSiteAddr[i], directSiteIndex[i]);
 	}
 
 	// Phase 2: init transitive fields from local
@@ -2370,6 +2462,83 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		}
 	}
 
+	// Phase 4b: recover asHALTS_NO across call edges the caller must reach.
+	//
+	// Phase 4 folds a callee's NO down to UNKNOWN, because whether the caller
+	// halts then depends on whether the call site is reached — which the call
+	// graph alone does not track. That costs an accurate NO on code whose
+	// divergence is obvious on sight: `void f() { spin(); }` and
+	// `void f() { f(); }` both read as "never returns" at a glance. The byte
+	// code answers the question the call graph cannot.
+	//
+	// Least fixed point on "may return normally". A function enters mayReturn
+	// once a RET is reachable from entry with every call to a not-yet-admitted
+	// direct target cut. Starting from the empty set and only ever growing is
+	// what lets this prove self- and mutual recursion: `f` is admitted only if
+	// it can reach a RET *without* its call to `f`, so `void f() { f(); }`
+	// never enters and is NO. Whatever never enters cannot return by any path.
+	//
+	// Only single-target direct asBC_CALL sites are ever cut. Virtual
+	// dispatch, imports, delegates and anything unresolved is absent from the
+	// site table and so always counts as returning, which can only keep a
+	// function out of NO. Terminates because mayReturn only grows and is
+	// bounded by funcCount; cost is one CFG walk per unadmitted function per
+	// pass, so a deep call chain costs more passes than a broad one.
+	{
+		asCArray<bool> mayReturn;
+		mayReturn.SetLength(funcCount);
+		for (asUINT i = 0; i < funcCount; i++) mayReturn[i] = false;
+
+		bool grew = true;
+		while (grew)
+		{
+			grew = false;
+			for (asUINT i = 0; i < funcCount; i++)
+			{
+				if (mayReturn[i]) continue;
+
+				asCScriptFunction *func = m_scriptFunctions[i];
+				if (!func || !func->scriptData)
+				{
+					// Nothing to walk, so nothing can be proven. Admit it so
+					// its callers are never cut on its account.
+					mayReturn[i] = true;
+					grew = true;
+					continue;
+				}
+
+				asCArray<asUINT> cut;
+				for (asUINT s = 0; s < directSiteAddr[i].GetLength(); s++)
+				{
+					asUINT tgt = directSiteIndex[i][s];
+					if (tgt == asMODULE_SITE_DIVERGES)
+						cut.PushLast(directSiteAddr[i][s]);
+					else if (tgt < funcCount && !mayReturn[tgt])
+						cut.PushLast(directSiteAddr[i][s]);
+				}
+
+				if (!asNoRetReachableWithout(func, cut))
+				{
+					mayReturn[i] = true;
+					grew = true;
+				}
+			}
+		}
+
+		for (asUINT i = 0; i < funcCount; i++)
+		{
+			asCScriptFunction *func = m_scriptFunctions[i];
+			if (!func || !func->scriptData) continue;
+			if (mayReturn[i]) continue;
+			// A function already settled at YES cannot also be unable to
+			// return. Consistent analysis never produces the combination, but
+			// LoadByteCode restores verdicts from a stream this process did
+			// not produce, so prefer the weaker claim over trusting either.
+			if (func->transitiveHalts == asHALTS_YES) continue;
+			func->transitiveHalts = asHALTS_NO;
+		}
+	}
+
 	// Phase 5: Global-property init funcs. These are pure sources — no bytecode
 	// CALLs them, so they cannot appear in any cycle. Their callees live in
 	// m_scriptFunctions and are fully settled after phase 4, so one propagation
@@ -2384,7 +2553,12 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		asCArray<asUINT> initCallees;
 		asCArray<asCScriptFunction*> initExternalCallees;
 		bool initUnresolved = false;
-		BuildCalleeList(initFunc, funcIdToIndex, initCallees, initExternalCallees, initUnresolved);
+		// Init funcs are pure sources: nothing calls them, so an accurate NO on
+		// one would propagate nowhere. Their site table is collected and
+		// dropped rather than run through phase 4b.
+		asCArray<asUINT> initSiteAddr, initSiteIndex;
+		BuildCalleeList(initFunc, funcIdToIndex, initCallees, initExternalCallees, initUnresolved,
+		                initSiteAddr, initSiteIndex);
 
 		initFunc->minTransitiveAccessMask = initFunc->minLocalAccessMask;
 		initFunc->transitiveCallsDelegate = initFunc->localCallsDelegate || initUnresolved;

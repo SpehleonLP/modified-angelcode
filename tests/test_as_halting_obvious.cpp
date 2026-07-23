@@ -113,6 +113,18 @@ const ObviousCase kCases[] = {
   "int f() { return g(3) + g(4); }",
   "f", asHALTS_YES, true, 0 },
 
+// Shared functions are what the engine's GUI lambdas lean on, so YES has to
+// survive a call into one.
+{ "CallsASharedFunction",
+  "shared void g() { }\n"
+  "void f() { g(); }",
+  "f", asHALTS_YES, true, 0 },
+
+{ "CallsASharedFunctionWithABoundedLoop",
+  "shared int g() { int s = 0; for( int i = 0; i < 5; i++ ) s += i; return s; }\n"
+  "int f() { return g(); }",
+  "f", asHALTS_YES, true, 0 },
+
 { "CallsALiteralBoundedLoopFunction",
   "int g() { int s = 0; for( int i = 0; i < 5; i++ ) s += i; return s; }\n"
   "int f() { return g(); }",
@@ -132,9 +144,12 @@ const ObviousCase kCases[] = {
   "shared final class C { void m() { } }\n"
   "void f() { C c; c.m(); }",
   "f", asHALTS_YES, true,
-  "a shared class's virtual targets are treated as open to override from a "
-  "module not yet loaded, and `final` is not consulted to close that question. "
-  "The single legal target is already known at compile time." },
+  "DEFERRED INDEFINITELY by the owner (2026-07-23): no current use case for "
+  "shared classes. A shared class's virtual targets are treated as open to "
+  "override from a module not yet loaded, and `final` is not consulted to "
+  "close that question, so the single legal target is discarded. Shared "
+  "*functions* are the case that matters to the engine's GUI lambdas, and "
+  "those resolve -- see CallsASharedFunction and the frozen-callee test." },
 
 // ---------------------------------------------------------------------------
 // Obviously NO: a reader can see a path that never reaches the end.
@@ -156,23 +171,39 @@ const ObviousCase kCases[] = {
   "void f() { int x = 1 + 2; while( true ) { x = x * 2; } }",
   "f", asHALTS_NO, false, 0 },
 
-// A human reads this as "f calls spin unconditionally on its only path, so f
-// never returns". The analysis deliberately weakens a callee's NO to UNKNOWN
-// before folding it into a caller, because it does not prove the call site is
-// reachable on every path.
+// f calls spin unconditionally on its only path, so f never returns.
 { "UnconditionalCallToANonHaltingFunction",
   "void spin() { while( true ) { } }\n"
   "void f() { spin(); }",
-  "f", asHALTS_NO, true,
-  "by design: a callee's NO is weakened to UNKNOWN before folding into a "
-  "caller, since call-site reachability is not proven. Recovering NO needs a "
-  "must-reach analysis, not just the call graph." },
+  "f", asHALTS_NO, true, 0 },
+
+{ "TwoHopCallToANonHaltingFunction",
+  "void spin() { while( true ) { } }\n"
+  "void mid() { spin(); }\n"
+  "void f() { mid(); }",
+  "f", asHALTS_NO, true, 0 },
 
 { "UnconditionalSelfRecursion",
   "void f() { f(); }",
-  "f", asHALTS_NO, true,
-  "same callee-NO weakening as UnconditionalCallToANonHaltingFunction, plus "
-  "the SCC starts at UNKNOWN rather than being proven divergent." },
+  "f", asHALTS_NO, true, 0 },
+
+{ "MutualRecursionWithNoBaseCase",
+  "void f() { g(); }\n"
+  "void g() { f(); }",
+  "f", asHALTS_NO, true, 0 },
+
+// The call to spin is on one branch only, so f returns whenever a is false.
+// Must NOT be NO -- this is the case the must-reach cut exists to exclude.
+{ "ConditionalCallToANonHaltingFunction",
+  "void spin() { while( true ) { } }\n"
+  "void f(bool a) { if( a ) spin(); }",
+  "f", asHALTS_UNKNOWN, true, 0 },
+
+// Recursion with a reachable base case returns for some inputs, so NO is
+// wrong; proving YES would need the argument to be bounded.
+{ "SelfRecursionWithABaseCase",
+  "void f(int n) { if( n <= 0 ) return; f(n-1); }",
+  "f", asHALTS_UNKNOWN, true, 0 },
 
 // ---------------------------------------------------------------------------
 // Genuinely UNKNOWN: a careful reader cannot answer either, so UNKNOWN is the
@@ -313,6 +344,41 @@ TEST_F(AsHaltingObviousness, ObviousCasesAreNotUnknown)
 		agree, n, knownGaps);
 	if (!gapReport.empty())
 		fprintf(stderr, "[ OBVIOUSNESS AUDIT ] open gaps:\n%s", gapReport.c_str());
+}
+
+// The corpus builds one module, so its shared-function rows resolve to a
+// callee this module compiled. The case the engine actually hits is the other
+// one: a second module referencing a shared function the first module created,
+// which arrives as a frozen external callee rather than a graph edge. YES has
+// to survive that too, and a shared spinner still has to come back NO.
+TEST_F(AsHaltingObviousness, VerdictsCrossIntoAFrozenSharedCallee)
+{
+	const char* provider =
+		"shared void ok() { }\n"
+		"shared void spin() { while( true ) { } }\n";
+	const char* consumer =
+		"shared void ok() { }\n"
+		"shared void spin() { while( true ) { } }\n"
+		"void callsOk() { ok(); }\n"
+		"void callsSpin() { spin(); }\n";
+
+	asIScriptModule* a = engine->GetModule("provider", asGM_ALWAYS_CREATE);
+	a->AddScriptSection("s", provider);
+	ASSERT_GE(a->Build(), 0);
+
+	asIScriptModule* b = engine->GetModule("consumer", asGM_ALWAYS_CREATE);
+	b->AddScriptSection("s", consumer);
+	ASSERT_GE(b->Build(), 0);
+
+	asIScriptFunction* callsOk = b->GetFunctionByName("callsOk");
+	asIScriptFunction* callsSpin = b->GetFunctionByName("callsSpin");
+	ASSERT_NE(callsOk, nullptr);
+	ASSERT_NE(callsSpin, nullptr);
+
+	EXPECT_EQ(callsOk->GetTransitiveHalts(), asHALTS_YES)
+		<< "a call into a frozen shared function that halts must stay YES";
+	EXPECT_EQ(callsSpin->GetTransitiveHalts(), asHALTS_NO)
+		<< "an unconditional call into a frozen shared spinner never returns";
 }
 
 } // namespace

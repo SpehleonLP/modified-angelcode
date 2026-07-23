@@ -178,11 +178,24 @@ best-effort:
   `JP` compile to). All of these are sound-conservative: refusal only ever
   costs precision (a fold to `UNKNOWN` that could have been `YES`), never
   soundness.
-- **NO never crosses a call edge** (`asCModule::ComputeTransitiveFunctionMetadata`,
-  `as_module.cpp`) — a callee's `asHALTS_NO` is downgraded to `UNKNOWN` before
-  folding into the caller, because whether a never-halting callee's call site
-  is even reached is not something the call graph tracks; only a function's
-  own control flow can earn it `NO`.
+- **NO crosses a call edge only where the call site must be reached**
+  (`asCModule::ComputeTransitiveFunctionMetadata`, `as_module.cpp`). The graph
+  fold downgrades a callee's `asHALTS_NO` to `UNKNOWN`, because whether a
+  never-halting callee's call site is even reached is not something the call
+  graph tracks. Phase 4b then answers that question from the byte code: a
+  least fixed point on "may return normally" admits a function once a `RET` is
+  reachable from entry with every call to a not-yet-admitted direct target
+  cut, and whatever never enters the set cannot return by any path and is `NO`.
+  Growing from the empty set is what proves recursion — `void f() { f(); }`
+  is admitted only if it can reach a `RET` *without* its call to `f`, so it
+  never is. `void f() { spin(); }` and mutual recursion fall out the same way,
+  while `void f(bool c) { if (c) spin(); }` stays `UNKNOWN` because its `RET`
+  survives the cut. Only single-target direct `asBC_CALL` sites are ever cut;
+  virtual dispatch, imports, delegates and unresolved sites always count as
+  returning, so they can only keep a function out of `NO`. The walk has no
+  access to the compiler's constant-guard decisions and so follows both edges
+  of every conditional, and it refuses outright on try/catch — both err toward
+  finding a `RET`, which is the direction that withholds `NO`.
 - **Two delegate flags, two origins** — `localCallsDelegate` is purely
   compile-time: `asCCompiler::PerformFunctionCall` sets it when it emits an
   `asBC_CallPtr` whose target it could not pin statically (see "Const-global
@@ -512,7 +525,7 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All 97 tests should pass. 95 of them live in `tests/test_as_halting.cpp`,
+All 98 tests should pass. 95 of them live in `tests/test_as_halting.cpp`,
 across three fixtures that differ only in engine properties: `AsHalting`
 enables `asEP_ALLOW_UNSAFE_REFERENCES` (one test needs `int &inout` on a script
 function); `AsHaltingConstGlobalFuncdef` leaves it at its default of off,
@@ -523,7 +536,7 @@ change adds to.
 
 ### The obviousness audit
 
-The remaining two tests are `tests/test_as_halting_obvious.cpp`, which is a
+The remaining three tests are `tests/test_as_halting_obvious.cpp`, which is a
 measurement rather than a behavioural spec. It holds a corpus of scripts
 annotated with the answer a human gets from reading the source, and reports
 every case where the analysis disagrees. The bar it enforces has two halves:
@@ -541,13 +554,12 @@ prints the full table and a summary line. A disagreement with no recorded
 reason fails, and so does a `knownGap` on a case that now passes — closing a
 gap means deleting its string, never editing the expected answer.
 
-At the current commit the audit reads 28/31 exact with 3 documented gaps: a
-`shared final` class method call is `UNKNOWN` because a shared class's virtual
+At the current commit the audit reads 36/37 exact with one documented gap: a
+`shared final` class method call is `UNKNOWN`, because a shared class's virtual
 targets are treated as open to override from a module not yet loaded and
-`final` is not consulted to close that question, and the two callee-divergence
-cases are `UNKNOWN` because a callee's `NO` is weakened to `UNKNOWN` before
-folding into a caller (recovering `NO` there needs a must-reach analysis, not
-just the call graph).
+`final` is not consulted to close that question. Shared *functions* — the case
+the consuming engine's GUI lambdas actually lean on — do resolve, including
+across modules into a frozen shared callee.
 
 ## Branch layout
 
