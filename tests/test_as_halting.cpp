@@ -131,6 +131,11 @@ TEST_F(AsHalting, DoWhileBodyAlwaysReturnsCompiles) {
 	EXPECT_TRUE(Builds("int f() { do { return 1; } while(false); }"));
 }
 
+TEST_F(AsHalting, DoWhileTrueWithBreakStillRequiresReturn) {
+	EXPECT_FALSE(Builds("bool g() { return false; }\n"
+	                    "int f() { do { if (g()) break; return 1; } while(true); }"));
+}
+
 TEST_F(AsHalting, ReturnInsideForEverCompiles) {
 	EXPECT_TRUE(Builds("int f() { for(;;) { return 1; } }"));
 }

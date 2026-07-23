@@ -85,7 +85,9 @@ this maps to). Grouped by theme, citing the primary files:
   `do{...}while(true);`, or `for(;;){...}` no longer wrongly demands a trailing
   `return`: a loop whose guard is a compile-time-constant true (or, for `for`,
   absent) and whose body never reaches a `break` is recognized as making the
-  code after it unreachable. Confirmed present in vanilla upstream 2.38.0
+  code after it unreachable. As a consequence, code that follows such a
+  provably-infinite loop now produces an "Unreachable code" warning where it
+  previously produced none. Confirmed present in vanilla upstream 2.38.0
   (`next-version` branch, same `CompileStatement`) — worth reporting upstream.
 - Callback signature changes: `SetTranslateAppExceptionCallback`,
   `asIScriptContext::SetExceptionCallback`/`SetLineCallback` take `asSFuncPtr`

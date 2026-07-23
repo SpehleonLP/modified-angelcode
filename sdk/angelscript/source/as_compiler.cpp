@@ -146,6 +146,7 @@ void asCCompiler::Reset(asCBuilder *in_builder, asCScriptCode *in_script, asCScr
 	nextLabel = 0;
 	breakLabels.SetLength(0);
 	continueLabels.SetLength(0);
+	breakEmitted.SetLength(0);
 
 	numLambdas = 0;
 
@@ -5478,7 +5479,11 @@ void asCCompiler::CompileForStatement(asCScriptNode *fnode, bool *hasReturn, asC
 			}
 			else
 			{
+#if AS_SIZEOF_BOOL == 1
 				condIsConstantTrue = expr.type.isConstant && expr.type.GetConstantB() != 0;
+#else
+				condIsConstantTrue = expr.type.isConstant && expr.type.GetConstantDW() != 0;
+#endif
 				ConvertToVariable(&expr);
 				ProcessDeferredParams(&expr);
 
@@ -6136,7 +6141,11 @@ void asCCompiler::CompileWhileStatement(asCScriptNode *wnode, bool *hasReturn, a
 		}
 		else
 		{
+#if AS_SIZEOF_BOOL == 1
 			condIsConstantTrue = expr.type.isConstant && expr.type.GetConstantB() != 0;
+#else
+			condIsConstantTrue = expr.type.isConstant && expr.type.GetConstantDW() != 0;
+#endif
 			ConvertToVariable(&expr);
 			ProcessDeferredParams(&expr);
 
@@ -6246,10 +6255,14 @@ void asCCompiler::CompileDoWhileStatement(asCScriptNode *wnode, bool *hasReturn,
 	}
 	else
 	{
+#if AS_SIZEOF_BOOL == 1
 		condIsConstantTrue = expr.type.isConstant && expr.type.GetConstantB() != 0;
+#else
+		condIsConstantTrue = expr.type.isConstant && expr.type.GetConstantDW() != 0;
+#endif
 		ConvertToVariable(&expr);
 		ProcessDeferredParams(&expr);
-
+		
 		// Jump to next iteration if expression is true
 		expr.bc.InstrSHORT(asBC_CpyVtoR4, (short)expr.type.stackOffset);
 		expr.bc.Instr(asBC_ClrHi);
@@ -6263,13 +6276,16 @@ void asCCompiler::CompileDoWhileStatement(asCScriptNode *wnode, bool *hasReturn,
 	// Add label after the statement
 	bc->Label((short)afterLabel);
 
-	// A loop whose guard is a compile-time constant true and whose body
-	// emitted no break against it never exits normally, so the statement
-	// after it is unreachable: for return-path purposes it counts as
-	// returning. A do-while body also always executes at least once, so
-	// a body that itself always returns makes the loop return too.
-	*hasReturn = bodyHasReturn ||
-	             (condIsConstantTrue && !breakEmitted[breakEmitted.GetLength()-1]);
+	// A reachable break always exits the loop normally, so the statement
+	// after it is reachable regardless of what the body does; hasReturn is
+	// false in that case no matter how the body or guard evaluate. Absent
+	// a reachable break: a loop whose guard is a compile-time constant true
+	// never exits normally, so the statement after it is unreachable: for
+	// return-path purposes it counts as returning. A do-while body also
+	// always executes at least once, so a body that itself always returns
+	// makes the loop return too.
+	*hasReturn = !breakEmitted[breakEmitted.GetLength()-1] &&
+	             (bodyHasReturn || condIsConstantTrue);
 
 	continueLabels.PopLast();
 	breakLabels.PopLast();
