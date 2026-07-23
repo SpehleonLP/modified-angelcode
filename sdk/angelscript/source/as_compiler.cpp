@@ -539,8 +539,8 @@ static bool asCountedLoopWindowOk(int step, bool boundIsVar, asBYTE cmpOp, int i
 // enough headroom before wrap (`imm <= INT_MAX - (k-1)` incrementing,
 // `imm >= INT_MIN + (k-1)` decrementing) — counterexample:
 // `for (int i = 0; i < 0x7fffffff; i += 2)` never halts, because even i
-// skips the exit window entirely -- the window is the single value
-// 0x7fffffff, width 1 < step 2 -- and wraps to negative forever.
+// skips the exit window entirely — the window is the single value
+// 0x7fffffff, width 1 < step 2 — and wraps to negative forever.
 static bool asProveCountedLoop(asDWORD *bc, asUINT bcLen, asUINT target, asUINT backJump,
                                const asCArray<bool> &isJumpTarget)
 {

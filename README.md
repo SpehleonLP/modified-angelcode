@@ -152,10 +152,15 @@ best-effort:
   than "any constant step" might suggest: a negative immediate (`i += -2`)
   is refused (`asCountedLoopStep`'s `if (k <= 0) return 0;` only classifies
   positive `k`, relying on ADDIi/SUBIi's own opcode to carry the sign);
-  `uint`, `int8`/`int16`, and `int64` counters are refused whenever the step
-  magnitude is > 1 (they compile to different opcodes than the `ADDIi`/
-  `SUBIi`/`CMPIi` this prover matches, or to `CMPIu`/`CMPi64`, which the
-  window guard explicitly does not accept); and `<=`/`>=` loop guards are
+  `int8`/`int16`/`int64` counters are refused at EVERY step magnitude,
+  including unit steps (`++i` compiles to `INCi8`/`INCi16`/`INCi64`, none of
+  which `asCountedLoopStep` recognizes as a sanctioned mutator, and the
+  64-bit counter also compares via `CMPi64`, which the prover's `cmpOp`
+  whitelist rejects outright before the window guard ever runs); `uint` is
+  refused only for step magnitude > 1 (a unit step is accepted, matching
+  `IncVi`/`CMPu`, but a step > 1 compiles its comparison to `CMPIu`, which
+  the window guard's `cmpOp` check explicitly does not accept); and
+  `<=`/`>=` loop guards are
   refused (the prover only recognizes the `<`/`>` shapes `JNS`/`JNP`/`JS`/
   `JP` compile to). All of these are sound-conservative: refusal only ever
   costs precision (a fold to `UNKNOWN` that could have been `YES`), never
@@ -204,7 +209,7 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting.*` tests (currently 62) should pass; this is the suite every
+All `AsHalting.*` tests (currently 64) should pass; this is the suite every
 later halting-analysis change adds to, in `tests/test_as_halting.cpp`.
 
 ## Branch layout

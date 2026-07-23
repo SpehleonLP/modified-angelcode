@@ -794,7 +794,15 @@ TEST_F(AsHalting, DecrementLoopVariableBoundIsNotYes) {
 TEST_F(AsHalting, DecrementStepAgainstIntMinBoundIsNotYes) {
 	// Top-test, JNP exit, SUBIi step -3 against a constant bound one step
 	// short of INT_MIN: exit window [INT_MIN, -2147483647] has width 1 < 3,
-	// no headroom -> genuinely never terminates, must NOT be YES. The bound
+	// narrower than the step, so the rule refuses — must NOT be YES. This
+	// particular loop actually DOES terminate (from i = 0, gcd(3, 2^32) == 1
+	// means the -3 orbit covers every residue, so it lands on INT_MIN after
+	// exactly 2^31 iterations); the refusal is conservative here, not tight
+	// — the prover reasons only about window width and has no way to know
+	// the step is coprime with the wrap modulus. A genuinely divergent
+	// decrement counterexample needs the bound AT INT_MIN itself, which a
+	// plain int32 literal cannot express (see the JNP polarity-guard test
+	// below, which reaches that bound via `-2147483647 - 1`). The bound here
 	// is written as -2147483647 (INT_MIN+1), not -2147483648, so the literal
 	// stays within int32 range and the compiler emits CMPIi (32-bit signed),
 	// not CMPi64 — confirmed via Dump(), see the fix report.
@@ -816,6 +824,50 @@ TEST_F(AsHalting, StepTwoLoopAtMaxHeadroomBoundIsYes) {
 	ASSERT_NE(f, nullptr);
 	if (f->GetLocalHalts() != asHALTS_YES) Dump(f);
 	EXPECT_EQ(f->GetLocalHalts(), asHALTS_YES);
+}
+
+// --- Top-test polarity guards (adversarial) ------------------------------
+// The window check (asCountedLoopWindowOk) does not by itself refuse an
+// INT_MIN-adjacent bound paired with a POSITIVE step: a positive step takes
+// the `imm <= INT_MAX-(mag-1)` branch, which INT_MIN trivially satisfies
+// (INT_MIN is nowhere near INT_MAX). Only the explicit polarity guards
+// `if (condOp == asBC_JNS && step < 0) return false;` and
+// `if (condOp == asBC_JNP && step > 0) return false;` catch the mismatched
+// pairing before the window check ever runs. These two tests each force one
+// guard's condOp and a step of the WRONG sign for it, landing on a
+// wrap-around bound the window check alone would wave through — pinning
+// that each guard line, not just the window arithmetic, is load-bearing.
+// Confirmed via Dump() (see the fix report): both reach the top-test branch
+// with the expected polarity — CMPIi;JNP;...;ADDIi;JMP for the first,
+// CMPi;JNS;...;SUBIi;JMP for the second.
+
+TEST_F(AsHalting, WrongPolarityIncrementAgainstIntMinBoundIsNotYes) {
+	// Top-test, JNP exit (stay while i > w), step +2: the "wrong" pairing for
+	// JNP (which wants a decrement). w = -2147483647-1 == INT_MIN. The
+	// window check does NOT catch this case on its own: a positive step
+	// takes the `imm <= INT_MAX-(mag-1)` branch, and INT_MIN trivially
+	// satisfies it, so only the explicit JNP-guard refuses. From an odd
+	// start (i = 1) the orbit under +2 is the odd residues, which never
+	// lands in the width-1 window at INT_MIN, so this genuinely never
+	// terminates — the guard is the only thing standing between this input
+	// and a false YES.
+	asIScriptFunction* f = Fn(
+		"void f() { int i = 1; while (i > -2147483647 - 1) { i += 2; } }", "f");
+	ASSERT_NE(f, nullptr);
+	if (f->GetLocalHalts() == asHALTS_YES) Dump(f);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, WrongPolarityDecrementAgainstVariableBoundIsNotYes) {
+	// Top-test, JNS exit (stay while i < n), step -1: the "wrong" pairing for
+	// JNS (which wants an increment). Bound is a variable, so this also pins
+	// the guard independent of any constant-bound window arithmetic — for
+	// any n > i's start, i moving away from n never reaches or passes it.
+	asIScriptFunction* f = Fn(
+		"void f(int n) { int i = 0; while (i < n) { i -= 1; } }", "f");
+	ASSERT_NE(f, nullptr);
+	if (f->GetLocalHalts() == asHALTS_YES) Dump(f);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
 }
 
 } // namespace
