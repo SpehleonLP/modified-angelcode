@@ -412,9 +412,10 @@ int asCCompiler::CompileFactory(asCBuilder *in_builder, asCScriptCode *in_script
 // --- Counted-loop prover (halting-analysis helper) ---------------------------
 // Returns true if the instruction at bc[n] may write variable slot v or take
 // its address. Unknown layouts conservatively return true. Reads are fine:
-// the prover only needs "v changes solely via its IncVi" and "the bound is
-// invariant"; aliasing (PSF/VAR/LDV of the slot) counts as a potential write
-// because a callee or deferred store could then modify it.
+// the prover only needs "v changes solely via its one sanctioned step
+// instruction" and "the bound is invariant"; aliasing (PSF/VAR/LDV of the
+// slot) counts as a potential write because a callee or deferred store
+// could then modify it.
 static bool asInstrMayWriteOrAliasVar(asDWORD *bc, asUINT n, short v)
 {
 	asBYTE op = *(asBYTE*)&bc[n];
@@ -447,7 +448,10 @@ static bool asInstrMayWriteOrAliasVar(asDWORD *bc, asUINT n, short v)
 	case asBCTYPE_rW_rW_ARG:
 		return false;
 
-	// first operand is written
+	// first operand is written (this also covers ADDIi/SUBIi, wW_rW_DW_ARG:
+	// the span scan's `if (n == incAt) continue;` exempts the one sanctioned
+	// site, so this case only fires for a SECOND write, which correctly
+	// refuses the proof)
 	case asBCTYPE_wW_ARG:
 	case asBCTYPE_wW_W_ARG:
 	case asBCTYPE_wW_DW_ARG:
@@ -465,11 +469,12 @@ static bool asInstrMayWriteOrAliasVar(asDWORD *bc, asUINT n, short v)
 // Attempts to prove the back edge at offset `backJump` (jumping to `target`)
 // is the sole back edge of a bounded counted loop. Shapes accepted:
 //   top-test:    target: CMP* v,(w|imm) ; Jexit(forward, > backJump) ;
-//                ... body ... ; IncVi v ; backJump: JMP -> target
-//   bottom-test: target < backJump ; ... ; IncVi v ; CMP* v,(w|imm) ;
-//                backJump: JS -> target
+//                ... body ... ; step v ; backJump: JMP -> target
+//   bottom-test: target < backJump ; ... ; step v ; CMP* v,(w|imm) ;
+//                backJump: (JS|JP) -> target
+// where "step v" is one of IncVi/DecVi/ADDIi/SUBIi (see asCountedLoopStep);
 // plus, over the whole span [target, backJump]:
-//   - v written only by that one IncVi, never aliased,
+//   - v written only by that one sanctioned step instruction, never aliased,
 //   - w (when a variable) never written or aliased,
 //   - no OTHER back edge targets inside [target, backJump] (checked by caller);
 //   - increment dominance, both flavors: top-test uses the GLOBAL
@@ -480,9 +485,58 @@ static bool asInstrMayWriteOrAliasVar(asDWORD *bc, asUINT n, short v)
 //     from OUTSIDE the span onto the bottom-test condition, which sits after
 //     the IncVi, so the global check would false-reject every counted
 //     for-loop if reused here.
-// Only IncVi is a sanctioned mutator of v; DecVi is never matched by either
-// branch and so falls through the span scan's write/alias check like any
-// other write, refusing the proof.
+// Sanctioned mutators of v: IncVi/DecVi (unit step) and ADDIi/SUBIi in
+// self-update form (dest == src == v, constant k > 0). Polarity pairing:
+// the mutator must move v TOWARD the bound the guard tests — a JNS/JS exit
+// test (stay while v < w) pairs only with a positive step (IncVi/ADDIi); a
+// JNP/JP exit test (stay while v > w) pairs only with a negative step
+// (DecVi/SUBIi). Any other mutator, or a mismatched polarity, falls through
+// to refusal.
+// Wrap-around guard: the VM's int arithmetic wraps, so a step of magnitude
+// > 1 can jump OVER the exit window instead of landing in it. Against a
+// VARIABLE bound only |step| == 1 is provable (the window's position is
+// unknown at compile time). Against a CONSTANT bound, |step| > 1 is sound
+// only when the exit window is at least |step| wide, i.e. the bound leaves
+// enough headroom before wrap (`imm <= INT_MAX - (k-1)` incrementing,
+// `imm >= INT_MIN + (k-1)` decrementing) — counterexample:
+// `for (int i = 0; i < 0x7fffffff; i += 2)` never halts, because even i
+// skips the width-1 window [0x7ffffffe, 0x7fffffff) at INT_MAX and wraps
+// to negative forever.
+// Classifies the sanctioned mutator instruction at `at`. Returns the signed
+// step (+k toward larger values, -k toward smaller) or 0 to refuse. Only
+// self-updates count: ADDIi/SUBIi must have dest == src.
+static int asCountedLoopStep(asDWORD *bc, asUINT at, short v)
+{
+	asBYTE op = *(asBYTE*)&bc[at];
+	if (op == asBC_IncVi)
+		return asBC_SWORDARG0(&bc[at]) == v ? 1 : 0;
+	if (op == asBC_DecVi)
+		return asBC_SWORDARG0(&bc[at]) == v ? -1 : 0;
+	if (op == asBC_ADDIi || op == asBC_SUBIi)
+	{
+		if (asBC_SWORDARG0(&bc[at]) != v) return 0;
+		if (asBC_SWORDARG1(&bc[at]) != v) return 0;
+		int k = asBC_INTARG(&bc[at] + 1);
+		if (k <= 0) return 0;
+		return op == asBC_ADDIi ? k : -k;
+	}
+	return 0;
+}
+
+// The wrap-around guard for |step| > 1: the VM's int arithmetic wraps, and a
+// step that can jump OVER the exit window loops forever (i += 2 against
+// bound 0x7fffffff: even values skip the width-1 window [bound, INT_MAX]
+// and wrap). |step| > 1 is sound only against a constant signed bound whose
+// exit window is at least |step| wide; variable bounds accept only |step|==1.
+static bool asCountedLoopWindowOk(int step, bool boundIsVar, asBYTE cmpOp, int imm)
+{
+	int mag = step > 0 ? step : -step;
+	if (mag <= 1) return true;
+	if (boundIsVar || cmpOp != asBC_CMPIi) return false;
+	if (step > 0) return imm <= 2147483647 - (mag - 1);
+	return imm >= (-2147483647 - 1) + (mag - 1);
+}
+
 static bool asProveCountedLoop(asDWORD *bc, asUINT bcLen, asUINT target, asUINT backJump,
                                const asCArray<bool> &isJumpTarget)
 {
@@ -525,19 +579,29 @@ static bool asProveCountedLoop(asDWORD *bc, asUINT bcLen, asUINT target, asUINT 
 		    cmpOp != asBC_CMPIi && cmpOp != asBC_CMPIu) return false;
 		asUINT condAt = target + (asUINT)asBCTypeSize[asBCInfo[cmpOp].type];
 		asBYTE condOp = *(asBYTE*)&bc[condAt];
-		if (condOp != asBC_JNS) return false;   // exit when !(v < w)
+		// JNS: exit when !(v < w) — pairs with an increment. JNP: exit when
+		// !(v > w) — pairs with a decrement.
+		if (condOp != asBC_JNS && condOp != asBC_JNP) return false;
 		int exitTarget = (int)condAt + asBCTypeSize[asBCInfo[condOp].type]
 		               + asBC_INTARG(&bc[condAt]);
 		if (exitTarget <= (int)backJump) return false;
 
 		if (idx == 0) return false;
 		asUINT prev = starts[idx-1];
-		if (*(asBYTE*)&bc[prev] != asBC_IncVi) return false;
 
 		v = asBC_SWORDARG0(&bc[target]);
+		int step = asCountedLoopStep(bc, prev, v);
+		if (step == 0) return false;
+		// Polarity pairing: the mutator must move v TOWARD the bound the
+		// guard tests. JNS exits when !(v < w) — requires an increment;
+		// JNP exits when !(v > w) — requires a decrement.
+		if (condOp == asBC_JNS && step < 0) return false;
+		if (condOp == asBC_JNP && step > 0) return false;
 		boundIsVar = (cmpOp == asBC_CMPi || cmpOp == asBC_CMPu);
 		if (boundIsVar) w = asBC_SWORDARG1(&bc[target]);
-		if (asBC_SWORDARG0(&bc[prev]) != v) return false;
+		if (!asCountedLoopWindowOk(step, boundIsVar,
+		                           cmpOp, boundIsVar ? 0 : asBC_INTARG(&bc[target])))
+			return false;
 		incAt = prev;
 
 		// Increment dominance: nothing may jump into (incAt, backJump] —
@@ -549,9 +613,11 @@ static bool asProveCountedLoop(asDWORD *bc, asUINT bcLen, asUINT target, asUINT 
 
 		haveShape = true;
 	}
-	else if (backOp == asBC_JS)
+	else if (backOp == asBC_JS || backOp == asBC_JP)
 	{
-		// Bottom-test: ... IncVi v ; CMP* v,(w|imm) ; JS back  (stay while v < w)
+		// Bottom-test: ... step v ; CMP* v,(w|imm) ; JS/JP back
+		// JS (stay while v < w) pairs with an increment; JP (stay while
+		// v > w) pairs with a decrement.
 		if (idx == 0) return false;
 		asUINT cmpIdx = idx - 1;
 		asUINT cmpAt = starts[cmpIdx];
@@ -562,12 +628,17 @@ static bool asProveCountedLoop(asDWORD *bc, asUINT bcLen, asUINT target, asUINT 
 		while (cmpIdx > 0 && *(asBYTE*)&bc[starts[cmpIdx-1]] == asBC_SUSPEND) cmpIdx--;
 		if (cmpIdx == 0) return false;
 		asUINT incPrev = starts[cmpIdx-1];
-		if (*(asBYTE*)&bc[incPrev] != asBC_IncVi) return false;
 
 		v = asBC_SWORDARG0(&bc[cmpAt]);
+		int step = asCountedLoopStep(bc, incPrev, v);
+		if (step == 0) return false;
+		if (backOp == asBC_JS && step < 0) return false;
+		if (backOp == asBC_JP && step > 0) return false;
 		boundIsVar = (cmpOp == asBC_CMPi || cmpOp == asBC_CMPu);
 		if (boundIsVar) w = asBC_SWORDARG1(&bc[cmpAt]);
-		if (asBC_SWORDARG0(&bc[incPrev]) != v) return false;
+		if (!asCountedLoopWindowOk(step, boundIsVar,
+		                           cmpOp, boundIsVar ? 0 : asBC_INTARG(&bc[cmpAt])))
+			return false;
 		incAt = incPrev;
 
 		// Increment dominance, bottom-test flavor: an IN-SPAN jump landing

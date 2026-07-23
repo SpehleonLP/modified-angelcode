@@ -133,14 +133,22 @@ best-effort:
   site caps the local result at `UNKNOWN` since the callee is unknown.
 - **Counted-loop prover** (`asProveCountedLoop` in `as_compiler.cpp`) upgrades
   provably-bounded loops from `UNKNOWN` to contributing toward `YES`: it
-  recognizes both top-test (`CMP;Jcc-exit;...;IncVi;JMP-back`) and
-  bottom-test (`...;IncVi;CMP;JS-back`) shapes, requires the loop variable be
-  written only by the one sanctioned `IncVi` and never aliased (taking its
-  address counts as a write), and enforces increment-dominance so a branch
-  that could skip the increment refuses the proof — the two loop shapes need
-  different dominance checks (global jump-target set for top-test; span-
-  internal source check for bottom-test, since legitimate for-loop entry
-  rotation jumps onto the bottom-test condition from outside the span).
+  recognizes both top-test (`CMP;Jcc-exit;...;step;JMP-back`) and
+  bottom-test (`...;step;CMP;(JS|JP)-back`) shapes, where `step` is one of
+  `IncVi`/`DecVi`/`ADDIi`/`SUBIi` in self-update form. The mutator's polarity
+  must match the exit test (`JNS`/`JS` — stay while v < w — pairs only with
+  an increment; `JNP`/`JP` — stay while v > w — pairs only with a
+  decrement); a step of magnitude > 1 is accepted only against a *constant*
+  bound with enough headroom before signed-int wraparound (`i += 2` against
+  a variable bound, or against `0x7fffffff` where the exit window is
+  narrower than the step, is refused — both can loop forever). The loop
+  variable must be written only by the one sanctioned step instruction and
+  never aliased (taking its address counts as a write), and increment-
+  dominance is enforced so a branch that could skip the step refuses the
+  proof — the two loop shapes need different dominance checks (global
+  jump-target set for top-test; span-internal source check for bottom-test,
+  since legitimate for-loop entry rotation jumps onto the bottom-test
+  condition from outside the span).
 - **NO never crosses a call edge** (`asCModule::ComputeTransitiveFunctionMetadata`,
   `as_module.cpp`) — a callee's `asHALTS_NO` is downgraded to `UNKNOWN` before
   folding into the caller, because whether a never-halting callee's call site
@@ -185,7 +193,7 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting.*` tests (currently 47) should pass; this is the suite every
+All `AsHalting.*` tests (currently 55) should pass; this is the suite every
 later halting-analysis change adds to, in `tests/test_as_halting.cpp`.
 
 ## Branch layout

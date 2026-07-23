@@ -678,4 +678,60 @@ TEST_F(AsHalting, HeaderlessByteCodeRefusesToLoad) {
 	EXPECT_NE(g_asMessages.find("format"), std::string::npos) << g_asMessages;
 }
 
+TEST_F(AsHalting, StepTwoLoopWithConstantBoundIsYes) {
+	asIScriptFunction* f = Fn("void f() { for (int i = 0; i < 1000; i += 2) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	if (f->GetLocalHalts() != asHALTS_YES) Dump(f);
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, DecrementLoopToZeroIsYes) {
+	asIScriptFunction* f = Fn("void f(int n) { for (int i = n; i > 0; --i) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	if (f->GetLocalHalts() != asHALTS_YES) Dump(f);
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, StepThreeDecrementToConstantBoundIsYes) {
+	asIScriptFunction* f = Fn("void f() { for (int i = 900; i > 10; i -= 3) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	if (f->GetLocalHalts() != asHALTS_YES) Dump(f);
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, VariableStepLoopIsNotYes) {
+	asIScriptFunction* f = Fn("void f(int k) { for (int i = 0; i < 100; i += k) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, WrongPolarityDecrementIsNotYes) {
+	// i moves AWAY from the bound: never terminates for i < n at entry.
+	asIScriptFunction* f = Fn("void f(int n) { for (int i = 0; i < n; i -= 1) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, TwoMutatorsIsNotYes) {
+	asIScriptFunction* f = Fn("void f(bool b) { for (int i = 0; i < 100; ) { if (b) ++i; i += 2; } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, StepTwoAgainstVariableBoundIsNotYes) {
+	// Wrap-around: with a variable bound, i += 2 can jump over the exit
+	// window and cycle forever (n = INT_MAX, i even). Must refuse.
+	asIScriptFunction* f = Fn("void f(int n) { for (int i = 0; i < n; i += 2) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, StepTwoAgainstIntMaxBoundIsNotYes) {
+	// Exit window [0x7fffffff, INT_MAX] has width 1 < 2: even values skip
+	// it and wrap. This loop genuinely never terminates.
+	asIScriptFunction* f = Fn("void f() { for (int i = 0; i < 0x7fffffff; i += 2) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
+}
+
 } // namespace
