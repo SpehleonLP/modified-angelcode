@@ -148,7 +148,18 @@ best-effort:
   proof — the two loop shapes need different dominance checks (global
   jump-target set for top-test; span-internal source check for bottom-test,
   since legitimate for-loop entry rotation jumps onto the bottom-test
-  condition from outside the span).
+  condition from outside the span). The accepted step forms are narrower
+  than "any constant step" might suggest: a negative immediate (`i += -2`)
+  is refused (`asCountedLoopStep`'s `if (k <= 0) return 0;` only classifies
+  positive `k`, relying on ADDIi/SUBIi's own opcode to carry the sign);
+  `uint`, `int8`/`int16`, and `int64` counters are refused whenever the step
+  magnitude is > 1 (they compile to different opcodes than the `ADDIi`/
+  `SUBIi`/`CMPIi` this prover matches, or to `CMPIu`/`CMPi64`, which the
+  window guard explicitly does not accept); and `<=`/`>=` loop guards are
+  refused (the prover only recognizes the `<`/`>` shapes `JNS`/`JNP`/`JS`/
+  `JP` compile to). All of these are sound-conservative: refusal only ever
+  costs precision (a fold to `UNKNOWN` that could have been `YES`), never
+  soundness.
 - **NO never crosses a call edge** (`asCModule::ComputeTransitiveFunctionMetadata`,
   `as_module.cpp`) — a callee's `asHALTS_NO` is downgraded to `UNKNOWN` before
   folding into the caller, because whether a never-halting callee's call site
@@ -193,7 +204,7 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting.*` tests (currently 55) should pass; this is the suite every
+All `AsHalting.*` tests (currently 62) should pass; this is the suite every
 later halting-analysis change adds to, in `tests/test_as_halting.cpp`.
 
 ## Branch layout

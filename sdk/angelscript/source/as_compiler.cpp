@@ -466,6 +466,45 @@ static bool asInstrMayWriteOrAliasVar(asDWORD *bc, asUINT n, short v)
 	}
 }
 
+// Classifies the sanctioned mutator instruction at `at`. Returns the signed
+// step (+k toward larger values, -k toward smaller) or 0 to refuse. Only
+// self-updates count: ADDIi/SUBIi must have dest == src.
+static int asCountedLoopStep(asDWORD *bc, asUINT at, short v)
+{
+	asBYTE op = *(asBYTE*)&bc[at];
+	if (op == asBC_IncVi)
+		return asBC_SWORDARG0(&bc[at]) == v ? 1 : 0;
+	if (op == asBC_DecVi)
+		return asBC_SWORDARG0(&bc[at]) == v ? -1 : 0;
+	if (op == asBC_ADDIi || op == asBC_SUBIi)
+	{
+		if (asBC_SWORDARG0(&bc[at]) != v) return 0;
+		if (asBC_SWORDARG1(&bc[at]) != v) return 0;
+		int k = asBC_INTARG(&bc[at] + 1);
+		if (k <= 0) return 0;
+		return op == asBC_ADDIi ? k : -k;
+	}
+	return 0;
+}
+
+// The wrap-around guard for |step| > 1: the VM's int arithmetic wraps, and a
+// step that can jump OVER the exit window loops forever (i += 2 against
+// bound 0x7fffffff: even values skip the width-1 window [bound, INT_MAX]
+// and wrap). |step| > 1 is sound only against a constant signed bound whose
+// exit window is at least |step| wide; variable bounds accept only |step|==1.
+static bool asCountedLoopWindowOk(int step, bool boundIsVar, asBYTE cmpOp, int imm)
+{
+	// Negating step is well-defined only because step != INT_MIN here:
+	// asCountedLoopStep's `if (k <= 0) return 0;` guarantees every step it
+	// hands back is a positive magnitude with the sign folded in, so |step|
+	// never observes INT_MIN's un-negatable value.
+	int mag = step > 0 ? step : -step;
+	if (mag <= 1) return true;
+	if (boundIsVar || cmpOp != asBC_CMPIi) return false;
+	if (step > 0) return imm <= 2147483647 - (mag - 1);
+	return imm >= (-2147483647 - 1) + (mag - 1);
+}
+
 // Attempts to prove the back edge at offset `backJump` (jumping to `target`)
 // is the sole back edge of a bounded counted loop. Shapes accepted:
 //   top-test:    target: CMP* v,(w|imm) ; Jexit(forward, > backJump) ;
@@ -500,43 +539,8 @@ static bool asInstrMayWriteOrAliasVar(asDWORD *bc, asUINT n, short v)
 // enough headroom before wrap (`imm <= INT_MAX - (k-1)` incrementing,
 // `imm >= INT_MIN + (k-1)` decrementing) — counterexample:
 // `for (int i = 0; i < 0x7fffffff; i += 2)` never halts, because even i
-// skips the width-1 window [0x7ffffffe, 0x7fffffff) at INT_MAX and wraps
-// to negative forever.
-// Classifies the sanctioned mutator instruction at `at`. Returns the signed
-// step (+k toward larger values, -k toward smaller) or 0 to refuse. Only
-// self-updates count: ADDIi/SUBIi must have dest == src.
-static int asCountedLoopStep(asDWORD *bc, asUINT at, short v)
-{
-	asBYTE op = *(asBYTE*)&bc[at];
-	if (op == asBC_IncVi)
-		return asBC_SWORDARG0(&bc[at]) == v ? 1 : 0;
-	if (op == asBC_DecVi)
-		return asBC_SWORDARG0(&bc[at]) == v ? -1 : 0;
-	if (op == asBC_ADDIi || op == asBC_SUBIi)
-	{
-		if (asBC_SWORDARG0(&bc[at]) != v) return 0;
-		if (asBC_SWORDARG1(&bc[at]) != v) return 0;
-		int k = asBC_INTARG(&bc[at] + 1);
-		if (k <= 0) return 0;
-		return op == asBC_ADDIi ? k : -k;
-	}
-	return 0;
-}
-
-// The wrap-around guard for |step| > 1: the VM's int arithmetic wraps, and a
-// step that can jump OVER the exit window loops forever (i += 2 against
-// bound 0x7fffffff: even values skip the width-1 window [bound, INT_MAX]
-// and wrap). |step| > 1 is sound only against a constant signed bound whose
-// exit window is at least |step| wide; variable bounds accept only |step|==1.
-static bool asCountedLoopWindowOk(int step, bool boundIsVar, asBYTE cmpOp, int imm)
-{
-	int mag = step > 0 ? step : -step;
-	if (mag <= 1) return true;
-	if (boundIsVar || cmpOp != asBC_CMPIi) return false;
-	if (step > 0) return imm <= 2147483647 - (mag - 1);
-	return imm >= (-2147483647 - 1) + (mag - 1);
-}
-
+// skips the exit window entirely -- the window is the single value
+// 0x7fffffff, width 1 < step 2 -- and wraps to negative forever.
 static bool asProveCountedLoop(asDWORD *bc, asUINT bcLen, asUINT target, asUINT backJump,
                                const asCArray<bool> &isJumpTarget)
 {

@@ -734,4 +734,88 @@ TEST_F(AsHalting, StepTwoAgainstIntMaxBoundIsNotYes) {
 	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
 }
 
+// --- Top-test coverage -------------------------------------------------
+// Every prior counted-loop test is a `for` loop, which the compiler always
+// rotates into the bottom-test shape (ADDIi/DecVi;CMPIi;JS|JP-back). The
+// entire top-test half of asProveCountedLoop (CMP;JNS|JNP-exit;...;step;
+// JMP-back) — including the JNP acceptance branch, both condOp polarity
+// guards, and the top-test window call reading asBC_INTARG(&bc[target]) —
+// is unreached by that suite. `while` loops keep the top-test shape and
+// exercise it. Each test's Dump() (see the fix report) confirmed the
+// anticipated CMP*;JNS|JNP;...;step;JMP shape before these were trusted.
+
+TEST_F(AsHalting, WhileLoopStepTwoConstantBoundIsYes) {
+	// Top-test, JNS exit (stay while i < 1000), ADDIi step +2, ample headroom.
+	asIScriptFunction* f = Fn("void f() { int i = 0; while (i < 1000) { i += 2; } }", "f");
+	ASSERT_NE(f, nullptr);
+	if (f->GetLocalHalts() != asHALTS_YES) Dump(f);
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, WhileLoopStepTwoIntMaxBoundIsNotYes) {
+	// Top-test twin of StepTwoAgainstIntMaxBoundIsNotYes: exit window at
+	// INT_MAX is width 1 < 2, no headroom -> must NOT be YES.
+	asIScriptFunction* f = Fn("void f() { int i = 0; while (i < 0x7fffffff) { i += 2; } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, WhileLoopStepTwoVariableBoundIsNotYes) {
+	// Top-test twin of StepTwoAgainstVariableBoundIsNotYes: variable bound,
+	// window position unknown at compile time -> must NOT be YES.
+	asIScriptFunction* f = Fn("void f(int n) { int i = 0; while (i < n) { i += 2; } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, WhileLoopDecrementJNPPathIsYes) {
+	// Top-test, JNP exit (stay while i > 0), SUBIi step -3: the only test in
+	// the suite that reaches the condOp == asBC_JNP acceptance branch.
+	asIScriptFunction* f = Fn("void f() { int i = 1000; while (i > 0) { i -= 3; } }", "f");
+	ASSERT_NE(f, nullptr);
+	if (f->GetLocalHalts() != asHALTS_YES) Dump(f);
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_YES);
+}
+
+// --- Decrement-side window guard (adversarial) --------------------------
+// The only pre-existing decrement-with-constant-bound test (StepThree
+// DecrementToConstantBoundIsYes) uses imm = 10, nowhere near INT_MIN, so it
+// cannot discriminate a broken decrement headroom check. These pin both the
+// boundIsVar guard and the headroom arithmetic on the decrement side.
+
+TEST_F(AsHalting, DecrementLoopVariableBoundIsNotYes) {
+	// Bottom-test, JP back-edge, SUBIi step -2 against a VARIABLE bound:
+	// window position unknown at compile time -> must NOT be YES.
+	asIScriptFunction* f = Fn("void f(int n) { for (int i = 100; i > n; i -= 2) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, DecrementStepAgainstIntMinBoundIsNotYes) {
+	// Top-test, JNP exit, SUBIi step -3 against a constant bound one step
+	// short of INT_MIN: exit window [INT_MIN, -2147483647] has width 1 < 3,
+	// no headroom -> genuinely never terminates, must NOT be YES. The bound
+	// is written as -2147483647 (INT_MIN+1), not -2147483648, so the literal
+	// stays within int32 range and the compiler emits CMPIi (32-bit signed),
+	// not CMPi64 — confirmed via Dump(), see the fix report.
+	asIScriptFunction* f = Fn("void f() { int i = 0; while (i > -2147483647) { i -= 3; } }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
+}
+
+// --- Accepting side of the window boundary (adversarial) -----------------
+// StepTwoAgainstIntMaxBoundIsNotYes pins the refusing side of the boundary
+// (bound == 0x7fffffff, no headroom). Nothing pinned the accepting side, so
+// a too-strict regression (pure precision loss, never a soundness bug)
+// would be invisible. This is the tight positive twin.
+
+TEST_F(AsHalting, StepTwoLoopAtMaxHeadroomBoundIsYes) {
+	// Exit window [2147483646, INT_MAX] is exactly width 2 == mag: just
+	// enough headroom -> must be YES.
+	asIScriptFunction* f = Fn("void f() { for (int i = 0; i < 2147483646; i += 2) { } }", "f");
+	ASSERT_NE(f, nullptr);
+	if (f->GetLocalHalts() != asHALTS_YES) Dump(f);
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_YES);
+}
+
 } // namespace
