@@ -107,29 +107,34 @@ across callees is a sound join. The engine uses this to gate which script
 functions may run in constrained contexts (two independent consumers: GUI
 lambda admission gates on `GetLocalHalts()`, and a `CanCallMethod` utility
 gates on `GetTransitiveHalts()`) — a function can only be trusted with
-`YES`; `UNKNOWN` and `NO` are both refused.
+`YES`; `UNKNOWN` and `NO` are both refused. Every design decision below
+follows from that asymmetry: anything the analysis cannot resolve settles at
+`UNKNOWN` or `NO` and is therefore refused, so losing precision is acceptable
+and a false `YES` is not.
 
 This layer (isolate with `git diff our-upstream~1 our-upstream` /
 `git diff 0de438f 91f4c2d` — note most of the `sdk/add_on/*` churn in that
 range is a line-ending artifact of the vanilla zip vs the fork tree, not
 real change; the substantive edits are `as_compiler.cpp`, `as_module.cpp`,
-`as_scriptfunction.cpp`) made that analysis sound rather than merely
+`as_scriptfunction.cpp`) is what makes the analysis sound rather than merely
 best-effort:
 
-- **UNKNOWN resting default** — `asCScriptFunction`'s constructor now
-  initializes `localHalts`/`transitiveHalts` to `asHALTS_UNKNOWN` for every
-  function type except `asFUNC_SYSTEM` (registered natives are trusted by
-  the application). Previously it defaulted to `YES`, which meant a function
-  whose analysis never ran (e.g. a bare `CompileFunction` product) silently
-  claimed the strongest guarantee it never earned.
+- **UNKNOWN resting default** — `asCScriptFunction`'s constructor initializes
+  `localHalts`/`transitiveHalts` to `asHALTS_UNKNOWN` for every function type
+  except `asFUNC_SYSTEM`, where registered natives rest at `asHALTS_YES`
+  because the application vouches for them. A function whose analysis never
+  runs — a bare `CompileFunction` product, for instance — therefore reports
+  the weakest verdict rather than claiming a guarantee it never earned.
 - **Local analysis** (`as_compiler.cpp`) is a fail-closed CFG walk over the
   finalized bytecode: `YES` only if there's no cycle, or every cycle is
   proven bounded; `NO` only if there is an unbounded cycle, no try/catch, and
   no `RET` reachable from entry; everything else — including anything the
   decoder can't classify — is `UNKNOWN`. It recognizes `asBC_JLowZ`/
   `asBC_JLowNZ` (the optimizer's ClrHi+JZ/JNZ fusion) and `asBC_JMPP` (switch
-  dispatch) as conditional/computed jumps, and elides constant-guard edges
-  (literal `while(true)` isn't treated as escapable). A funcdef/delegate call
+  dispatch) as conditional/computed jumps, and elides the dead edge of a
+  statically-constant guard in both the optimized and unoptimized instruction
+  shapes, so literal `while (true)` is not treated as escapable (see "Effect
+  of `asEP_OPTIMIZE_BYTECODE`"). A funcdef/delegate call
   site caps the local result at `UNKNOWN` since the callee is unknown — with
   one narrow, statically-provable exception: see "Const-global funcdef call
   resolution" below.
@@ -172,22 +177,82 @@ best-effort:
   folding into the caller, because whether a never-halting callee's call site
   is even reached is not something the call graph tracks; only a function's
   own control flow can earn it `NO`.
-- **Delegate poisoning costs precision, not soundness** — any unresolved call
-  edge (shared-interface dispatch, an unbound or non-foldable imported
-  function, a map-miss on
-  `CALL`/`ALLOC`) sets `localCallsDelegate`/`transitiveCallsDelegate`, and a
-  function with that flag set can never report `transitiveHalts == YES`
-  regardless of what its modeled edges say.
-- **Virtual class-method resolution in `BuildCalleeList`** — `asBC_CALLINTF`
-  is also emitted for `asFUNC_VIRTUAL` dispatch, not just interface calls;
-  the fork now resolves it against every class in the module deriving from
-  (or equal to) the static type, via each candidate's `virtualFunctionTable`
-  at the same vtable slot, rather than falling through to delegate-poisoning
-  for ordinary virtual calls.
-- **Transitive delegate caps and CALL/ALLOC map-miss poisoning** — every call
-  site whose target can't be resolved to an entry in the module's function
-  map (not just the previously-handled cases) now sets the delegate flag
-  instead of silently contributing no edge.
+- **Two delegate flags, two origins** — `localCallsDelegate` is purely
+  compile-time: `asCCompiler::PerformFunctionCall` sets it when it emits an
+  `asBC_CallPtr` whose target it could not pin statically (see "Const-global
+  funcdef call resolution"). Nothing else computes it — the bytecode reader
+  restores the saved value, and no analysis pass revises it.
+  `transitiveCallsDelegate` is derived by the metadata pass, as
+  `localCallsDelegate || <this function had an unresolved call site> ||
+  <any callee's transitiveCallsDelegate>`;
+  `BuildCalleeList` never touches either flag, it reports unresolved sites
+  through its `outUnresolved` out-parameter and the pass folds them. A set
+  flag caps the corresponding verdict: `localCallsDelegate` demotes a
+  `localHalts == YES` to `UNKNOWN`, `transitiveCallsDelegate` does the same
+  to `transitiveHalts`. Poisoning costs precision, never soundness.
+- **The call-site resolution rule** (`BuildCalleeList`, `as_module.cpp`) —
+  a site contributes a modeled edge, folds a fixed verdict, or poisons:
+  - `asBC_CALL` / `asBC_ALLOC` — a target in this module's function map is a
+    normal edge. A target outside the map folds as a constant if it is a
+    shared script function (shared entities are finalized by the module that
+    first compiled them, and shared code can only call shared code, so their
+    metadata cannot move afterwards). Anything else poisons.
+  - `asBC_CALLINTF` — emitted for `asFUNC_VIRTUAL` as well as interface
+    dispatch, and the fork resolves both. A non-shared interface or a
+    non-shared class resolves to every implementation/override in this
+    module, found through each candidate's `virtualFunctionTable` at the
+    same vtable slot; non-shared types can only be derived from inside this
+    module, so that candidate set is complete. A **shared** interface or
+    class poisons — implementations may live in modules this pass cannot
+    see, and the bytecode carries no help: `asBC_CALL` is emitted only for
+    `asFUNC_SCRIPT`, so even a case where the target provably cannot be
+    overridden (a `final` method on a class deriving from nothing) still
+    arrives here as `CALLINTF` with only the static type to go on. Recovering
+    those would take a compiler-side change, not an analysis-side one.
+  - `asBC_CALLBND` — resolved through the live binding, under the narrow
+    fold rule in "Imported-function refinement" below.
+  - `asBC_CallPtr` — resolved through the per-site
+    `funcdefCallTargets` table stamped at compile time, re-checked against
+    `asEP_ALLOW_UNSAFE_REFERENCES` at consumption time. A missing or short
+    table (a function restored from saved bytecode) poisons.
+  - An opcode the decoder cannot size aborts the scan and poisons the
+    function, so call sites hidden past it cannot be silently dropped.
+
+#### When the transitive pass runs
+
+`asCModule::ComputeTransitiveFunctionMetadata` is a fixed-point pass over one
+module. It runs from exactly six places: `Build()`, the four public
+bind/unbind entry points (`BindImportedFunction`, `UnbindImportedFunction`,
+`BindAllImportedFunctions`, `UnbindAllImportedFunctions`), and
+`LoadByteCode`. Module teardown deliberately does not run it.
+
+The per-call cost is one full pass over the module, which makes the
+bind entry points the ones to watch: binding K imports one at a time costs K
+passes, whereas `BindAllImportedFunctions` binds all of them and recomputes
+exactly once, on every exit path including its early error returns. Prefer
+it. `BindImportedFunction` recomputes even when it returns an error, because
+it unbinds the previous target before it can fail, so a failed call can still
+have changed the module's bind state.
+
+#### Effect of `asEP_OPTIMIZE_BYTECODE`
+
+Verdicts are computed from finalized bytecode, so the optimizer setting is
+visible to the analysis. Turning it off costs precision in exactly one place
+and never costs soundness:
+
+- **Counted loops stop being provable.** `asProveCountedLoop` matches the
+  instruction shapes the optimizer leaves behind; with the optimizer off,
+  `void f() { for (int i = 0; i < 10; i++) {} }` measures `asHALTS_YES` with
+  optimization on and `asHALTS_UNKNOWN` with it off.
+- **Constant guards are unaffected.** The walk matches the unfused
+  `SetV*; CpyVtoR4; ClrHi; JZ/JNZ` shape as well as the optimizer's fused
+  triple, so `void f() { while (true) {} }` measures `asHALTS_NO` in both
+  configurations. The `AsHaltingNoOptimizer` fixture pins this.
+
+A consumer that gates on `asHALTS_YES` and runs with the optimizer off will
+therefore refuse counted loops it would otherwise admit. That is the safe
+direction, but it is a real behavioral difference worth knowing about before
+turning the property off.
 
 #### Const-global funcdef call resolution
 
@@ -271,20 +336,11 @@ stays `UNKNOWN`.
 #### Imported-function (`asBC_CALLBND`) refinement on bind/unbind
 
 An `import`ed call site is a runtime-rebindable edge, so it poisons while
-unbound. Because it can be resolved once a binding exists,
-`asIScriptModule::BindImportedFunction` / `UnbindImportedFunction` /
-`BindAllImportedFunctions` / `UnbindAllImportedFunctions` now recompute the
-*importing* module's transitive metadata on every call — including calls that
-return an error, since `BindImportedFunction` unbinds the previous target
-before it can fail, and including `BindAllImportedFunctions`' early error
-exits (exactly one recompute per call, on every exit path). Verdicts
-therefore track bind state instead of being frozen at `Build()`.
-
-Each of those entry points runs one full fixed-point pass over the importing
-module — the same pass `Build()` runs — so binding K imports one at a time
-costs K passes. Prefer `BindAllImportedFunctions()`, which binds every import
-and then recomputes exactly once. `LoadByteCode()` pays one pass too (see
-"`LoadByteCode` recomputes" below).
+unbound. It becomes resolvable once a binding exists, and because every
+bind/unbind entry point recomputes the *importing* module (see "When the
+transitive pass runs"), a binding that is live at analysis time is a constant
+for the analysis: verdicts track bind state rather than being frozen at
+`Build()`.
 
 `BuildCalleeList` resolves a `CALLBND` site the same way execution does
 (`m_engine->importedFunctions[id & ~FUNC_IMPORTED]->boundFunctionId`, `-1`
@@ -313,16 +369,31 @@ folded. That is a property of the target module alone, checkable on the spot.
 
 The weaker "no import currently *bound*" test would buy the same thing only
 under a whole-program premise — that every verdict in the engine was produced
-by this pass from that module's current state — and any entry point that
-installs verdicts another way silently breaks it. `LoadByteCode` was exactly
-such an entry point (next section). It now recomputes, so the premise holds
-again; the guard deliberately does not rely on that.
+by this pass from that module's current state — and that premise does not
+hold: `CompileFunction(asCOMP_ADD_TO_MODULE)` installs a function without
+running the pass, discarding a module leaves its importers un-recomputed, and
+an `AS_NO_COMPILER` build has no pass at all. The shipped guard is a property
+of the target module alone and needs none of that.
 
 Cost: an import chain stops refining at the first hop — the importer of an
 importer caps at `UNKNOWN`, and so does the importer of a module that merely
 *declares* an import it never calls. Precision only.
-`tests/test_as_halting.cpp` pins the two-module ring, the three-module ring,
-the rebind-into-a-cycle attack above, and both precision losses.
+
+What `tests/test_as_halting.cpp` pins, and what it does not:
+
+- `ProviderWithABoundImportIsNotFolded` and
+  `TargetInAModuleThatMerelyDeclaresAnImportIsNotFolded` assert the
+  `UNKNOWN` those two precision losses produce, so they fail if the guard is
+  loosened to "no import currently bound" or to `target->module != this`.
+  These are the tests that hold the rule in place.
+- `RebindingAProviderIntoACycleNeverYieldsYes` reproduces the false-`YES`
+  attack described above and likewise fails against the loose guard.
+- `TwoModuleImportCycleNeverYieldsYes` and
+  `ThreeModuleImportCycleNeverYieldsYes` pin the weaker property that a
+  cyclic import graph never reports `YES`. They stay green with the fold
+  clause deleted entirely, so they do not discriminate the guard — read them
+  as regression cover for the never-`YES` outcome, not as evidence for the
+  fold rule.
 
 #### `LoadByteCode` recomputes
 
@@ -333,7 +404,8 @@ unbound, so a restored `asHALTS_YES` can describe a call graph the loaded
 module does not have — a false `YES` readable straight off the loaded
 function, with no importer and no rebind involved.
 `asCModule::LoadByteCode` therefore re-runs the pass after a successful read,
-so every verdict in the engine is one the pass derived from current state.
+so a module that loaded successfully carries verdicts the pass derived from
+that module's current bind state, not from the state that held at save time.
 
 Two consequences:
 
@@ -342,10 +414,23 @@ Two consequences:
   a const-global funcdef call site that resolved before the save is
   unresolved after the load, and its caller loads as `UNKNOWN` where it saved
   as `YES`. Safe direction, and it matches the documented contract that the
-  table is "not serialized — treat as every site unknown".
+  table is "not serialized — treat as every site unknown". Note that this
+  demotion is a property of the table, not of loading: any later recompute of
+  a module built from loaded bytecode reaches the same result.
 
-A build configured with `AS_NO_COMPILER` has no pass to run, so its
-`LoadByteCode` restores verdicts as-is and this recompute does not apply.
+That guarantee is scoped to the loading module, and deliberately so. It is
+not a whole-program claim, and three things sit outside it:
+
+- Discarding a module does not recompute the modules that import from it.
+  Their bindings resolve to a target whose `module` is now null, which
+  `BuildCalleeList` refuses to fold, so those verdicts fail closed rather
+  than going stale-`YES` — but they are not recomputed at discard time.
+- `CompileFunction(asCOMP_ADD_TO_MODULE)` installs a function into a module
+  without running the pass (see the soundness carve-outs above).
+- An `AS_NO_COMPILER` build has no pass at all: `BuildCalleeList` and
+  `ComputeTransitiveFunctionMetadata` are compiled out and
+  `RefreshTransitiveFunctionMetadata` is an empty function, so every verdict
+  such a build reports is whatever `LoadByteCode` restored from the blob.
 
 Module teardown does not recompute: `asCModule::InternalReset` unbinds through
 the non-recomputing `UnbindAllImportedFunctionsInternal`. The reason is that a
@@ -353,10 +438,9 @@ recompute while the module and all of its verdicts are being destroyed is
 wasted work — *not* that it would read destroyed state. It would not:
 `asCGlobalProperty::DestroyInternal` releases and NULLs each property's
 `initFunc` rather than leaving it dangling, and the pass skips a null
-`initFunc`; routing teardown through the recomputing wrapper instead was
-measured green across the whole suite (88/88), so no test discriminates the
-two. The routing is kept because the work is pointless, not because it is
-unsafe. The window in which the pass may read the un-refcounted
+`initFunc`. The internal variant is used because the recompute would be
+wasted work, *not* because the recomputing wrapper would be unsafe here.
+The window in which the pass may read the un-refcounted
 `asCScriptFunction::funcdefCallTargets` entries is documented at their
 declaration in `as_scriptfunction.h`.
 
@@ -380,10 +464,24 @@ increase of zero, so instruction size and stack accounting are unaffected, and
 `PostProcess()` has already run by the time `Optimize()` is called (see
 `asCByteCode::Finalize`), so no reachability or stack-size state is invalidated.
 
-This is a size/speed optimization only. Halting verdicts do not depend on it:
-the analysis elides constant guards on its own side, so `while (true) {}` is
-`asHALTS_NO` with or without the fold. `LiteralGuardIsFoldedOutOfBytecode` pins
-both halves — no `JLowZ`/`JLowNZ` survives, and the verdict is unchanged.
+This is a size/speed optimization only. Constant-guard verdicts do not depend
+on it: the analysis elides constant guards on its own side, matching both the
+fused triple this fold consumes and the unfused four-instruction shape
+`SetV*(v,imm); CpyVtoR4(v); ClrHi; JZ/JNZ` the compiler emits with
+`asEP_OPTIMIZE_BYTECODE` off. `while (true) {}` is `asHALTS_NO` in either
+configuration. `LiteralGuardIsFoldedOutOfBytecode` pins the optimizer-on half
+(no `JLowZ`/`JLowNZ` survives, verdict unchanged) and the `AsHaltingNoOptimizer`
+fixture pins the optimizer-off half, each of its tests asserting the count of
+`ClrHi ; JZ|JNZ` pairs actually present so a test cannot quietly stop
+exercising the unfused shape.
+
+The elision carries one caveat of its own. `asBC_ClrHi` zeroes the value
+register's upper three bytes only where `AS_SIZEOF_BOOL == 1`; elsewhere it is
+a runtime no-op, so `JZ`-after-`ClrHi` tests all four bytes of the constant
+while `JLowZ` tests only the low one. The two readings can disagree, and the
+matcher refuses the `ClrHi` arm unless they agree (`c == 0 ||
+(c & 0xFF) != 0`), so a verdict can never depend on the build's bool width.
+Guard constants are 0 or 1, so this costs nothing in practice.
 
 The full design/implementation record for this hardening pass lives in the
 engine repository at
@@ -408,12 +506,14 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting*` tests (currently 95, across the `AsHalting`,
-`AsHaltingConstGlobalFuncdef` and `AsHaltingNoOptimizer` fixtures — the second
-builds its engine *without* `asEP_ALLOW_UNSAFE_REFERENCES`, see "Const-global
-funcdef call resolution" above, and the third builds it with
-`asEP_OPTIMIZE_BYTECODE` off) should pass; this is the suite every later
-halting-analysis change adds to, in `tests/test_as_halting.cpp`.
+All 95 tests should pass. They live in `tests/test_as_halting.cpp`, across
+three fixtures that differ only in engine properties: `AsHalting` enables
+`asEP_ALLOW_UNSAFE_REFERENCES` (one test needs `int &inout` on a script
+function); `AsHaltingConstGlobalFuncdef` leaves it at its default of off,
+which is the precondition for const-global funcdef resolution to fire at all
+(see that section above); and `AsHaltingNoOptimizer` turns
+`asEP_OPTIMIZE_BYTECODE` off. This is the suite every later halting-analysis
+change adds to.
 
 ## Branch layout
 
