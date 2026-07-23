@@ -379,9 +379,27 @@ public:
 		// function's bytecode (as_bytecode.cpp: ExtractFuncdefCallTargets),
 		// and never cleared afterwards: asCModule::ComputeTransitiveFunctionMetadata
 		// is specified to be idempotent, so it must not consume this table.
-		// Entries are raw and un-refcounted; they are only valid while the
-		// module that compiled this function is alive, which is the only
-		// window in which the pass runs.
+		// Entries are raw and un-refcounted. They cannot dangle, because every
+		// stampable target is itself kept alive by the module that owns this
+		// table, for exactly as long as that table can be read:
+		//   - The stamp (as_compiler.cpp, asGetConstFuncdefGlobalTarget) only
+		//     ever names the single asBC_FuncPtr operand of a global property
+		//     initializer compiled into THIS module.
+		//   - A script function so named is in this module's m_scriptFunctions
+		//     with an internal reference - including a shared function first
+		//     compiled elsewhere, which asCModule::AddScriptFunction adds (and
+		//     AddRefs) here too; if the originating module is discarded,
+		//     FindNewOwnerForSharedFunc transfers ownership rather than
+		//     destroying the function.
+		//   - A system function lives for the life of the engine.
+		//   - An imported function's signature is held by this module's
+		//     m_bindInformations.
+		// The pass re-runs on Build() and on this module's bind/unbind events;
+		// all of those are inside that window. Module teardown deliberately
+		// does NOT re-run it (asCModule::InternalReset uses the non-recomputing
+		// UnbindAllImportedFunctionsInternal), which is what keeps the window
+		// closed at the one point where the module's own state is being torn
+		// down around the table.
 		asCArray<asCScriptFunction*>    funcdefCallTargets;
 
 		// The stack needed to execute the function

@@ -679,7 +679,10 @@ void asCModule::InternalReset()
 		globIt++;
 	}
 
-	UnbindAllImportedFunctions();
+	// Internal variant on purpose: this runs during teardown, after the
+	// module's global properties have been destroyed above, so a transitive
+	// metadata recompute here would walk half-destroyed state.
+	UnbindAllImportedFunctionsInternal();
 
 	// Free bind information
 	for( n = 0; n < m_bindInformations.GetLength(); n++ )
@@ -1395,11 +1398,11 @@ asCScriptFunction *asCModule::GetImportedFunction(int index) const
 	return m_bindInformations[index]->importedFunctionSignature;
 }
 
-// interface
-int asCModule::BindImportedFunction(asUINT index, asIScriptFunction *func)
+// internal
+int asCModule::BindImportedFunctionInternal(asUINT index, asIScriptFunction *func)
 {
 	// First unbind the old function
-	int r = UnbindImportedFunction(index);
+	int r = UnbindImportedFunctionInternal(index);
 	if( r < 0 ) return r;
 
 	// Must verify that the interfaces are equal
@@ -1429,7 +1432,20 @@ int asCModule::BindImportedFunction(asUINT index, asIScriptFunction *func)
 }
 
 // interface
-int asCModule::UnbindImportedFunction(asUINT index)
+int asCModule::BindImportedFunction(asUINT index, asIScriptFunction *func)
+{
+	int r = BindImportedFunctionInternal(index, func);
+	// Recompute regardless of r. BindImportedFunctionInternal unbinds the
+	// previous target as its first act and then has several failure exits
+	// after that point (no such import, null/ill-typed func, signature
+	// mismatch), so a failed bind can still have changed this module's bind
+	// state. Leaving stale metadata behind is a false-YES vector.
+	RefreshTransitiveFunctionMetadata();
+	return r;
+}
+
+// internal
+int asCModule::UnbindImportedFunctionInternal(asUINT index)
 {
 	if( index >= m_bindInformations.GetLength() )
 		return asINVALID_ARG;
@@ -1446,6 +1462,32 @@ int asCModule::UnbindImportedFunction(asUINT index)
 	}
 
 	return asSUCCESS;
+}
+
+// interface
+int asCModule::UnbindImportedFunction(asUINT index)
+{
+	int r = UnbindImportedFunctionInternal(index);
+	RefreshTransitiveFunctionMetadata();
+	return r;
+}
+
+// internal
+bool asCModule::HasBoundImportedFunctions() const
+{
+	for( asUINT n = 0; n < m_bindInformations.GetLength(); n++ )
+		if( m_bindInformations[n] && m_bindInformations[n]->boundFunctionId >= 0 )
+			return true;
+
+	return false;
+}
+
+// internal
+void asCModule::RefreshTransitiveFunctionMetadata()
+{
+#ifndef AS_NO_COMPILER
+	ComputeTransitiveFunctionMetadata();
+#endif
 }
 
 // interface
@@ -1480,13 +1522,13 @@ int asCModule::BindAllImportedFunctions()
 	for( int n = 0; n < c; ++n )
 	{
 		asCScriptFunction *importFunc = GetImportedFunction(n);
-		if( importFunc == 0 ) return asERROR;
+		if( importFunc == 0 ) { RefreshTransitiveFunctionMetadata(); return asERROR; }
 
 		asCString str = importFunc->GetDeclarationStr(false, true);
 
 		// Get module name from where the function should be imported
 		const char *moduleName = GetImportedFunctionSourceModule(n);
-		if( moduleName == 0 ) return asERROR;
+		if( moduleName == 0 ) { RefreshTransitiveFunctionMetadata(); return asERROR; }
 
 		asCModule *srcMod = m_engine->GetModule(moduleName, false);
 		asIScriptFunction *func = 0;
@@ -1497,10 +1539,14 @@ int asCModule::BindAllImportedFunctions()
 			notAllFunctionsWereBound = true;
 		else
 		{
-			if( BindImportedFunction(n, func) < 0 )
+			if( BindImportedFunctionInternal(n, func) < 0 )
 				notAllFunctionsWereBound = true;
 		}
 	}
+
+	// Exactly once, on every exit path: a partial bind that left stale
+	// metadata behind would be a false-YES vector.
+	RefreshTransitiveFunctionMetadata();
 
 	if( notAllFunctionsWereBound )
 		return asCANT_BIND_ALL_FUNCTIONS;
@@ -1508,14 +1554,22 @@ int asCModule::BindAllImportedFunctions()
 	return asSUCCESS;
 }
 
-// interface
-int asCModule::UnbindAllImportedFunctions()
+// internal
+int asCModule::UnbindAllImportedFunctionsInternal()
 {
 	asUINT c = GetImportedFunctionCount();
 	for( asUINT n = 0; n < c; ++n )
-		UnbindImportedFunction(n);
+		UnbindImportedFunctionInternal(n);
 
 	return asSUCCESS;
+}
+
+// interface
+int asCModule::UnbindAllImportedFunctions()
+{
+	int r = UnbindAllImportedFunctionsInternal();
+	RefreshTransitiveFunctionMetadata();
+	return r;
 }
 
 // internal
@@ -1994,8 +2048,66 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 		}
 		else if (op == asBC_CALLBND)
 		{
-			// Imported function - treat as delegate call
-			outUnresolved = true;
+			// Imported function. Resolve the current binding exactly the way
+			// execution does (as_context.cpp, asBC_CALLBND): the argument is the
+			// imported function's id, and boundFunctionId == -1 means unbound.
+			// Every bind/unbind event recomputes this module's metadata, so a
+			// binding that is live right now is a constant for the analysis.
+			int funcId = asBC_INTARG(&bc[n]);
+			asCScriptFunction *target = 0;
+			asUINT importIdx = (asUINT)(funcId & ~FUNC_IMPORTED);
+			if (importIdx < m_engine->importedFunctions.GetLength() &&
+			    m_engine->importedFunctions[importIdx] &&
+			    m_engine->importedFunctions[importIdx]->boundFunctionId >= 0)
+				target = m_engine->GetScriptFunction(m_engine->importedFunctions[importIdx]->boundFunctionId);
+
+			// Which bound targets may be folded as a constant:
+			//
+			// * asFUNC_SYSTEM - a registered native. No bytecode, no module,
+			//   metadata fixed at registration (asHALTS_YES); same trust level
+			//   the CALL/CallPtr branches already extend to system functions.
+			//
+			// * asFUNC_SCRIPT - only when the target's OWN module currently has
+			//   no bound imports. `target->module != this` alone is NOT enough:
+			//   nothing recomputes a module when some OTHER module rebinds, so
+			//   a verdict published while a chain was acyclic survives the
+			//   rebind that closes the cycle. Concretely, with prov/mid/top and
+			//   mid importing from prov, top importing mid::g: bind mid->prov
+			//   (mid::g = YES), bind top->mid::g (top::f folds YES), then rebind
+			//   mid's import to top::f - now f and g are mutually infinitely
+			//   recursive, yet mid's recompute folds top::f's stale YES and the
+			//   pair settles at YES. A false YES, the worst defect class here.
+			//
+			//   Requiring the target's module to have no bound imports closes
+			//   that: with no bound CALLBND anywhere in it, every import site in
+			//   that module poisons, so nothing the fold reads can depend on a
+			//   binding, and no bind edge can lead back into this module. A
+			//   later bind in that module cannot promote what we folded either:
+			//   a target that reads YES has no unresolved site in its cone, so
+			//   it contains no CALLBND at all and no future binding moves it.
+			//
+			//   Cost: an import chain (A binds into B, B binds into C) stops
+			//   refining at the first hop - A caps at UNKNOWN. Precision only.
+			//
+			// A target whose module was discarded has module == 0 (InternalReset
+			// clears it) while the binding's own reference keeps the object
+			// alive; its stored verdict describes code that no longer has a
+			// module, so it fails closed here too.
+			bool foldable = false;
+			if (target)
+			{
+				if (target->funcType == asFUNC_SYSTEM)
+					foldable = true;
+				else if (target->funcType == asFUNC_SCRIPT &&
+				         target->module != 0 && target->module != this &&
+				         !target->module->HasBoundImportedFunctions())
+					foldable = true;
+			}
+
+			if (foldable)
+				outExternalCallees.PushLast(target);
+			else
+				outUnresolved = true;
 		}
 		else if (op == asBC_CallPtr)
 		{

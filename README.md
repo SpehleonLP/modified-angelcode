@@ -173,7 +173,8 @@ best-effort:
   is even reached is not something the call graph tracks; only a function's
   own control flow can earn it `NO`.
 - **Delegate poisoning costs precision, not soundness** — any unresolved call
-  edge (shared-interface dispatch, imported/bound functions, a map-miss on
+  edge (shared-interface dispatch, an unbound or non-foldable imported
+  function, a map-miss on
   `CALL`/`ALLOC`) sets `localCallsDelegate`/`transitiveCallsDelegate`, and a
   function with that flag set can never report `transitiveHalts == YES`
   regardless of what its modeled edges say.
@@ -248,9 +249,11 @@ Together these mean a `YES` is only meaningful for a module that is built
 once and then left alone, under an engine whose properties are set before the
 build. `BuildCalleeList` additionally re-checks
 `!engine->ep.allowUnsafeReferences` when consuming the stamped per-site
-funcdef targets, so any *future* re-run of the metadata pass fails those
-sites closed; that is defense in depth for re-running, not a substitute for
-the contract above, because nothing re-runs the pass today.
+funcdef targets, so a re-run of the metadata pass fails those sites closed.
+The pass does re-run: bind/unbind of an imported function recomputes the
+importing module's metadata (next section). That is not a substitute for the
+contract above — a re-run only re-reads current state, it does not re-parse
+script added after the fact.
 
 **Per-site scoping (not per-global):** the resolved target is carried as a
 per-`asBC_CallPtr`-site value (`ctx->knownFuncdefTarget`, reset to 0 after
@@ -260,6 +263,50 @@ each `PerformFunctionCall` funcdef-branch emission, and persisted per-site in
 resolved global, e.g. `g()()` where `g`'s target itself returns a handle,
 only resolves the first `CallPtr`; the second is never provably fixed and
 stays `UNKNOWN`.
+
+#### Imported-function (`asBC_CALLBND`) refinement on bind/unbind
+
+An `import`ed call site is a runtime-rebindable edge, so it poisons while
+unbound. Because it can be resolved once a binding exists,
+`asIScriptModule::BindImportedFunction` / `UnbindImportedFunction` /
+`BindAllImportedFunctions` / `UnbindAllImportedFunctions` now recompute the
+*importing* module's transitive metadata on every call — including calls that
+return an error, since `BindImportedFunction` unbinds the previous target
+before it can fail, and including `BindAllImportedFunctions`' early error
+exits (exactly one recompute per call, on every exit path). Verdicts
+therefore track bind state instead of being frozen at `Build()`.
+
+`BuildCalleeList` resolves a `CALLBND` site the same way execution does
+(`m_engine->importedFunctions[id & ~FUNC_IMPORTED]->boundFunctionId`, `-1`
+meaning unbound) and folds the bound target's stored verdict as a constant —
+**only** when the target is either a registered native (`asFUNC_SYSTEM`, no
+bytecode, fixed metadata) or a script function whose own module currently has
+**no bound imports**. Everything else — unbound, target inside this module,
+target whose module was discarded (`module == 0`), and any target whose
+module has a live binding of its own — keeps the poison.
+
+The "no bound imports in the target's module" condition is load-bearing, not
+caution. Guarding only on `target->module != this` admits a false `YES`:
+nothing recomputes module *A* when module *B* rebinds, so a verdict published
+while an import chain was acyclic survives the rebind that closes the cycle.
+With `prov`/`mid`/`top` (mid imports prov, top imports `mid::g`), binding
+mid→`prov::good` makes `mid::g` `YES`; binding top→`mid::g` folds that into
+`top::f`; then repointing mid's import at `top::f` makes `f` and `g` mutually
+infinitely recursive while mid's recompute folds `top::f`'s stale `YES` — and
+both settle at `YES`. Requiring the target module to have no bound imports
+makes the folded verdict bind-independent (every `CALLBND` in that module
+poisons, so nothing it reads depends on a binding, and no bind edge can lead
+back), which closes the cycle. Cost: an import chain stops refining at the
+first hop — the importer of an importer caps at `UNKNOWN`. Precision only.
+`tests/test_as_halting.cpp` pins the two-module ring, the three-module ring,
+the rebind-into-a-cycle attack above, and the precision loss.
+
+Module teardown is exempt: `asCModule::InternalReset` unbinds through the
+non-recomputing `UnbindAllImportedFunctionsInternal`, because by the time it
+unbinds, the module's global properties have already been destroyed. That
+exemption is also what bounds the lifetime of the un-refcounted
+`asCScriptFunction::funcdefCallTargets` entries the pass consumes — the
+argument is recorded at their declaration in `as_scriptfunction.h`.
 
 The full design/implementation record for this hardening pass lives in the
 engine repository at
@@ -284,7 +331,7 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting*` tests (currently 76, across the `AsHalting` and
+All `AsHalting*` tests (currently 85, across the `AsHalting` and
 `AsHaltingConstGlobalFuncdef` fixtures — the latter builds its engine
 *without* `asEP_ALLOW_UNSAFE_REFERENCES`, see "Const-global funcdef call
 resolution" above) should pass; this is the suite every later

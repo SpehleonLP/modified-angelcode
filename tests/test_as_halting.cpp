@@ -1172,4 +1172,349 @@ TEST_F(AsHaltingConstGlobalFuncdef, ConsumptionTimeUnsafeReferencesGuardPoisonsR
 	EXPECT_TRUE(f->GetTransitiveCallsDelegate());
 }
 
+// --- Imported (CALLBND) refinement on bind/unbind -------------------------
+
+// Prints a verdict so a passing run still shows the observed integer; the
+// hazard analysis for the import-cycle tests below is stated in terms of
+// concrete asEHalts values, not prose.
+static void ShowHalts(const char* label, asIScriptFunction* fn) {
+	fprintf(stderr, "  [halts] %s = %d\n", label,
+	        fn ? (int)fn->GetTransitiveHalts() : -1);
+}
+
+TEST_F(AsHalting, ImportBindRefinesAndRebindDowngrades) {
+	asIScriptModule* provider = engine->GetModule("provider", asGM_ALWAYS_CREATE);
+	provider->AddScriptSection("s",
+		"int good() { return 1; }\n"
+		"int bad() { while (true) { } return 0; }\n");
+	ASSERT_GE(provider->Build(), 0);
+
+	asIScriptModule* importer = engine->GetModule("importer", asGM_ALWAYS_CREATE);
+	importer->AddScriptSection("s",
+		"import int ext() from \"provider\";\n"
+		"int f() { return ext(); }\n");
+	ASSERT_GE(importer->Build(), 0);
+
+	asIScriptFunction* f = importer->GetFunctionByName("f");
+	ASSERT_NE(f, nullptr);
+
+	// Unbound: the import site is unresolvable.
+	ShowHalts("unbound f", f);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+
+	// Bound to a halting target: refines to YES.
+	ASSERT_GE(importer->BindImportedFunction(0, provider->GetFunctionByName("good")), 0);
+	ShowHalts("bound-to-good f", f);
+	EXPECT_EQ(f->GetTransitiveHalts(), asHALTS_YES);
+
+	// Unbound again: reverts.
+	ASSERT_GE(importer->UnbindImportedFunction(0), 0);
+	ShowHalts("re-unbound f", f);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+
+	// Rebound to a looper: must NOT stay YES.
+	ASSERT_GE(importer->BindImportedFunction(0, provider->GetFunctionByName("bad")), 0);
+	ShowHalts("bound-to-bad f", f);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, BindAllImportedFunctionsRefines) {
+	asIScriptModule* provider = engine->GetModule("ba_provider", asGM_ALWAYS_CREATE);
+	provider->AddScriptSection("s", "int good() { return 1; }\n");
+	ASSERT_GE(provider->Build(), 0);
+
+	asIScriptModule* importer = engine->GetModule("ba_importer", asGM_ALWAYS_CREATE);
+	importer->AddScriptSection("s",
+		"import int good() from \"ba_provider\";\n"
+		"int f() { return good(); }\n");
+	ASSERT_GE(importer->Build(), 0);
+
+	asIScriptFunction* f = importer->GetFunctionByName("f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+
+	ASSERT_GE(importer->BindAllImportedFunctions(), 0);
+	ShowHalts("BindAll f", f);
+	EXPECT_EQ(f->GetTransitiveHalts(), asHALTS_YES);
+
+	ASSERT_GE(importer->UnbindAllImportedFunctions(), 0);
+	ShowHalts("UnbindAll f", f);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+// Hazard (2), two-module ring: A::f -> B::g -> A::f is mutual infinite
+// recursion. Neither may ever report YES, in either bind order.
+TEST_F(AsHalting, TwoModuleImportCycleNeverYieldsYes) {
+	asIScriptModule* A = engine->GetModule("cycA", asGM_ALWAYS_CREATE);
+	A->AddScriptSection("s",
+		"import int g() from \"cycB\";\n"
+		"int f() { return g(); }\n");
+	ASSERT_GE(A->Build(), 0);
+
+	asIScriptModule* B = engine->GetModule("cycB", asGM_ALWAYS_CREATE);
+	B->AddScriptSection("s",
+		"import int f() from \"cycA\";\n"
+		"int g() { return f(); }\n");
+	ASSERT_GE(B->Build(), 0);
+
+	asIScriptFunction* f = A->GetFunctionByName("f");
+	asIScriptFunction* g = B->GetFunctionByName("g");
+	ASSERT_NE(f, nullptr);
+	ASSERT_NE(g, nullptr);
+
+	ASSERT_GE(A->BindImportedFunction(0, g), 0);
+	ASSERT_GE(B->BindImportedFunction(0, f), 0);
+	ShowHalts("A->B->A order1 f", f);
+	ShowHalts("A->B->A order1 g", g);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_NE(g->GetTransitiveHalts(), asHALTS_YES);
+
+	// Re-drive the binds (both orders, repeatedly): a fold that reads the
+	// peer's already-published verdict could otherwise settle on a mutual YES.
+	for (int i = 0; i < 3; i++) {
+		ASSERT_GE(B->BindImportedFunction(0, f), 0);
+		ASSERT_GE(A->BindImportedFunction(0, g), 0);
+	}
+	ShowHalts("A->B->A settled f", f);
+	ShowHalts("A->B->A settled g", g);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_NE(g->GetTransitiveHalts(), asHALTS_YES);
+}
+
+// Hazard (2), three-module ring A -> B -> C -> A.
+TEST_F(AsHalting, ThreeModuleImportCycleNeverYieldsYes) {
+	asIScriptModule* A = engine->GetModule("ringA", asGM_ALWAYS_CREATE);
+	A->AddScriptSection("s",
+		"import int b() from \"ringB\";\n"
+		"int a() { return b(); }\n");
+	ASSERT_GE(A->Build(), 0);
+	asIScriptModule* B = engine->GetModule("ringB", asGM_ALWAYS_CREATE);
+	B->AddScriptSection("s",
+		"import int c() from \"ringC\";\n"
+		"int b() { return c(); }\n");
+	ASSERT_GE(B->Build(), 0);
+	asIScriptModule* C = engine->GetModule("ringC", asGM_ALWAYS_CREATE);
+	C->AddScriptSection("s",
+		"import int a() from \"ringA\";\n"
+		"int c() { return a(); }\n");
+	ASSERT_GE(C->Build(), 0);
+
+	asIScriptFunction* a = A->GetFunctionByName("a");
+	asIScriptFunction* b = B->GetFunctionByName("b");
+	asIScriptFunction* c = C->GetFunctionByName("c");
+	ASSERT_NE(a, nullptr);
+	ASSERT_NE(b, nullptr);
+	ASSERT_NE(c, nullptr);
+
+	for (int i = 0; i < 3; i++) {
+		ASSERT_GE(A->BindImportedFunction(0, b), 0);
+		ASSERT_GE(B->BindImportedFunction(0, c), 0);
+		ASSERT_GE(C->BindImportedFunction(0, a), 0);
+	}
+	ShowHalts("ring a", a);
+	ShowHalts("ring b", b);
+	ShowHalts("ring c", c);
+	EXPECT_NE(a->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_NE(b->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_NE(c->GetTransitiveHalts(), asHALTS_YES);
+}
+
+// Hazard (2), the attack the plan's rule (guarded only by
+// `target->module != this`) actually loses to.
+//
+//   prov: int good() { return 1; }
+//   mid : import int h() from "prov";  int g() { return h(); }
+//   top : import int g() from "mid";   int f() { return g(); }
+//
+// 1. bind mid.h -> prov.good        => mid::g is genuinely YES
+// 2. bind top.g -> mid.g            => plan's rule folds YES into top::f
+// 3. rebind mid.h -> top.f          => f -> g -> f is now mutual infinite
+//    recursion, but step 2's YES was published into top::f and nothing
+//    recomputes top, so mid's recompute folds a stale YES and BOTH settle
+//    at YES. That is a false YES.
+//
+// The shipped rule refuses to fold a bound target whose own module has any
+// bound import, which stops the chain at step 2 (top::f caps at UNKNOWN).
+TEST_F(AsHalting, RebindingAProviderIntoACycleNeverYieldsYes) {
+	asIScriptModule* prov = engine->GetModule("atkProv", asGM_ALWAYS_CREATE);
+	prov->AddScriptSection("s", "int good() { return 1; }\n");
+	ASSERT_GE(prov->Build(), 0);
+
+	asIScriptModule* mid = engine->GetModule("atkMid", asGM_ALWAYS_CREATE);
+	mid->AddScriptSection("s",
+		"import int h() from \"atkProv\";\n"
+		"int g() { return h(); }\n");
+	ASSERT_GE(mid->Build(), 0);
+
+	asIScriptModule* top = engine->GetModule("atkTop", asGM_ALWAYS_CREATE);
+	top->AddScriptSection("s",
+		"import int g() from \"atkMid\";\n"
+		"int f() { return g(); }\n");
+	ASSERT_GE(top->Build(), 0);
+
+	asIScriptFunction* good = prov->GetFunctionByName("good");
+	asIScriptFunction* g = mid->GetFunctionByName("g");
+	asIScriptFunction* f = top->GetFunctionByName("f");
+	ASSERT_NE(good, nullptr);
+	ASSERT_NE(g, nullptr);
+	ASSERT_NE(f, nullptr);
+
+	ASSERT_GE(mid->BindImportedFunction(0, good), 0);
+	ShowHalts("attack step1 g", g);
+	EXPECT_EQ(g->GetTransitiveHalts(), asHALTS_YES);
+
+	ASSERT_GE(top->BindImportedFunction(0, g), 0);
+	ShowHalts("attack step2 f", f);
+
+	// Close the cycle by repointing mid's import at top::f.
+	ASSERT_GE(mid->BindImportedFunction(0, f), 0);
+	ShowHalts("attack step3 f", f);
+	ShowHalts("attack step3 g", g);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_NE(g->GetTransitiveHalts(), asHALTS_YES);
+}
+
+// Hazard (2) precision pin: an importer whose provider module itself has a
+// bound import does NOT refine. This is the precision the sound rule costs;
+// it is pinned so a future change that reintroduces the fold has to face the
+// cycle test above.
+TEST_F(AsHalting, ProviderWithABoundImportIsNotFolded) {
+	asIScriptModule* prov = engine->GetModule("chainProv", asGM_ALWAYS_CREATE);
+	prov->AddScriptSection("s", "int good() { return 1; }\n");
+	ASSERT_GE(prov->Build(), 0);
+
+	asIScriptModule* mid = engine->GetModule("chainMid", asGM_ALWAYS_CREATE);
+	mid->AddScriptSection("s",
+		"import int h() from \"chainProv\";\n"
+		"int g() { return h(); }\n");
+	ASSERT_GE(mid->Build(), 0);
+
+	asIScriptModule* top = engine->GetModule("chainTop", asGM_ALWAYS_CREATE);
+	top->AddScriptSection("s",
+		"import int g() from \"chainMid\";\n"
+		"int f() { return g(); }\n");
+	ASSERT_GE(top->Build(), 0);
+
+	ASSERT_GE(mid->BindImportedFunction(0, prov->GetFunctionByName("good")), 0);
+	ASSERT_GE(top->BindImportedFunction(0, mid->GetFunctionByName("g")), 0);
+
+	asIScriptFunction* f = top->GetFunctionByName("f");
+	ASSERT_NE(f, nullptr);
+	ShowHalts("chain top f", f);
+	EXPECT_EQ(f->GetTransitiveHalts(), asHALTS_UNKNOWN);
+}
+
+// Hazard (1): UnbindAllImportedFunctions is called from InternalReset during
+// module teardown, after the module's globals have already been destroyed.
+// A recompute there would walk half-destroyed state.
+TEST_F(AsHalting, DiscardingAModuleWithBoundImportsDoesNotRecompute) {
+	asIScriptModule* provider = engine->GetModule("tdProvider", asGM_ALWAYS_CREATE);
+	provider->AddScriptSection("s", "int good() { return 1; }\n");
+	ASSERT_GE(provider->Build(), 0);
+
+	asIScriptModule* importer = engine->GetModule("tdImporter", asGM_ALWAYS_CREATE);
+	importer->AddScriptSection("s",
+		"funcdef int F();\n"
+		"int local() { return 2; }\n"
+		"F@ const gp = @local;\n"
+		"int gv = local();\n"
+		"import int good() from \"tdProvider\";\n"
+		"int f() { return good() + gv; }\n");
+	ASSERT_GE(importer->Build(), 0);
+	ASSERT_GE(importer->BindAllImportedFunctions(), 0);
+
+	// Must not crash / read destroyed globals.
+	EXPECT_GE(engine->DiscardModule("tdImporter"), 0);
+	EXPECT_GE(engine->DiscardModule("tdProvider"), 0);
+}
+
+// Hazard (4): funcdefCallTargets holds raw, un-refcounted pointers and is no
+// longer cleared by the pass, so a bind/unbind re-run reads it long after
+// Build(). Every stampable target is itself held by this module (its own
+// m_scriptFunctions entry, which for a shared function survives the
+// originating module's discard via FindNewOwnerForSharedFunc), so the
+// pointers cannot dangle while the module that owns the table is alive.
+// This pins that: discard the module that first compiled the shared target,
+// then force a re-run through bind/unbind.
+TEST_F(AsHaltingConstGlobalFuncdef, StampedTargetSurvivesOtherModuleDiscardAcrossRebind) {
+	asIScriptModule* prov = engine->GetModule("lifeProv", asGM_ALWAYS_CREATE);
+	prov->AddScriptSection("s", "int good() { return 1; }\n");
+	ASSERT_GE(prov->Build(), 0);
+
+	const char* sharedSrc = "shared int sfn() { return 3; }\n";
+
+	asIScriptModule* owner = engine->GetModule("lifeOwner", asGM_ALWAYS_CREATE);
+	owner->AddScriptSection("s", sharedSrc);
+	ASSERT_GE(owner->Build(), 0);
+
+	asIScriptModule* user = engine->GetModule("lifeUser", asGM_ALWAYS_CREATE);
+	user->AddScriptSection("s",
+		"shared int sfn() { return 3; }\n"
+		"funcdef int F();\n"
+		"F@ const gp = @sfn;\n"
+		"import int good() from \"lifeProv\";\n"
+		"int viaPtr() { return gp(); }\n"
+		"int f() { return good() + viaPtr(); }\n");
+	ASSERT_GE(user->Build(), 0);
+
+	asIScriptFunction* viaPtr = user->GetFunctionByName("viaPtr");
+	asIScriptFunction* f = user->GetFunctionByName("f");
+	ASSERT_NE(viaPtr, nullptr);
+	ASSERT_NE(f, nullptr);
+	ASSERT_EQ(viaPtr->GetTransitiveHalts(), asHALTS_YES);
+
+	// The module that first compiled `sfn` goes away; ownership of the shared
+	// function transfers to lifeUser, which still holds the stamped pointer.
+	ASSERT_GE(engine->DiscardModule("lifeOwner"), 0);
+
+	// Re-run the pass through the public bind path.
+	ASSERT_GE(user->BindAllImportedFunctions(), 0);
+	EXPECT_EQ(viaPtr->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_EQ(f->GetTransitiveHalts(), asHALTS_YES);
+
+	ASSERT_GE(user->UnbindAllImportedFunctions(), 0);
+	EXPECT_EQ(viaPtr->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+// Hazard (4) companion: a bound target whose own module has been discarded.
+// The bind keeps the asCScriptFunction alive, but InternalReset has cleared
+// its `module` back-pointer, so the fold must fail closed rather than
+// dereference a module that no longer owns it.
+TEST_F(AsHalting, BoundTargetWhoseModuleWasDiscardedIsNotFolded) {
+	asIScriptModule* provider = engine->GetModule("dcProvider", asGM_ALWAYS_CREATE);
+	provider->AddScriptSection("s", "int good() { return 1; }\n");
+	ASSERT_GE(provider->Build(), 0);
+
+	asIScriptModule* other = engine->GetModule("dcOther", asGM_ALWAYS_CREATE);
+	other->AddScriptSection("s", "int spare() { return 5; }\n");
+	ASSERT_GE(other->Build(), 0);
+
+	asIScriptModule* importer = engine->GetModule("dcImporter", asGM_ALWAYS_CREATE);
+	importer->AddScriptSection("s",
+		"import int good() from \"dcProvider\";\n"
+		"import int spare() from \"dcOther\";\n"
+		"int f() { return good(); }\n"
+		"int h() { return spare(); }\n");
+	ASSERT_GE(importer->Build(), 0);
+	ASSERT_GE(importer->BindAllImportedFunctions(), 0);
+
+	asIScriptFunction* f = importer->GetFunctionByName("f");
+	ASSERT_NE(f, nullptr);
+	ASSERT_EQ(f->GetTransitiveHalts(), asHALTS_YES);
+
+	int goodIdx = importer->GetImportedFunctionIndexByDecl("int good()");
+	int spareIdx = importer->GetImportedFunctionIndexByDecl("int spare()");
+	ASSERT_GE(goodIdx, 0);
+	ASSERT_GE(spareIdx, 0);
+
+	ASSERT_GE(engine->DiscardModule("dcProvider"), 0);
+
+	// Toggle the OTHER import to force a re-run while `good` stays bound to a
+	// function whose module pointer InternalReset has since cleared.
+	ASSERT_GE(importer->UnbindImportedFunction((asUINT)spareIdx), 0);
+	ShowHalts("discarded-provider f", f);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
 } // namespace

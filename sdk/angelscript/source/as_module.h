@@ -221,6 +221,23 @@ public:
 
 	int                GetNextImportedFunctionId();
 	asCScriptFunction *GetImportedFunction(int funcId) const;
+	// Bind state is an input to ComputeTransitiveFunctionMetadata: an
+	// imported call site's verdict depends on what it is bound to right
+	// now, so the public bind/unbind entry points recompute this module's
+	// transitive metadata. These Internal variants are the plain bind/unbind
+	// mechanics WITHOUT that recompute - they are what the public wrappers
+	// build on and what module teardown must use.
+	int  BindImportedFunctionInternal(asUINT index, asIScriptFunction *func);
+	int  UnbindImportedFunctionInternal(asUINT index);
+	int  UnbindAllImportedFunctionsInternal();
+	// Runs ComputeTransitiveFunctionMetadata when this build has a compiler.
+	// Must never be called from InternalReset: by the time teardown unbinds,
+	// the module's global properties are already destroyed.
+	void RefreshTransitiveFunctionMetadata();
+	// True if any of this module's imported functions is currently bound.
+	// Used by BuildCalleeList to decide whether another module's stored
+	// verdicts are safe to fold as constants.
+	bool HasBoundImportedFunctions() const;
 	asCTypeInfo       *GetType(const asCString &type, asSNameSpace *ns) const;
 	asCObjectType     *GetObjectType(const char *type, asSNameSpace *ns) const;
 	asCGlobalProperty *AllocateGlobalProperty(const char *name, const asCDataType &dt, asSNameSpace *ns);
