@@ -1872,6 +1872,7 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
                                 asCArray<asCScriptFunction*> &outExternalCallees,
                                 bool &outUnresolved)
 {
+	outUnresolved = false;
 	if (!func || !func->scriptData) return;
 
 	asDWORD *bc = func->scriptData->byteCode.AddressOf();

@@ -195,7 +195,9 @@ public:
 	// for each CALL/CALLINTF/ALLOC target. Analysis-time poisons (unmapped/unresolvable
 	// call sites) are reported via outUnresolved rather than mutating func; the caller
 	// derives the transitive flag from it, keeping the whole pass idempotent and
-	// re-runnable. Caller must dedup outCallees if desired. outExternalCallees is
+	// re-runnable. The function always initializes outUnresolved = false as its first
+	// statement (before the func/scriptData guard), so callers need not pre-initialize it.
+	// Caller must dedup outCallees if desired. outExternalCallees is
 	// plumbed for future use and currently always left empty.
 	void BuildCalleeList(asCScriptFunction *func,
 	                     const asCMap<int, asUINT> &funcIdToIndex,

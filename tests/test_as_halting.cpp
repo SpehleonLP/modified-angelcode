@@ -494,6 +494,23 @@ TEST_F(AsHalting, ComputeTransitiveFunctionMetadataIsIdempotent) {
 	}
 }
 
+TEST_F(AsHalting, LocalCallsDelegateReflectsOwnBytecodeNotUnresolvedPoison) {
+	// Task 5 contract shift: GetLocalCallsDelegate() must mean strictly "this
+	// function's own bytecode contains a compile-time funcdef/delegate call
+	// site" and no longer "something about this function was unresolvable".
+	// h's only call site is a shared-class virtual dispatch, which
+	// BuildCalleeList cannot resolve (poisons via outUnresolved) but which is
+	// not a funcdef/delegate call at all. Pre-refactor code conflated the two
+	// by setting localCallsDelegate = true for this exact poison; the
+	// refactor must keep it false while still poisoning the transitive flag.
+	asIScriptFunction* h = Fn(
+		"shared class S { void m() {} }\n"
+		"void h() { S s; s.m(); }", "h");
+	ASSERT_NE(h, nullptr);
+	EXPECT_FALSE(h->GetLocalCallsDelegate());
+	EXPECT_TRUE(h->GetTransitiveCallsDelegate());
+}
+
 TEST_F(AsHalting, HeaderlessByteCodeRefusesToLoad) {
 	engine->SetMessageCallback(asFUNCTION(CollectMessages), 0, asCALL_CDECL);
 	g_asMessages.clear();
