@@ -144,12 +144,9 @@ int asCReader::ReadInner()
 	// If any error occurs, it will return to the caller who is
 	// responsible for cleaning up the partially loaded entities.
 
-	engine->deferValidationOfTemplateTypes = true;
-
-	unsigned long i, count;
-	asCScriptFunction* func;
-
 	// Format header check - must mirror asCWriter::Write exactly.
+	// This must run before any other state (including deferValidationOfTemplateTypes
+	// below) is touched, so a refused load never leaves engine-global state stuck.
 	asBYTE magic[4] = { 0, 0, 0, 0 };
 	for (int m = 0; m < 4; m++)
 		ReadData(&magic[m], 1);
@@ -160,6 +157,7 @@ int asCReader::ReadInner()
 		return Error(TXT_INVALID_BYTECODE_d);
 	}
 	asUINT formatVersion = ReadEncodedUInt();
+	if (error) return asERROR;
 	if (formatVersion != AS_BYTECODE_FORMAT_VERSION)
 	{
 		asCString verMsg;
@@ -167,6 +165,11 @@ int asCReader::ReadInner()
 		engine->WriteMessage("", 0, 0, asMSGTYPE_WARNING, verMsg.AddressOf());
 		return Error(TXT_INVALID_BYTECODE_d);
 	}
+
+	engine->deferValidationOfTemplateTypes = true;
+
+	unsigned long i, count;
+	asCScriptFunction* func;
 
 	// Read the flag as 1 byte even on platforms with 4byte booleans
 	noDebugInfo = ReadEncodedUInt() ? VALUE_OF_BOOLEAN_TRUE : 0;
