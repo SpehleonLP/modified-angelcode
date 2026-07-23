@@ -99,6 +99,38 @@ protected:
 	}
 };
 
+// Separate fixture, deliberately WITHOUT asEP_ALLOW_UNSAFE_REFERENCES.
+//
+// asGetConstFuncdefGlobalTarget's resolve (as_compiler.cpp, the global-read
+// site) is only sound when unsafe references are disallowed: with them on, a
+// read-only global funcdef handle can still be aliased by an F@ &inout (or
+// bare F@ &) parameter and reassigned through that alias, so
+// prop->type.IsReadOnly() stops guaranteeing a fixed value. AsHalting's
+// engine (above) turns unsafe references ON for an unrelated by-ref-loop
+// test, so the const-global-funcdef resolve tests need their own engine
+// built the safe way, following Fn/FnIn's structure.
+class AsHaltingConstGlobalFuncdef : public ::testing::Test {
+protected:
+	asIScriptEngine* engine = nullptr;
+
+	void SetUp() override {
+		engine = asCreateScriptEngine();
+		ASSERT_NE(engine, nullptr);
+	}
+	void TearDown() override {
+		if (engine) engine->ShutDownAndRelease();
+	}
+
+	asIScriptFunction* Fn(const char* code, const char* name) {
+		asIScriptModule* mod = engine->GetModule("halts_cgf", asGM_ALWAYS_CREATE);
+		mod->AddScriptSection("s", code);
+		if (mod->Build() < 0) { ADD_FAILURE() << "build failed:\n" << code; return nullptr; }
+		asIScriptFunction* f = mod->GetFunctionByName(name);
+		if (!f) ADD_FAILURE() << "function not found: " << name;
+		return f;
+	}
+};
+
 TEST_F(AsHalting, StraightLineIsYes) {
 	asIScriptFunction* f = Fn("int f() { return 42; }", "f");
 	ASSERT_NE(f, nullptr);
@@ -877,7 +909,13 @@ TEST_F(AsHalting, IifeDoesNotCompile) {
 	EXPECT_FALSE(Builds("int f() { return (function() { return 1; })(); }"));
 }
 
-TEST_F(AsHalting, ConstGlobalFuncdefLiteralTargetIsTransitivelyYes) {
+// --- Const-global funcdef resolve: positive + guard tests -----------------
+// All under AsHaltingConstGlobalFuncdef (unsafe references OFF — see the
+// fixture's comment). Running these under AsHalting (unsafe refs ON) would
+// make the positive test wrongly fail closed, since the compiler now refuses
+// to trust prop->type.IsReadOnly() under that engine property.
+
+TEST_F(AsHaltingConstGlobalFuncdef, ConstGlobalFuncdefLiteralTargetIsTransitivelyYes) {
 	// NOTE (deviation from brief text): AngelScript's const-position grammar
 	// is C-pointer-like — `const F@ g` makes the *pointee* const (handle
 	// itself stays reassignable; verified empirically: `@g = @other;`
@@ -897,7 +935,7 @@ TEST_F(AsHalting, ConstGlobalFuncdefLiteralTargetIsTransitivelyYes) {
 	EXPECT_FALSE(f->GetLocalCallsDelegate());
 }
 
-TEST_F(AsHalting, NonConstGlobalFuncdefIsNotYes) {
+TEST_F(AsHaltingConstGlobalFuncdef, NonConstGlobalFuncdefIsNotYes) {
 	asIScriptFunction* f = Fn(
 		"funcdef int F();\n"
 		"int target() { return 7; }\n"
@@ -907,7 +945,7 @@ TEST_F(AsHalting, NonConstGlobalFuncdefIsNotYes) {
 	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
 }
 
-TEST_F(AsHalting, ConstGlobalFuncdefRuntimeInitIsNotYes) {
+TEST_F(AsHaltingConstGlobalFuncdef, ConstGlobalFuncdefRuntimeInitIsNotYes) {
 	asIScriptFunction* f = Fn(
 		"funcdef int F();\n"
 		"int target() { return 7; }\n"
@@ -918,7 +956,7 @@ TEST_F(AsHalting, ConstGlobalFuncdefRuntimeInitIsNotYes) {
 	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
 }
 
-TEST_F(AsHalting, ConstGlobalFuncdefLoopingTargetIsNotYes) {
+TEST_F(AsHaltingConstGlobalFuncdef, ConstGlobalFuncdefLoopingTargetIsNotYes) {
 	asIScriptFunction* f = Fn(
 		"funcdef void F(int);\n"
 		"void loopy(int n) { while (n > 0) { } }\n"
@@ -926,6 +964,151 @@ TEST_F(AsHalting, ConstGlobalFuncdefLoopingTargetIsNotYes) {
 		"void f() { g(3); }", "f");
 	ASSERT_NE(f, nullptr);
 	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHaltingConstGlobalFuncdef, PointeeConstGlobalFuncdefIsNotYes) {
+	// `const F@ g` (leading const) only const-qualifies the pointee, not the
+	// handle — asCDataType::IsReadOnly() reports false for it, so the
+	// resolve must never fire here. Pins the exact footgun the deviation
+	// note above documents: swap to trailing `F@ const g` and this becomes
+	// the positive test.
+	asIScriptFunction* f = Fn(
+		"funcdef int F();\n"
+		"int target() { return 7; }\n"
+		"const F@ g = @target;\n"
+		"int f() { return g(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHaltingConstGlobalFuncdef, TernaryInitializerConstGlobalFuncdefIsNotYes) {
+	// Two asBC_FuncPtr pushes in the init bytecode (one per ternary arm):
+	// asGetConstFuncdefGlobalTarget's "exactly one FuncPtr" guard must
+	// refuse this, even though only one of the two ever actually executes.
+	// Deliberately puts the looping arm FIRST (true branch) and the
+	// non-halting arm LAST (false branch): bytecode for a ternary emits the
+	// true-branch FuncPtr before the false-branch one, so a "last FuncPtr
+	// wins" mistake here would resolve to the non-looping arm and produce a
+	// demonstrable false YES — this ordering is what makes that mistake
+	// observable instead of accidentally still-correct.
+	asIScriptFunction* f = Fn(
+		"funcdef int F();\n"
+		"int a() { return 1; }\n"
+		"int loopy() { while (true) {} return 0; }\n"
+		"bool c = true;\n"
+		"F@ const g = c ? @loopy : @a;\n"
+		"int f() { return g(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHaltingConstGlobalFuncdef, DelegateInitializerConstGlobalFuncdefIsNotYes) {
+	// The highest-value guard gap named in review: a delegate initializer's
+	// bytecode is FuncPtr(bestMethod) followed by CALLSYS (the delegate
+	// constructor call). A resolve here would bind straight to Base::m and
+	// discard which object o.m was bound to. o's static type is Base
+	// (non-looping m); its runtime type is Derived, whose override loops —
+	// so a wrong resolve here would be a demonstrable lie: g() dispatches
+	// virtually to Derived::m() and hangs, while a wrongly-resolved analysis
+	// would have called that YES.
+	//
+	// EVIDENCE NOTE: mutating out the CALLSYS entry in
+	// asGetConstFuncdefGlobalTarget's block-list does NOT turn this test
+	// red. Traced why: bestMethod's captured asCScriptFunction has
+	// funcType==asFUNC_VIRTUAL (every class method is vtable-wrapped, see
+	// SharedFinalClassMethodCallStillPoisonedViaVirtualDispatch above), and
+	// BuildCalleeList's own CallPtr handling only trusts a resolved target
+	// that is either an exact id match in this module's funcIdToIndex (which
+	// virtual methods are not entered into with a callable identity BuildCalleeList
+	// treats as a plain call target) or asFUNC_SYSTEM/shared-asFUNC_SCRIPT;
+	// asFUNC_VIRTUAL matches neither, so it falls into outUnresolved = true
+	// independent of the CALLSYS check. So for this specific shape, a second
+	// layer (BuildCalleeList's funcType classification) is redundant defense
+	// that happens to also refuse it. This test still pins real, correct,
+	// security-relevant behavior — it just isn't sufficient to independently
+	// discriminate the CALLSYS line by itself; see
+	// CallInInitializerRefusesResolveEvenWithASingleFuncPtrArg below for a
+	// shape that does.
+	asIScriptFunction* f = Fn(
+		"funcdef void F();\n"
+		"class Base { void m() {} }\n"
+		"class Derived : Base { void m() { while (true) {} } }\n"
+		"Base@ o = Derived();\n"
+		"F@ const g = F(o.m);\n"
+		"void f() { g(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHaltingConstGlobalFuncdef, CallInInitializerRefusesResolveEvenWithASingleFuncPtrArg) {
+	// Isolates the CALLSYS half of asGetConstFuncdefGlobalTarget's "no calls
+	// in the init bytecode" guard from the delegate test above (which is
+	// independently caught by a different mechanism — see that test's
+	// EVIDENCE NOTE). A registered native taking and returning F@ produces
+	// exactly the shape the guard must refuse on its own: one asBC_FuncPtr
+	// (the argument, @a) followed by asBC_CALLSYS. The guard cannot know
+	// what the native does with its argument — it need not return it
+	// unchanged — so trusting "exactly one FuncPtr, ignore any call" would
+	// be unsound in general, independent of whether asFUNC_SYSTEM happens to
+	// also be excluded elsewhere. g()/f() are never executed (this test only
+	// inspects static metadata), so the native's body is an unreachable stub.
+	struct L {
+		static asIScriptFunction *Passthrough(asIScriptFunction *h) { return h; }
+	};
+	ASSERT_GE(engine->RegisterFuncdef("void F()"), 0);
+	ASSERT_GE(engine->RegisterGlobalFunction(
+		"F@ passthroughIgnoringArg(F@ h)", asFUNCTION(L::Passthrough), asCALL_CDECL), 0);
+
+	asIScriptFunction* f = Fn(
+		"void a() {}\n"
+		"void loopy() { while (true) {} }\n"
+		"F@ const g = passthroughIgnoringArg(@a);\n"
+		"void f() { g(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHaltingConstGlobalFuncdef, ChainedCallPtrSecondSiteStaysUnknown) {
+	// Regression pin for the `ctx->knownFuncdefTarget = 0;` reset in
+	// PerformFunctionCall (as_compiler.cpp, the asFUNC_FUNCDEF branch): two
+	// CallPtr sites on one statement, `g()()`. Only the FIRST is knowable
+	// (g resolves to mk); the second calls whatever mk() returns at
+	// runtime, which is never provably fixed. Without the reset, the first
+	// site's resolved target would leak into the second site's knownFuncdefTarget
+	// (CompileExpressionPostOp's ttOpenParenthesis case never overwrites ctx
+	// from a fresh funcExpr the way CompileFunctionCall does), folding f to
+	// a false YES while it actually calls the looping loopy().
+	asIScriptFunction* f = Fn(
+		"funcdef int F();\n"
+		"funcdef F@ MK();\n"
+		"int loopy() { while (true) {} return 0; }\n"
+		"F@ mk() { return @loopy; }\n"
+		"MK@ const g = @mk;\n"
+		"int f() { return g()(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+// --- Critical: unsafe-reference aliasing must not forge a YES -------------
+// Under AsHalting (unsafe references ON, matching this harness's default and
+// asEP_ALLOW_UNSAFE_REFERENCES generally): a read-only global funcdef handle
+// can be aliased by an F@ &inout parameter and reassigned through the alias.
+// Before the engine->ep.allowUnsafeReferences guard at the global-read site,
+// this reproduced a Critical false YES (f() folded to YES, then actually
+// called b() — or in the real attack, a non-halting function — after poke()
+// reassigned g through the alias). The guard must keep this at UNKNOWN.
+TEST_F(AsHalting, UnsafeReferenceAliasCannotForgeConstGlobalFuncdefYes) {
+	asIScriptFunction* f = Fn(
+		"funcdef int F();\n"
+		"int a() { return 1; }\n"
+		"int b() { return 2; }\n"
+		"F@ const g = @a;\n"
+		"void sink(F@ &inout x) { @x = @b; }\n"
+		"void poke() { sink(g); }\n"
+		"int f() { return g(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
 }
 
 } // namespace

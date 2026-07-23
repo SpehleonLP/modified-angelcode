@@ -375,7 +375,10 @@ public:
 		// the target isn't provable). Not serialized — a function restored
 		// from saved bytecode has this empty, which the consumer
 		// (BuildCalleeList) must treat as "every site unknown", never as
-		// "no call sites".
+		// "no call sites". Cleared by asCModule::ComputeTransitiveFunctionMetadata
+		// once its one and only reader (BuildCalleeList) has consumed it for
+		// this Build() — any read of this array outside that pass is invalid
+		// and will observe it empty, not stale.
 		asCArray<asCScriptFunction*>    funcdefCallTargets;
 
 		// The stack needed to execute the function

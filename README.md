@@ -130,7 +130,9 @@ best-effort:
   `asBC_JLowNZ` (the optimizer's ClrHi+JZ/JNZ fusion) and `asBC_JMPP` (switch
   dispatch) as conditional/computed jumps, and elides constant-guard edges
   (literal `while(true)` isn't treated as escapable). A funcdef/delegate call
-  site caps the local result at `UNKNOWN` since the callee is unknown.
+  site caps the local result at `UNKNOWN` since the callee is unknown — with
+  one narrow, statically-provable exception: see "Const-global funcdef call
+  resolution" below.
 - **Counted-loop prover** (`asProveCountedLoop` in `as_compiler.cpp`) upgrades
   provably-bounded loops from `UNKNOWN` to contributing toward `YES`: it
   recognizes both top-test (`CMP;Jcc-exit;...;step;JMP-back`) and
@@ -186,6 +188,57 @@ best-effort:
   map (not just the previously-handled cases) now sets the delegate flag
   instead of silently contributing no edge.
 
+#### Const-global funcdef call resolution
+
+A funcdef call site normally caps the local result at `UNKNOWN`, because a
+funcdef handle is a runtime value the analysis can't see through. One shape
+is exempt: reading a **const-handle** global funcdef whose declaration
+initializes it, in the same statement, to exactly one function literal —
+`funcdef int F(); int target() {...} F@ const g = @target;` — resolves the
+call statically instead of poisoning it, via `asGetConstFuncdefGlobalTarget`
+(`as_compiler.cpp`) scanning the global's finalized initializer bytecode.
+
+**What resolves:** a global declared `F@ const g` (trailing `const` — the
+HANDLE itself immutable) whose initializer bytecode contains exactly one
+`asBC_FuncPtr` and no call instruction of any kind (`asBC_CALL`,
+`asBC_CALLSYS`, `asBC_CALLINTF`, `asBC_CALLBND`, `asBC_CallPtr`,
+`asBC_ALLOC`). Only a bare `@f` or lambda literal produces that shape.
+
+**What is refused (by design, not oversight):**
+- `const F@ g` (leading `const`) — AngelScript's const-position grammar is
+  C-pointer-like: this only const-qualifies the *pointee*, not the handle.
+  The handle stays reassignable (`@g = @other;` compiles against it), so
+  `IsReadOnly()` reports false and the resolve never fires. Only the
+  trailing spelling reports `isConstHandle`.
+- A non-const global, or any initializer that isn't a single literal
+  function reference — a function call (`F@ const g = pick();`), a delegate
+  construction (`F@ const g = F(o.m);`, which compiles to
+  `FuncPtr(bestMethod); CALLSYS`), a ternary between two literals (two
+  `FuncPtr`s in the init bytecode) — all fail the "exactly one FuncPtr, no
+  calls" scan and return 0 (unresolved).
+- Any read while `asEP_ALLOW_UNSAFE_REFERENCES` is enabled on the engine.
+  With unsafe references on, a read-only global handle can still be aliased
+  by an `F@ &inout` (or bare `F@ &`) parameter and reassigned through that
+  alias — `IsReadOnly()` no longer guarantees a fixed value, so the
+  global-read site additionally requires
+  `!engine->ep.allowUnsafeReferences` before trusting the scan at all.
+
+**Soundness contract (out of scope, by design):** application writes through
+`asIScriptModule::GetAddressOfGlobalVar` are trusted the same as a
+registered native's own behavior — the same trust level the rest of this
+analysis extends to `asFUNC_SYSTEM` functions. Script-side aliasing under
+`asEP_ALLOW_UNSAFE_REFERENCES` is explicitly guarded against (previous
+paragraph), not merely assumed away.
+
+**Per-site scoping (not per-global):** the resolved target is carried as a
+per-`asBC_CallPtr`-site value (`ctx->knownFuncdefTarget`, reset to 0 after
+each `PerformFunctionCall` funcdef-branch emission, and persisted per-site in
+`asCScriptFunction::funcdefCallTargets` after bytecode finalization for
+`BuildCalleeList` to consume). A statement with two chained calls through one
+resolved global, e.g. `g()()` where `g`'s target itself returns a handle,
+only resolves the first `CallPtr`; the second is never provably fixed and
+stays `UNKNOWN`.
+
 The full design/implementation record for this hardening pass lives in the
 engine repository at
 `docs/superpowers/plans/2026-07-22-as-halting-analysis-hardening.md`.
@@ -209,8 +262,11 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting.*` tests (currently 69) should pass; this is the suite every
-later halting-analysis change adds to, in `tests/test_as_halting.cpp`.
+All `AsHalting*` tests (currently 75, across the `AsHalting` and
+`AsHaltingConstGlobalFuncdef` fixtures — the latter builds its engine
+*without* `asEP_ALLOW_UNSAFE_REFERENCES`, see "Const-global funcdef call
+resolution" above) should pass; this is the suite every later
+halting-analysis change adds to, in `tests/test_as_halting.cpp`.
 
 ## Branch layout
 

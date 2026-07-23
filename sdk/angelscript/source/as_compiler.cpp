@@ -686,9 +686,13 @@ static bool asProveCountedLoop(asDWORD *bc, asUINT bcLen, asUINT target, asUINT 
 // global: exactly one asBC_FuncPtr and no call of any kind means the stored
 // value can only be that function. Globals compile before functions
 // (asCBuilder::Build order), so this bytecode is final at every function
-// compile. Application writes through GetAddressOfGlobalVar are
-// out-of-contract (same trust level as registered natives). Returns 0 on
-// any doubt.
+// compile. Application writes through GetAddressOfGlobalVar, and script
+// writes through an aliased reference when asEP_ALLOW_UNSAFE_REFERENCES is
+// enabled (a read-only global handle can still be bound to an F@ &inout
+// parameter and reassigned through it), are out-of-contract (same trust
+// level as registered natives) — callers MUST also gate on
+// !engine->ep.allowUnsafeReferences before trusting this result. Returns 0
+// on any doubt.
 static asCScriptFunction *asGetConstFuncdefGlobalTarget(asCGlobalProperty *prop)
 {
 	asCScriptFunction *initFunc = prop->GetInitFunc();
@@ -12044,7 +12048,12 @@ int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &s
 					// function reference has a provably fixed value: record
 					// it so a later call through this expression can bypass
 					// the "unknown target" poisoning (see PerformFunctionCall).
-					if (prop->type.IsFuncdef() && prop->type.IsReadOnly())
+					// Only safe when unsafe references are disallowed: with
+					// asEP_ALLOW_UNSAFE_REFERENCES on, a read-only global
+					// handle can still be aliased by an F@ &inout parameter
+					// and reassigned through that alias, so IsReadOnly() no
+					// longer guarantees the value is fixed.
+					if (prop->type.IsFuncdef() && prop->type.IsReadOnly() && !engine->ep.allowUnsafeReferences)
 						ctx->knownFuncdefTarget = asGetConstFuncdefGlobalTarget(prop);
 
 					// If the object is a value type or a non-handle variable to a reference type,
@@ -18718,7 +18727,6 @@ asCExprContext::asCExprContext(asCScriptEngine *engine) : bc(engine)
 {
 	property_arg = 0;
 	next = 0;
-	knownFuncdefTarget = 0;
 
 	Clear();
 }

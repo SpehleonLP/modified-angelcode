@@ -2287,6 +2287,30 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 				initFunc->transitiveHalts = calleeHalts;
 		}
 	}
+
+	// funcdefCallTargets is build-time-only metadata: BuildCalleeList (above)
+	// is its only reader, and every read happens inside this function, which
+	// runs exactly once per Build() right after the compile that populates
+	// it (as_bytecode.cpp: ExtractFuncdefCallTargets, called per-function
+	// during builder->Build()). A second Build() on this module recompiles
+	// every function from scratch before this pass runs again, so the table
+	// is never stale-read. Drop the raw un-refcounted asCScriptFunction*
+	// entries now rather than let every script function carry them for the
+	// rest of its life.
+	for (asUINT i = 0; i < funcCount; i++)
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if (func && func->scriptData)
+			func->scriptData->funcdefCallTargets.SetLength(0);
+	}
+	globIt = m_scriptGlobals.List();
+	while (globIt)
+	{
+		asCScriptFunction *initFunc = (*globIt)->GetInitFunc();
+		globIt++;
+		if (initFunc && initFunc->scriptData)
+			initFunc->scriptData->funcdefCallTargets.SetLength(0);
+	}
 }
 
 END_AS_NAMESPACE
