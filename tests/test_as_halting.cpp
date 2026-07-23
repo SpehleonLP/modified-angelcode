@@ -436,11 +436,19 @@ TEST_F(AsHalting, SharedClassMethodCallIsNotTransitivelyYes) {
 }
 
 TEST_F(AsHalting, DirectCallToSharedFreeFunctionIsTransitivelyYes) {
-	// sh() is a shared free function, frozen once "owner" builds it. "user"
-	// only has an `external shared` declaration, so its funcIdToIndex map
-	// misses the call target — but the target is a shared script function,
-	// so Task 6 resolves it by folding the callee's already-final metadata
-	// instead of poisoning the call site.
+	// DOES NOT DISCRIMINATE Task 6's CALL-branch fold (found in review): an
+	// `external shared` declaration resolves through asCBuilder::
+	// RegisterScriptFunction's existing-shared branch, which calls
+	// module->AddScriptFunction(f) -> asCModule::AddScriptFunction, which
+	// PushLast()s sh() straight into "user"'s own m_scriptFunctions
+	// (as_module.cpp AddScriptFunction). So sh()'s id IS in "user"'s
+	// funcIdToIndex map — f()'s call to sh() is a map HIT, resolved via the
+	// pre-existing outCallees path, and never reaches the map-miss branch
+	// this task added. This test passed before Task 6 too; it pins the
+	// (still correct) behavior that a directly-imported shared function's
+	// call resolves to YES, but proves nothing about the miss/fold path.
+	// See DirectCallResolvesNestedSharedCallMapMiss below for a test that
+	// does force a genuine map miss.
 	ASSERT_NE(FnIn("owner", "shared int sh() { return 1; }", "sh"), nullptr);
 	asIScriptFunction* f = FnIn("user",
 		"external shared int sh();\n"
@@ -450,15 +458,81 @@ TEST_F(AsHalting, DirectCallToSharedFreeFunctionIsTransitivelyYes) {
 }
 
 TEST_F(AsHalting, DirectCallToLoopingSharedFunctionIsNotYes) {
-	// Adversarial: the resolved callee's own verdict is NOT asHALTS_YES
-	// (it is asHALTS_NO, an infinite loop), so the fold must propagate
-	// that — not silently pass through YES because the call resolved.
+	// DOES NOT DISCRIMINATE, for the same reason as the test above (map HIT,
+	// not miss — see its comment). It is ALSO not a real NO->UNKNOWN fold
+	// exercise: `while (n > 0) { }` is the suite's own "unk" shape (see
+	// ByteCodeRoundTripPreservesHaltsMetadata), not "no" (`while (true) {}`),
+	// so loopy()'s own verdict is asHALTS_UNKNOWN, not asHALTS_NO — there is
+	// no NO to downgrade here. This test only pins "a resolved call to a
+	// non-YES callee does not spuriously become YES"; it was already non-YES
+	// before Task 6 (poisoned) and stays non-YES after (now via a genuine
+	// UNKNOWN fold) for an unrelated reason. See
+	// ExternalFoldOfGenuineNoCalleeDowngradesToUnknown below for a test that
+	// exercises the actual NO->UNKNOWN downgrade line in isolation.
 	ASSERT_NE(FnIn("owner", "shared void loopy(int n) { while (n > 0) { } }", "loopy"), nullptr);
 	asIScriptFunction* f = FnIn("user",
 		"external shared void loopy(int n);\n"
 		"void f() { loopy(3); }", "f");
 	ASSERT_NE(f, nullptr);
 	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, DirectCallResolvesNestedSharedCallMapMiss) {
+	// Genuinely discriminating positive test for the CALL-branch fold. Shape:
+	// "owner" defines TWO shared functions, b() and a() { b(); }. "user"
+	// only imports a() (via `external shared`), never b() — b()'s id is
+	// nowhere in "user"'s funcIdToIndex map. But a()'s own bytecode (already
+	// compiled, containing a CALL to b()) gets re-walked by BuildCalleeList
+	// as part of *user*'s own ComputeTransitiveFunctionMetadata pass (a() is
+	// in user's m_scriptFunctions too, via AddScriptFunction) — so the CALL
+	// to b() is a real map miss in user's context, and only resolves to YES
+	// if the CALL-branch fold added by Task 6 fires. Before Task 6 this
+	// miss poisons a() to UNKNOWN (unresolved), which propagates to f() via
+	// the ordinary internal call edge f()->a() — so f() would be UNKNOWN,
+	// not YES, without the fix.
+	ASSERT_NE(FnIn("owner",
+		"shared void b() { }\n"
+		"shared void a() { b(); }", "a"), nullptr);
+	asIScriptFunction* f = FnIn("user",
+		"external shared void a();\n"
+		"void f() { a(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_EQ(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, ExternalFoldOfGenuineNoCalleeDowngradesToUnknown) {
+	// Exercises the NO->UNKNOWN downgrade on the external-callee fold
+	// (as_module.cpp phase 2, ~line 2093) in isolation from phase 4's
+	// separate downgrade on ordinary *internal* call edges (~line 2185,
+	// pre-existing, not part of Task 6). Shape, same map-miss mechanism as
+	// DirectCallResolvesNestedSharedCallMapMiss above: "owner" defines
+	// spin() { while(true){} } (genuinely asHALTS_NO — a bare infinite loop,
+	// not the "unk" `while(n>0)` shape) and a() { spin(); }. "user" imports
+	// only a(); spin() is a real map miss when a()'s bytecode is re-walked
+	// in user's context, so the fold applies directly to a() in *user*'s
+	// own pass.
+	//
+	// The assertion is on a() itself — not on some further caller like f()
+	// — deliberately: if a() were folded to a raw (undowngraded) NO here,
+	// then any caller of a() one hop further out (e.g. f()) would still
+	// read back UNKNOWN anyway, because phase 4's *own* downgrade rule for
+	// ordinary internal call edges (callee->transitiveHalts == NO ?
+	// UNKNOWN : ...) fires again on the f()->a() edge — masking a removal
+	// of the phase-2 downgrade under test. Asserting on a() directly is
+	// the only way this test can go red if the phase-2 downgrade line is
+	// deleted; confirmed by hand (see task-6-report.md).
+	ASSERT_NE(FnIn("owner",
+		"shared void spin() { while (true) { } }\n"
+		"shared void a() { spin(); }", "a"), nullptr);
+	asIScriptFunction* userF = FnIn("user",
+		"external shared void a();\n"
+		"void f() { a(); }", "f");
+	ASSERT_NE(userF, nullptr);
+	asIScriptModule* userMod = engine->GetModule("user", asGM_ONLY_IF_EXISTS);
+	ASSERT_NE(userMod, nullptr);
+	asIScriptFunction* userA = userMod->GetFunctionByName("a");
+	ASSERT_NE(userA, nullptr);
+	EXPECT_EQ(userA->GetTransitiveHalts(), asHALTS_UNKNOWN);
 }
 
 TEST_F(AsHalting, SharedFinalClassMethodCallStillPoisonedViaVirtualDispatch) {

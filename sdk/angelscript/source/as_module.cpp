@@ -2026,7 +2026,11 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 		n += instrSize;
 	}
 
-	// Deduplicate
+	// Deduplicate outCallees only. outExternalCallees is deliberately left
+	// as-is (unlike outCallees): the phase-2/5 fold over it is a join of
+	// idempotent max()-style operations, so revisiting the same ext entry
+	// twice is a harmless no-op, not a correctness or perf concern worth a
+	// second dedup pass.
 	for (asUINT d = 0; d < outCallees.GetLength(); d++)
 	{
 		for (asUINT e = d + 1; e < outCallees.GetLength(); )
@@ -2081,8 +2085,13 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 
 		// External fixed callees: targets outside this module whose metadata
 		// is already final (shared functions are frozen at first compile).
-		// Constants - folded once here; they cannot change during the fixed
-		// point, and they cannot form cycles back into this module.
+		// A map miss against funcIdToIndex (built above from this module's own
+		// m_scriptFunctions) proves ext is not a local function: every
+		// asFUNC_SCRIPT function with scriptData is in that map, so a miss
+		// means ext lives elsewhere. This pass therefore never mutates ext's
+		// own fields - the fold reads them once, as a true constant - so
+		// folding it here cannot introduce a cycle back into this module or
+		// break the idempotence of this pass.
 		for (asUINT j = 0; j < externalCallees[i].GetLength(); j++)
 		{
 			asCScriptFunction *ext = externalCallees[i][j];
