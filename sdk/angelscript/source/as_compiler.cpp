@@ -681,6 +681,39 @@ static bool asProveCountedLoop(asDWORD *bc, asUINT bcLen, asUINT target, asUINT 
 	return true;
 }
 
+// For a const funcdef-typed global with a literal initializer (`@f` or a
+// lambda), the init bytecode is a single FuncPtr push stored into the
+// global: exactly one asBC_FuncPtr and no call of any kind means the stored
+// value can only be that function. Globals compile before functions
+// (asCBuilder::Build order), so this bytecode is final at every function
+// compile. Application writes through GetAddressOfGlobalVar are
+// out-of-contract (same trust level as registered natives). Returns 0 on
+// any doubt.
+static asCScriptFunction *asGetConstFuncdefGlobalTarget(asCGlobalProperty *prop)
+{
+	asCScriptFunction *initFunc = prop->GetInitFunc();
+	if (initFunc == 0 || initFunc->scriptData == 0) return 0;
+	asDWORD *bc = initFunc->scriptData->byteCode.AddressOf();
+	asUINT len = (asUINT)initFunc->scriptData->byteCode.GetLength();
+	asCScriptFunction *target = 0;
+	for (asUINT n = 0; n < len; )
+	{
+		asBYTE op = *(asBYTE*)&bc[n];
+		int sz = asBCTypeSize[asBCInfo[op].type];
+		if (sz == 0) return 0;
+		if (op == asBC_FuncPtr)
+		{
+			if (target) return 0;
+			target = (asCScriptFunction*)(asPWORD)asBC_PTRARG(&bc[n]);
+		}
+		else if (op == asBC_CALL || op == asBC_CALLSYS || op == asBC_CALLINTF ||
+		         op == asBC_CALLBND || op == asBC_CallPtr || op == asBC_ALLOC)
+			return 0;
+		n += (asUINT)sz;
+	}
+	return target;
+}
+
 void asCCompiler::FinalizeFunction()
 {
 	TimeIt("asCCompiler::FinalizeFunction");
@@ -735,6 +768,12 @@ void asCCompiler::FinalizeFunction()
 	byteCode.ExtractTryCatchInfo(outFunc);
 
 	byteCode.ExtractObjectVariableInfo(outFunc);
+
+	// Extract statically-known funcdef call targets AFTER the optimizer has
+	// run (byteCode.Finalize above), so the table indexes final asBC_CallPtr
+	// ordinals — deleted/reordered sites from optimization must not desync
+	// this from BuildCalleeList's later per-site walk.
+	byteCode.ExtractFuncdefCallTargets(outFunc);
 
 	// Copy byte code to the function
 	asASSERT( outFunc->scriptData->byteCode.GetLength() == 0 );
@@ -12001,6 +12040,13 @@ int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &s
 					// Push the address of the variable on the stack
 					ctx->bc.InstrPTR(asBC_PGA, prop->GetAddressOfValue());
 
+					// A const funcdef global whose initializer is a literal
+					// function reference has a provably fixed value: record
+					// it so a later call through this expression can bypass
+					// the "unknown target" poisoning (see PerformFunctionCall).
+					if (prop->type.IsFuncdef() && prop->type.IsReadOnly())
+						ctx->knownFuncdefTarget = asGetConstFuncdefGlobalTarget(prop);
+
 					// If the object is a value type or a non-handle variable to a reference type,
 					// then we must validate the existance as it could potentially be accessed
 					// before it is initialized.
@@ -18158,8 +18204,15 @@ void asCCompiler::PerformFunctionCall(int funcId, asCExprContext *ctx, bool isCo
 		}
 		else if( descr->funcType == asFUNC_FUNCDEF )
 		{
-			ctx->bc.CallPtr(asBC_CallPtr, funcPtrVar, argSize);
-			outFunc->localCallsDelegate = true;
+			// A funcdef call whose value provenance is statically known (const
+			// global with a literal initializer) is as modeled as a direct CALL:
+			// the target rides the IR instruction into the per-site table and
+			// only unknown targets poison the local verdict.
+			asCScriptFunction *known = ctx->knownFuncdefTarget;
+			ctx->knownFuncdefTarget = 0;
+			ctx->bc.CallPtr(asBC_CallPtr, funcPtrVar, argSize, known);
+			if( known == 0 )
+				outFunc->localCallsDelegate = true;
 		}
 	}
 
@@ -18665,6 +18718,7 @@ asCExprContext::asCExprContext(asCScriptEngine *engine) : bc(engine)
 {
 	property_arg = 0;
 	next = 0;
+	knownFuncdefTarget = 0;
 
 	Clear();
 }
@@ -18700,7 +18754,8 @@ void asCExprContext::Clear()
 	isCleanArg = false;
 	isAnonymousInitList = false;
 	origCode = 0;
-	
+	knownFuncdefTarget = 0;
+
 	if (next)
 		asDELETE(next, asCExprContext);
 	next = 0;
@@ -18789,6 +18844,7 @@ void asCExprContext::Copy(asCExprContext *other)
 	isCleanArg          = other->isCleanArg;
 	isAnonymousInitList = other->isAnonymousInitList;
 	origCode            = other->origCode;
+	knownFuncdefTarget  = other->knownFuncdefTarget;
 
 	// Do not copy the origExpr member
 }

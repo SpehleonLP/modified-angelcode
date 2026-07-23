@@ -870,4 +870,62 @@ TEST_F(AsHalting, WrongPolarityDecrementAgainstVariableBoundIsNotYes) {
 	EXPECT_NE(f->GetLocalHalts(), asHALTS_YES);
 }
 
+TEST_F(AsHalting, IifeDoesNotCompile) {
+	// AngelScript function literals are untyped until converted to a target
+	// funcdef; an IIFE has no conversion target. Pins the language rule the
+	// spec's item-5 scoping rests on (spec: IIFE sub-item expected vacuous).
+	EXPECT_FALSE(Builds("int f() { return (function() { return 1; })(); }"));
+}
+
+TEST_F(AsHalting, ConstGlobalFuncdefLiteralTargetIsTransitivelyYes) {
+	// NOTE (deviation from brief text): AngelScript's const-position grammar
+	// is C-pointer-like — `const F@ g` makes the *pointee* const (handle
+	// itself stays reassignable; verified empirically: `@g = @other;`
+	// compiles against `const F@ g`). Only trailing `F@ const g` makes the
+	// HANDLE itself immutable, which is what asCDataType::IsReadOnly()
+	// reports for object-handle types (isConstHandle) and what the
+	// soundness of asGetConstFuncdefGlobalTarget depends on. Tests use the
+	// trailing-const spelling throughout.
+	asIScriptFunction* f = Fn(
+		"funcdef int F();\n"
+		"int target() { return 7; }\n"
+		"F@ const g = @target;\n"
+		"int f() { return g(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_EQ(f->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_EQ(f->GetLocalHalts(), asHALTS_YES);          // known site no longer caps local
+	EXPECT_FALSE(f->GetLocalCallsDelegate());
+}
+
+TEST_F(AsHalting, NonConstGlobalFuncdefIsNotYes) {
+	asIScriptFunction* f = Fn(
+		"funcdef int F();\n"
+		"int target() { return 7; }\n"
+		"F@ g = @target;\n"
+		"int f() { return g(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, ConstGlobalFuncdefRuntimeInitIsNotYes) {
+	asIScriptFunction* f = Fn(
+		"funcdef int F();\n"
+		"int target() { return 7; }\n"
+		"F@ pick() { return @target; }\n"
+		"F@ const g = pick();\n"
+		"int f() { return g(); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+TEST_F(AsHalting, ConstGlobalFuncdefLoopingTargetIsNotYes) {
+	asIScriptFunction* f = Fn(
+		"funcdef void F(int);\n"
+		"void loopy(int n) { while (n > 0) { } }\n"
+		"F@ const g = @loopy;\n"
+		"void f() { g(3); }", "f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
 } // namespace

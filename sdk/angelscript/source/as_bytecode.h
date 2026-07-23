@@ -73,6 +73,10 @@ public:
 	void ExtractLineNumbers();
 	void ExtractObjectVariableInfo(asCScriptFunction *outFunc);
 	void ExtractTryCatchInfo(asCScriptFunction *outFunc);
+	// Copies each asBC_CallPtr instruction's statically-known target (or
+	// null) into the function's side table, in final bytecode order. See
+	// definition for the ordering contract.
+	void ExtractFuncdefCallTargets(asCScriptFunction *outFunc);
 	int  ResolveJumpAddresses();
 	int  FindLabel(int label, asCByteInstruction *from, asCByteInstruction **dest, int *positionDelta);
 
@@ -106,7 +110,7 @@ public:
 
 	void VarDecl(int varDeclIdx);
 	void Call(asEBCInstr bc, int funcID, int pop);
-	void CallPtr(asEBCInstr bc, int funcPtrVar, int pop);
+	void CallPtr(asEBCInstr bc, int funcPtrVar, int pop, void *knownTarget = 0);
 	void Alloc(asEBCInstr bc, void *objID, int funcID, int pop);
 	void Ret(int pop);
 	void JmpP(int var, asDWORD max);
@@ -193,6 +197,13 @@ public:
 	short wArg[3];
 	int size;
 	int stackInc;
+
+	// For asBC_CallPtr only: the statically-known callee (asCScriptFunction*)
+	// if the compiler proved the value provenance, else 0 (unknown target).
+	// Raw-allocated (placement-new via AllocByteInstruction) so this is set
+	// explicitly in the constructor, never relies on a default member
+	// initializer.
+	void *funcdefTarget;
 
 	// Testing
 	bool marked;

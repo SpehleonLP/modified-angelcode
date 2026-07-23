@@ -209,7 +209,7 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting.*` tests (currently 64) should pass; this is the suite every
+All `AsHalting.*` tests (currently 69) should pass; this is the suite every
 later halting-analysis change adds to, in `tests/test_as_halting.cpp`.
 
 ## Branch layout

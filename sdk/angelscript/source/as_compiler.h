@@ -155,6 +155,10 @@ struct asCExprContext
 
 	asCByteCode bc;
 	asCExprValue type;
+	// Set at a const-funcdef-global read site when the global's initializer
+	// provably assigns exactly one function (see asGetConstFuncdefGlobalTarget).
+	// Consumed (and reset to 0) by PerformFunctionCall's funcdef branch.
+	asCScriptFunction *knownFuncdefTarget;
 	int  property_get;
 	int  property_set;
 	bool property_const;   // If the object that is being accessed through property accessor is read-only

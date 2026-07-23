@@ -1878,6 +1878,11 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 	asDWORD *bc = func->scriptData->byteCode.AddressOf();
 	asUINT bcLen = (asUINT)func->scriptData->byteCode.GetLength();
 
+	// Per-CallPtr-site ordinal into func->scriptData->funcdefCallTargets
+	// (Task 8), which holds one entry per asBC_CallPtr in final bytecode
+	// order.
+	asUINT callPtrOrdinal = 0;
+
 	for (asUINT n = 0; n < bcLen; )
 	{
 		int op = *(asBYTE*)&bc[n];
@@ -1994,9 +1999,26 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 		}
 		else if (op == asBC_CallPtr)
 		{
-			// Funcdef/delegate call - target unknown at this level (Task 8
-			// adds per-site resolution; until then every site is unresolved).
-			outUnresolved = true;
+			// Per-site resolution via the compile-time table (final
+			// bytecode order). Missing/short table (e.g. a function
+			// restored from saved bytecode) fails closed.
+			asCScriptFunction *target = 0;
+			if (func->scriptData && callPtrOrdinal < func->scriptData->funcdefCallTargets.GetLength())
+				target = func->scriptData->funcdefCallTargets[callPtrOrdinal];
+			callPtrOrdinal++;
+			if (target)
+			{
+				asSMapNode<int, asUINT> *cursor = 0;
+				if (funcIdToIndex.MoveTo(&cursor, target->id))
+					outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+				else if (target->funcType == asFUNC_SYSTEM ||
+				         (target->funcType == asFUNC_SCRIPT && target->IsShared()))
+					outExternalCallees.PushLast(target);   // fixed metadata (Task 6 rules)
+				else
+					outUnresolved = true;
+			}
+			else
+				outUnresolved = true;
 		}
 		else if (op == asBC_ALLOC)
 		{

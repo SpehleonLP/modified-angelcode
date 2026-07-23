@@ -370,6 +370,14 @@ public:
 		// Holds information on try/catch blocks for exception handling
 		asCArray<asSTryCatchInfo>       tryCatchInfo;
 
+		// Build-time-only metadata: one entry per asBC_CallPtr in final
+		// bytecode order, holding the statically-known callee (or null if
+		// the target isn't provable). Not serialized — a function restored
+		// from saved bytecode has this empty, which the consumer
+		// (BuildCalleeList) must treat as "every site unknown", never as
+		// "no call sites".
+		asCArray<asCScriptFunction*>    funcdefCallTargets;
+
 		// The stack needed to execute the function
 		int                             stackNeeded;
 

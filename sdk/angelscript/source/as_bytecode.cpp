@@ -1615,6 +1615,18 @@ void asCByteCode::ExtractObjectVariableInfo(asCScriptFunction *outFunc)
 	asASSERT( blockLevel == 0 );
 }
 
+// Copies each asBC_CallPtr instruction's statically-known target (or null)
+// into the function's side table, in final bytecode order. Runs after the
+// optimizer, so deleted sites drop out and the table indexes final CallPtr
+// ordinals exactly — the module metadata pass consumes it per-site.
+void asCByteCode::ExtractFuncdefCallTargets(asCScriptFunction *outFunc)
+{
+	asASSERT(outFunc->scriptData);
+	for (asCByteInstruction *instr = first; instr; instr = instr->next)
+		if (instr->op == asBC_CallPtr)
+			outFunc->scriptData->funcdefCallTargets.PushLast((asCScriptFunction*)instr->funcdefTarget);
+}
+
 void asCByteCode::ExtractTryCatchInfo(asCScriptFunction *outFunc)
 {
 	asASSERT(outFunc->scriptData);
@@ -1736,7 +1748,7 @@ void asCByteCode::Call(asEBCInstr instr, int funcID, int pop)
     InstrPTR(asBC_JitEntry, 0);
 }
 
-void asCByteCode::CallPtr(asEBCInstr instr, int funcPtrVar, int pop)
+void asCByteCode::CallPtr(asEBCInstr instr, int funcPtrVar, int pop, void *knownTarget)
 {
 	if( AddInstruction() < 0 )
 		return;
@@ -1747,6 +1759,7 @@ void asCByteCode::CallPtr(asEBCInstr instr, int funcPtrVar, int pop)
 	last->size = asBCTypeSize[asBCInfo[instr].type];
 	last->stackInc = -pop;
 	last->wArg[0] = (short)funcPtrVar;
+	last->funcdefTarget = knownTarget;
 
     // Add a JitEntry instruction after function calls so that JIT's can resume execution
     InstrPTR(asBC_JitEntry, 0);
@@ -2985,6 +2998,7 @@ asCByteInstruction::asCByteInstruction()
 	wArg[2]       = 0;
 	size          = 0;
 	stackInc      = 0;
+	funcdefTarget = 0;
 	marked        = false;
 	stackSize     = 0;
 }
