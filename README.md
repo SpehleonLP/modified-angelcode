@@ -243,7 +243,11 @@ and the application must not act on those verdicts afterwards:
 - Adding script to a module after its verdicts were computed — i.e.
   `asIScriptModule::CompileFunction` with `asCOMP_ADD_TO_MODULE` (likewise
   `CompileGlobalVar`). Newly added code can alias or reassign a global that
-  earlier verdicts assumed fixed, and nothing recomputes those verdicts.
+  earlier verdicts assumed fixed, and the compile of the added code does not
+  itself recompute them. A later bind/unbind on that module does recompute the
+  whole module, so the stale verdict is not necessarily permanent — but it is
+  not a fix either: whether and when that happens is up to the application, so
+  the verdicts must be treated as invalid from the moment the script is added.
 
 Together these mean a `YES` is only meaningful for a module that is built
 once and then left alone, under an engine whose properties are set before the
@@ -276,37 +280,85 @@ before it can fail, and including `BindAllImportedFunctions`' early error
 exits (exactly one recompute per call, on every exit path). Verdicts
 therefore track bind state instead of being frozen at `Build()`.
 
+Each of those entry points runs one full fixed-point pass over the importing
+module — the same pass `Build()` runs — so binding K imports one at a time
+costs K passes. Prefer `BindAllImportedFunctions()`, which binds every import
+and then recomputes exactly once. `LoadByteCode()` pays one pass too (see
+"`LoadByteCode` recomputes" below).
+
 `BuildCalleeList` resolves a `CALLBND` site the same way execution does
 (`m_engine->importedFunctions[id & ~FUNC_IMPORTED]->boundFunctionId`, `-1`
 meaning unbound) and folds the bound target's stored verdict as a constant —
 **only** when the target is either a registered native (`asFUNC_SYSTEM`, no
-bytecode, fixed metadata) or a script function whose own module currently has
-**no bound imports**. Everything else — unbound, target inside this module,
-target whose module was discarded (`module == 0`), and any target whose
-module has a live binding of its own — keeps the poison.
+bytecode, fixed metadata) or a script function whose own module **declares no
+imported functions at all** (`GetImportedFunctionCount() == 0`). Everything
+else — unbound, target inside this module, target whose module was discarded
+(`module == 0`), and any target in a module that declares an import, bound or
+not — keeps the poison.
 
-The "no bound imports in the target's module" condition is load-bearing, not
-caution. Guarding only on `target->module != this` admits a false `YES`:
-nothing recomputes module *A* when module *B* rebinds, so a verdict published
-while an import chain was acyclic survives the rebind that closes the cycle.
-With `prov`/`mid`/`top` (mid imports prov, top imports `mid::g`), binding
-mid→`prov::good` makes `mid::g` `YES`; binding top→`mid::g` folds that into
-`top::f`; then repointing mid's import at `top::f` makes `f` and `g` mutually
-infinitely recursive while mid's recompute folds `top::f`'s stale `YES` — and
-both settle at `YES`. Requiring the target module to have no bound imports
-makes the folded verdict bind-independent (every `CALLBND` in that module
-poisons, so nothing it reads depends on a binding, and no bind edge can lead
-back), which closes the cycle. Cost: an import chain stops refining at the
-first hop — the importer of an importer caps at `UNKNOWN`. Precision only.
+That condition is load-bearing, not caution. Guarding only on
+`target->module != this` admits a false `YES`: nothing recomputes module *A*
+when module *B* rebinds, so a verdict published while an import chain was
+acyclic survives the rebind that closes the cycle. With `prov`/`mid`/`top`
+(mid imports prov, top imports `mid::g`), binding mid→`prov::good` makes
+`mid::g` `YES`; binding top→`mid::g` folds that into `top::f`; then repointing
+mid's import at `top::f` makes `f` and `g` mutually infinitely recursive while
+mid's recompute folds `top::f`'s stale `YES` — and both settle at `YES`.
+
+The precise statement of what the shipped guard buys is: **a module that
+declares no imports contains no `CALLBND` site at all**, so none of its
+verdicts can depend on any binding, no bind edge can lead back into the
+folding module, and no later bind in the target module can move what was
+folded. That is a property of the target module alone, checkable on the spot.
+
+The weaker "no import currently *bound*" test would buy the same thing only
+under a whole-program premise — that every verdict in the engine was produced
+by this pass from that module's current state — and any entry point that
+installs verdicts another way silently breaks it. `LoadByteCode` was exactly
+such an entry point (next section). It now recomputes, so the premise holds
+again; the guard deliberately does not rely on that.
+
+Cost: an import chain stops refining at the first hop — the importer of an
+importer caps at `UNKNOWN`, and so does the importer of a module that merely
+*declares* an import it never calls. Precision only.
 `tests/test_as_halting.cpp` pins the two-module ring, the three-module ring,
-the rebind-into-a-cycle attack above, and the precision loss.
+the rebind-into-a-cycle attack above, and both precision losses.
 
-Module teardown is exempt: `asCModule::InternalReset` unbinds through the
-non-recomputing `UnbindAllImportedFunctionsInternal`, because by the time it
-unbinds, the module's global properties have already been destroyed. That
-exemption is also what bounds the lifetime of the un-refcounted
-`asCScriptFunction::funcdefCallTargets` entries the pass consumes — the
-argument is recorded at their declaration in `as_scriptfunction.h`.
+#### `LoadByteCode` recomputes
+
+Saved bytecode carries `localHalts` / `transitiveHalts` /
+`transitiveCallsDelegate` verbatim, but not the bind state that justified
+them: a module saved while its imports were bound loads with those imports
+unbound, so a restored `asHALTS_YES` can describe a call graph the loaded
+module does not have — a false `YES` readable straight off the loaded
+function, with no importer and no rebind involved.
+`asCModule::LoadByteCode` therefore re-runs the pass after a successful read,
+so every verdict in the engine is one the pass derived from current state.
+
+Two consequences:
+
+- **Cost.** One fixed-point pass per load, the same pass `Build()` runs.
+- **Precision.** `asCScriptFunction::funcdefCallTargets` is not serialized, so
+  a const-global funcdef call site that resolved before the save is
+  unresolved after the load, and its caller loads as `UNKNOWN` where it saved
+  as `YES`. Safe direction, and it matches the documented contract that the
+  table is "not serialized — treat as every site unknown".
+
+A build configured with `AS_NO_COMPILER` has no pass to run, so its
+`LoadByteCode` restores verdicts as-is and this recompute does not apply.
+
+Module teardown does not recompute: `asCModule::InternalReset` unbinds through
+the non-recomputing `UnbindAllImportedFunctionsInternal`. The reason is that a
+recompute while the module and all of its verdicts are being destroyed is
+wasted work — *not* that it would read destroyed state. It would not:
+`asCGlobalProperty::DestroyInternal` releases and NULLs each property's
+`initFunc` rather than leaving it dangling, and the pass skips a null
+`initFunc`; routing teardown through the recomputing wrapper instead was
+measured green across the whole suite (88/88), so no test discriminates the
+two. The routing is kept because the work is pointless, not because it is
+unsafe. The window in which the pass may read the un-refcounted
+`asCScriptFunction::funcdefCallTargets` entries is documented at their
+declaration in `as_scriptfunction.h`.
 
 The full design/implementation record for this hardening pass lives in the
 engine repository at
@@ -331,7 +383,7 @@ This is the same constraint the engine's `scripts/wt-build.sh` works around by
 building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
 `/home/anyuser/Developer/Build/angelscript-fork`.
 
-All `AsHalting*` tests (currently 85, across the `AsHalting` and
+All `AsHalting*` tests (currently 88, across the `AsHalting` and
 `AsHaltingConstGlobalFuncdef` fixtures — the latter builds its engine
 *without* `asEP_ALLOW_UNSAFE_REFERENCES`, see "Const-global funcdef call
 resolution" above) should pass; this is the suite every later

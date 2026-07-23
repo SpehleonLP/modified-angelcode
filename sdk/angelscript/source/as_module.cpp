@@ -679,9 +679,11 @@ void asCModule::InternalReset()
 		globIt++;
 	}
 
-	// Internal variant on purpose: this runs during teardown, after the
-	// module's global properties have been destroyed above, so a transitive
-	// metadata recompute here would walk half-destroyed state.
+	// Internal variant on purpose: a transitive metadata recompute here would
+	// be pure waste - the module, and every verdict in it, is being destroyed.
+	// It would not be unsafe: DestroyInternal above releases and NULLs each
+	// global property's initFunc rather than leaving it dangling, and the pass
+	// skips a null initFunc.
 	UnbindAllImportedFunctionsInternal();
 
 	// Free bind information
@@ -1473,16 +1475,6 @@ int asCModule::UnbindImportedFunction(asUINT index)
 }
 
 // internal
-bool asCModule::HasBoundImportedFunctions() const
-{
-	for( asUINT n = 0; n < m_bindInformations.GetLength(); n++ )
-		if( m_bindInformations[n] && m_bindInformations[n]->boundFunctionId >= 0 )
-			return true;
-
-	return false;
-}
-
-// internal
 void asCModule::RefreshTransitiveFunctionMetadata()
 {
 #ifndef AS_NO_COMPILER
@@ -1725,6 +1717,20 @@ int asCModule::LoadByteCode(asIBinaryStream *in, bool *wasDebugInfoStripped)
 
 	JITCompile();
 
+	// The blob restores localHalts / transitiveHalts / transitiveCallsDelegate
+	// verbatim, but not the bind state that justified them: a module saved
+	// while its imports were bound loads with those imports unbound, so a
+	// restored asHALTS_YES can describe a call graph this module does not
+	// have. Recompute, so that every verdict in the engine is one this pass
+	// derived from the module's current state.
+	//
+	// Cost: one fixed-point pass per load - the same pass Build() runs.
+	// Precision: asCScriptFunction::funcdefCallTargets is not serialized, so a
+	// const-global funcdef call site that resolved before the save is
+	// unresolved after the load and demotes its caller to UNKNOWN. Loss of
+	// precision only, never a false YES.
+	RefreshTransitiveFunctionMetadata();
+
 #ifdef AS_DEBUG
 	// Verify that there are no unwanted gaps in the scriptFunctions array.
 	for( asUINT n = 1; n < m_engine->scriptFunctions.GetLength(); n++ )
@@ -1920,6 +1926,10 @@ asDWORD asCModule::SetAccessMask(asDWORD mask)
 	return old;
 }
 
+// Declared inside #ifndef AS_NO_COMPILER in as_module.h; the definitions must
+// live inside the same guard or an AS_NO_COMPILER build fails to compile with
+// "no declaration matches".
+#ifndef AS_NO_COMPILER
 void asCModule::BuildCalleeList(asCScriptFunction *func,
                                 const asCMap<int, asUINT> &funcIdToIndex,
                                 asCArray<asUINT> &outCallees,
@@ -2067,24 +2077,32 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			//   metadata fixed at registration (asHALTS_YES); same trust level
 			//   the CALL/CallPtr branches already extend to system functions.
 			//
-			// * asFUNC_SCRIPT - only when the target's OWN module currently has
-			//   no bound imports. `target->module != this` alone is NOT enough:
-			//   nothing recomputes a module when some OTHER module rebinds, so
-			//   a verdict published while a chain was acyclic survives the
-			//   rebind that closes the cycle. Concretely, with prov/mid/top and
-			//   mid importing from prov, top importing mid::g: bind mid->prov
-			//   (mid::g = YES), bind top->mid::g (top::f folds YES), then rebind
-			//   mid's import to top::f - now f and g are mutually infinitely
-			//   recursive, yet mid's recompute folds top::f's stale YES and the
-			//   pair settles at YES. A false YES, the worst defect class here.
+			// * asFUNC_SCRIPT - only when the target's OWN module declares no
+			//   imported functions at all. `target->module != this` alone is
+			//   NOT enough: nothing recomputes a module when some OTHER module
+			//   rebinds, so a verdict published while a chain was acyclic
+			//   survives the rebind that closes the cycle. Concretely, with
+			//   prov/mid/top and mid importing from prov, top importing mid::g:
+			//   bind mid->prov (mid::g = YES), bind top->mid::g (top::f folds
+			//   YES), then rebind mid's import to top::f - now f and g are
+			//   mutually infinitely recursive, yet mid's recompute folds
+			//   top::f's stale YES and the pair settles at YES. A false YES,
+			//   the worst defect class here.
 			//
-			//   Requiring the target's module to have no bound imports closes
-			//   that: with no bound CALLBND anywhere in it, every import site in
-			//   that module poisons, so nothing the fold reads can depend on a
-			//   binding, and no bind edge can lead back into this module. A
-			//   later bind in that module cannot promote what we folded either:
-			//   a target that reads YES has no unresolved site in its cone, so
-			//   it contains no CALLBND at all and no future binding moves it.
+			//   The test is "no import DECLARATIONS", not the weaker "no import
+			//   currently bound", and the difference is structural. A module
+			//   that declares no imports contains no CALLBND site at all, so
+			//   none of its verdicts can depend on a binding, no bind edge can
+			//   lead back into this module, and no later bind in it can move
+			//   what we folded here - all of that is a property of the target
+			//   module alone. The weaker test would instead rest on a
+			//   whole-program premise, that every verdict in the engine was
+			//   produced by this pass from that module's current state, which
+			//   any entry point installing verdicts another way silently
+			//   breaks. LoadByteCode was such an entry point: it restored a
+			//   bound-time YES into a module whose import was unbound, and the
+			//   weaker test folded it. LoadByteCode now recomputes, but the
+			//   guard no longer depends on that.
 			//
 			//   Cost: an import chain (A binds into B, B binds into C) stops
 			//   refining at the first hop - A caps at UNKNOWN. Precision only.
@@ -2100,7 +2118,7 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 					foldable = true;
 				else if (target->funcType == asFUNC_SCRIPT &&
 				         target->module != 0 && target->module != this &&
-				         !target->module->HasBoundImportedFunctions())
+				         target->module->GetImportedFunctionCount() == 0)
 					foldable = true;
 			}
 
@@ -2420,6 +2438,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	// of retention is a handful of pointers per script function, which is not
 	// worth trading a substrate guarantee for.
 }
+#endif // !AS_NO_COMPILER
 
 END_AS_NAMESPACE
 

@@ -394,12 +394,12 @@ public:
 		//   - A system function lives for the life of the engine.
 		//   - An imported function's signature is held by this module's
 		//     m_bindInformations.
-		// The pass re-runs on Build() and on this module's bind/unbind events;
-		// all of those are inside that window. Module teardown deliberately
-		// does NOT re-run it (asCModule::InternalReset uses the non-recomputing
-		// UnbindAllImportedFunctionsInternal), which is what keeps the window
-		// closed at the one point where the module's own state is being torn
-		// down around the table.
+		// The pass re-runs on Build(), on LoadByteCode(), and on this module's
+		// bind/unbind events; all of those are inside that window. Module
+		// teardown does not re-run it (asCModule::InternalReset uses the
+		// non-recomputing UnbindAllImportedFunctionsInternal) - not because a
+		// re-run there would read destroyed state, but because it would be
+		// pure waste while the module is being torn down.
 		asCArray<asCScriptFunction*>    funcdefCallTargets;
 
 		// The stack needed to execute the function

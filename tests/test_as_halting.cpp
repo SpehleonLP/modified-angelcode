@@ -1404,10 +1404,19 @@ TEST_F(AsHalting, ProviderWithABoundImportIsNotFolded) {
 	EXPECT_EQ(f->GetTransitiveHalts(), asHALTS_UNKNOWN);
 }
 
-// Hazard (1): UnbindAllImportedFunctions is called from InternalReset during
-// module teardown, after the module's globals have already been destroyed.
-// A recompute there would walk half-destroyed state.
-TEST_F(AsHalting, DiscardingAModuleWithBoundImportsDoesNotRecompute) {
+// Teardown smoke test, NOT a pin on the InternalReset routing.
+//
+// InternalReset deliberately unbinds through the non-recomputing
+// UnbindAllImportedFunctionsInternal, but the reason is that a recompute
+// during teardown is wasted work, not that it would be unsafe:
+// asCGlobalProperty::DestroyInternal releases and NULLs initFunc rather than
+// leaving it dangling, and the pass skips a null initFunc, so routing the
+// teardown through the recomputing wrapper instead is measurably still
+// crash-free. Nor could a test observe the difference: nothing survives the
+// discard whose verdict a teardown recompute could change. So this test pins
+// only what its body actually exercises - that discarding an importer with a
+// bound import, live globals and a stamped const-global funcdef is clean.
+TEST_F(AsHalting, DiscardingAModuleWithBoundImportsIsClean) {
 	asIScriptModule* provider = engine->GetModule("tdProvider", asGM_ALWAYS_CREATE);
 	provider->AddScriptSection("s", "int good() { return 1; }\n");
 	ASSERT_GE(provider->Build(), 0);
@@ -1515,6 +1524,124 @@ TEST_F(AsHalting, BoundTargetWhoseModuleWasDiscardedIsNotFolded) {
 	ASSERT_GE(importer->UnbindImportedFunction((asUINT)spareIdx), 0);
 	ShowHalts("discarded-provider f", f);
 	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+// LoadByteCode restores localHalts/transitiveHalts/transitiveCallsDelegate
+// verbatim from the blob. A module saved while its import was bound carries a
+// verdict that the binding justified, and loads with that import UNBOUND, so
+// the restored verdict describes a call graph the loaded module does not have.
+// Nothing else is needed for the lie: any runtime gate querying the loaded
+// function directly gets it. LoadByteCode therefore recomputes.
+TEST_F(AsHalting, LoadedByteCodeWithUnboundImportDoesNotReportYes) {
+	asIScriptModule* prov = engine->GetModule("lbProv", asGM_ALWAYS_CREATE);
+	prov->AddScriptSection("s", "int good() { return 1; }\n");
+	ASSERT_GE(prov->Build(), 0);
+
+	asIScriptModule* n = engine->GetModule("lbN", asGM_ALWAYS_CREATE);
+	n->AddScriptSection("s",
+		"import int h() from \"lbProv\";\n"
+		"int t() { return h(); }\n");
+	ASSERT_GE(n->Build(), 0);
+	ASSERT_GE(n->BindImportedFunction(0, prov->GetFunctionByName("good")), 0);
+	ASSERT_EQ(n->GetFunctionByName("t")->GetTransitiveHalts(), asHALTS_YES);
+
+	MemStream stream;
+	ASSERT_GE(n->SaveByteCode(&stream), 0);
+
+	// Reload into a separate module. Its import is unbound.
+	asIScriptModule* n2 = engine->GetModule("lbN2", asGM_ALWAYS_CREATE);
+	ASSERT_GE(n2->LoadByteCode(&stream), 0);
+	ASSERT_EQ(n2->GetImportedFunctionCount(), 1u);
+
+	asIScriptFunction* t2 = n2->GetFunctionByName("t");
+	ASSERT_NE(t2, nullptr);
+	ShowHalts("loaded-unbound t", t2);
+	EXPECT_NE(t2->GetTransitiveHalts(), asHALTS_YES);
+}
+
+// The same stale verdict, laundered through the CALLBND fold: an importer
+// binds to the loaded module's function while that module still has an
+// unbound import, then the loaded module's own import is pointed at an
+// infinite loop. The importer never recomputes, so a fold that trusted the
+// restored verdict would leave a false YES behind. The fold's guard is
+// "the target's module has NO imported functions at all", which refuses this
+// target whatever its bind state or the provenance of its verdicts.
+TEST_F(AsHalting, LoadedByteCodeVerdictIsNotLaunderedThroughTheFold) {
+	asIScriptModule* prov = engine->GetModule("ldProv", asGM_ALWAYS_CREATE);
+	prov->AddScriptSection("s",
+		"int good() { return 1; }\n"
+		"int bad() { while (true) { } return 0; }\n");
+	ASSERT_GE(prov->Build(), 0);
+
+	asIScriptModule* n = engine->GetModule("ldN", asGM_ALWAYS_CREATE);
+	n->AddScriptSection("s",
+		"import int h() from \"ldProv\";\n"
+		"int t() { return h(); }\n");
+	ASSERT_GE(n->Build(), 0);
+	ASSERT_GE(n->BindImportedFunction(0, prov->GetFunctionByName("good")), 0);
+
+	MemStream stream;
+	ASSERT_GE(n->SaveByteCode(&stream), 0);
+
+	asIScriptModule* n2 = engine->GetModule("ldN2", asGM_ALWAYS_CREATE);
+	ASSERT_GE(n2->LoadByteCode(&stream), 0);
+	asIScriptFunction* t2 = n2->GetFunctionByName("t");
+	ASSERT_NE(t2, nullptr);
+
+	asIScriptModule* m = engine->GetModule("ldM", asGM_ALWAYS_CREATE);
+	m->AddScriptSection("s",
+		"import int t() from \"ldN2\";\n"
+		"int f() { return t(); }\n");
+	ASSERT_GE(m->Build(), 0);
+	ASSERT_GE(m->BindImportedFunction(0, t2), 0);
+	asIScriptFunction* f = m->GetFunctionByName("f");
+	ASSERT_NE(f, nullptr);
+	ShowHalts("laundered f (at fold)", f);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+
+	// Close the trap: ldN2's own import now runs forever. ldN2 recomputes,
+	// ldM does not.
+	ASSERT_GE(n2->BindImportedFunction(0, prov->GetFunctionByName("bad")), 0);
+	ShowHalts("laundered t2 (after rebind)", t2);
+	ShowHalts("laundered f (after rebind)", f);
+	EXPECT_NE(t2->GetTransitiveHalts(), asHALTS_YES);
+	EXPECT_NE(f->GetTransitiveHalts(), asHALTS_YES);
+}
+
+// Fix 1-B's own pin. The fold guard tests "the target's module declares no
+// imports", not "the target's module has none bound"; the two differ exactly
+// here, on a module that declares an import but whose folded function never
+// calls it. The weaker guard folds `pure`'s honest YES; the shipped guard
+// refuses it. That precision loss is the price of a guard that is a property
+// of the target module alone rather than of how its verdicts were produced,
+// and it is pinned so removing the strengthening turns this test red.
+TEST_F(AsHalting, TargetInAModuleThatMerelyDeclaresAnImportIsNotFolded) {
+	asIScriptModule* prov = engine->GetModule("declProv", asGM_ALWAYS_CREATE);
+	prov->AddScriptSection("s", "int good() { return 1; }\n");
+	ASSERT_GE(prov->Build(), 0);
+
+	// Declares an import, never binds it, and `pure` does not call it.
+	asIScriptModule* mid = engine->GetModule("declMid", asGM_ALWAYS_CREATE);
+	mid->AddScriptSection("s",
+		"import int h() from \"declProv\";\n"
+		"int pure() { return 7; }\n");
+	ASSERT_GE(mid->Build(), 0);
+	asIScriptFunction* pure = mid->GetFunctionByName("pure");
+	ASSERT_NE(pure, nullptr);
+	ASSERT_EQ(pure->GetTransitiveHalts(), asHALTS_YES);
+	ASSERT_EQ(mid->GetImportedFunctionCount(), 1u);
+
+	asIScriptModule* top = engine->GetModule("declTop", asGM_ALWAYS_CREATE);
+	top->AddScriptSection("s",
+		"import int pure() from \"declMid\";\n"
+		"int f() { return pure(); }\n");
+	ASSERT_GE(top->Build(), 0);
+	ASSERT_GE(top->BindImportedFunction(0, pure), 0);
+
+	asIScriptFunction* f = top->GetFunctionByName("f");
+	ASSERT_NE(f, nullptr);
+	ShowHalts("declared-import-only f", f);
+	EXPECT_EQ(f->GetTransitiveHalts(), asHALTS_UNKNOWN);
 }
 
 } // namespace

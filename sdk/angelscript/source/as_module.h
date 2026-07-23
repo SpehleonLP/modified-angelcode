@@ -231,13 +231,9 @@ public:
 	int  UnbindImportedFunctionInternal(asUINT index);
 	int  UnbindAllImportedFunctionsInternal();
 	// Runs ComputeTransitiveFunctionMetadata when this build has a compiler.
-	// Must never be called from InternalReset: by the time teardown unbinds,
-	// the module's global properties are already destroyed.
+	// Not called from InternalReset: a recompute during teardown is pure
+	// waste, as the module and all of its verdicts are being destroyed.
 	void RefreshTransitiveFunctionMetadata();
-	// True if any of this module's imported functions is currently bound.
-	// Used by BuildCalleeList to decide whether another module's stored
-	// verdicts are safe to fold as constants.
-	bool HasBoundImportedFunctions() const;
 	asCTypeInfo       *GetType(const asCString &type, asSNameSpace *ns) const;
 	asCObjectType     *GetObjectType(const char *type, asSNameSpace *ns) const;
 	asCGlobalProperty *AllocateGlobalProperty(const char *name, const asCDataType &dt, asSNameSpace *ns);
