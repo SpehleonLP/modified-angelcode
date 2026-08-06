@@ -1683,51 +1683,81 @@ int asCScriptEngine::RegisterHandle(const char *typeName, asRESOLVEHANDLEFUNC_t 
 	if( typeName == 0 ) return ConfigError(asINVALID_NAME, "RegisterHandle", typeName, 0);
 	if( resolveFunc == 0 ) return ConfigError(asINVALID_ARG, "RegisterHandle", typeName, 0);
 
-	// Find the object type
-	asCTypeInfo *type = 0;
+	// A hand-registered full specialisation lives in templateInstanceTypes, not registeredObjTypes;
+	// a script can hold a handle to any match under this name, so all must resolve, not just one.
+	asCArray<asCTypeInfo *> matches;
 	for( asUINT n = 0; n < registeredObjTypes.GetLength(); n++ )
 	{
 		if( registeredObjTypes[n]->name == typeName &&
 		    registeredObjTypes[n]->nameSpace == defaultNamespace )
 		{
-			type = registeredObjTypes[n];
-			break;
+			matches.PushLast(registeredObjTypes[n]);
+		}
+	}
+	for( asUINT n = 0; n < templateInstanceTypes.GetLength(); n++ )
+	{
+		if( templateInstanceTypes[n]->name == typeName &&
+		    templateInstanceTypes[n]->nameSpace == defaultNamespace )
+		{
+			matches.PushLast(templateInstanceTypes[n]);
 		}
 	}
 
-	if( type == 0 )
+	if( matches.GetLength() == 0 )
 		return ConfigError(asINVALID_NAME, "RegisterHandle", typeName, 0);
 
-	// Reject double-registration
-	if( type->resolveHandle )
-		return ConfigError(asALREADY_REGISTERED, "RegisterHandle", typeName, 0);
-
-	// Validate incompatible flags
-	if( type->flags & asOBJ_VALUE )
-		return ConfigError(asINVALID_TYPE, "RegisterHandle", typeName, "Handle resolution is a ref-type concept");
-	if( type->flags & asOBJ_NOHANDLE )
-		return ConfigError(asINVALID_TYPE, "RegisterHandle", typeName, "Type registered with asOBJ_NOHANDLE");
-	if( type->flags & asOBJ_SCOPED )
-		return ConfigError(asINVALID_TYPE, "RegisterHandle", typeName, "Scoped types cannot have handle resolution");
-
-	// A dead-handle sentinel is incompatible with writable (non-const) properties,
-	// because the sentinel is shared and writes would cross-contaminate.
-	if( dead )
+	// Validate all matches before mutating any, so a rejected match can't half-register the rest.
+	for( asUINT n = 0; n < matches.GetLength(); n++ )
 	{
-		asCObjectType *ot = CastToObjectType(type);
-		if( ot )
+		asCTypeInfo *type = matches[n];
+
+		// Validate incompatible flags
+		if( type->flags & asOBJ_VALUE )
+			return ConfigError(asINVALID_TYPE, "RegisterHandle", typeName, "Handle resolution is a ref-type concept");
+		if( type->flags & asOBJ_NOHANDLE )
+			return ConfigError(asINVALID_TYPE, "RegisterHandle", typeName, "Type registered with asOBJ_NOHANDLE");
+		if( type->flags & asOBJ_SCOPED )
+			return ConfigError(asINVALID_TYPE, "RegisterHandle", typeName, "Scoped types cannot have handle resolution");
+
+		// A dead-handle sentinel is incompatible with writable (non-const) properties,
+		// because the sentinel is shared and writes would cross-contaminate.
+		if( dead )
 		{
-			for( asUINT n = 0; n < ot->properties.GetLength(); n++ )
+			asCObjectType *ot = CastToObjectType(type);
+			if( ot )
 			{
-				if( !ot->properties[n]->type.IsReadOnly() )
-					return ConfigError(asINVALID_DECLARATION, "RegisterHandle", typeName, "Dead handle not allowed: type has non-const properties");
+				for( asUINT p = 0; p < ot->properties.GetLength(); p++ )
+				{
+					if( !ot->properties[p]->type.IsReadOnly() )
+						return ConfigError(asINVALID_DECLARATION, "RegisterHandle", typeName, "Dead handle not allowed: type has non-const properties");
+				}
 			}
 		}
 	}
 
-	type->resolveHandle = resolveFunc;
-	type->handleUserData = userData;
-	type->deadHandle = dead;
+	// Only reject as already-registered if EVERY match already has a resolver — a template
+	// resolved before its specialisation exists must not block finishing the specialisation.
+	bool allAlreadyResolved = true;
+	for( asUINT n = 0; n < matches.GetLength(); n++ )
+	{
+		if( matches[n]->resolveHandle == 0 )
+		{
+			allAlreadyResolved = false;
+			break;
+		}
+	}
+	if( allAlreadyResolved )
+		return ConfigError(asALREADY_REGISTERED, "RegisterHandle", typeName, 0);
+
+	// Assumes one resolver per name: a partially resolved set is finished with the resolver
+	// given here, overwriting any match that differs rather than reporting a conflict.
+	for( asUINT n = 0; n < matches.GetLength(); n++ )
+	{
+		asCTypeInfo *type = matches[n];
+		type->resolveHandle = resolveFunc;
+		type->handleUserData = userData;
+		type->deadHandle = dead;
+	}
 
 	return asSUCCESS;
 }
@@ -2137,6 +2167,11 @@ int asCScriptEngine::RegisterObjectType(const char *name, int byteSize, asQWORD 
 #endif
 			type->flags      = flags;
 			type->accessMask = defaultAccessMask;
+
+			// Carries forward whatever the generated instance already has (set or still null).
+			type->resolveHandle  = dt.GetTypeInfo()->resolveHandle;
+			type->handleUserData = dt.GetTypeInfo()->handleUserData;
+			type->deadHandle     = dt.GetTypeInfo()->deadHandle;
 
 			templateInstanceTypes.PushLast(type);
 
