@@ -3789,6 +3789,12 @@ asCObjectType *asCScriptEngine::GetTemplateInstanceType(asCObjectType *templateT
 	ot->name             = templateType->name;
 	ot->nameSpace        = templateType->nameSpace;
 
+	// RegisterHandle can only reach the template type (it resolves by bare name), yet every
+	// `T<sub>@` a script holds is an instance. Unpropagated, the VM reads handle BITS as a pointer.
+	ot->resolveHandle    = templateType->resolveHandle;
+	ot->handleUserData   = templateType->handleUserData;
+	ot->deadHandle       = templateType->deadHandle;
+
 	// Inherit the template's accessMask and OR in each subtype's accessMask so the
 	// specialization counts as both "what the template is" and "what its subtypes are".
 	// Without this the specialization would keep the asCTypeInfo default of 0xFFFFFFFF

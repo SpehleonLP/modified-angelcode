@@ -378,6 +378,18 @@ Large change: the 2.38.0 release refactored namespace parsing into a shared `Par
 
 ### [AI-TODAY] SetHandleResolveId implementation (~15 lines)
 
+### [YOUR-PATCH] Template instances inherit the handle resolver
+`GetTemplateInstanceType` copies the resolver triple to each generated instance.
+RegisterHandle resolves its type by bare name and so can only reach the template
+type, but a script's `T<sub>@` is always an instance — without this the instance
+keeps the `asCTypeInfo` default of 0 and the VM reads handle bits as a pointer.
+Pinned by `Engine/src/AngelScript/Dispatch/test/test_template_handle_type.cpp`.
+```diff
++	ot->resolveHandle    = templateType->resolveHandle;
++	ot->handleUserData   = templateType->handleUserData;
++	ot->deadHandle       = templateType->deadHandle;
+```
+
 ### [YOUR-PATCH] SetTranslateAppExceptionCallback by value
 
 ### [OLDER-THAN-STOCK] Removed template function namespace
