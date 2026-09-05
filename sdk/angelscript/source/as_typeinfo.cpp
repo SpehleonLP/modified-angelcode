@@ -354,6 +354,11 @@ bool asCTypeInfo::IsShared() const
 
 asCEnumType::~asCEnumType()
 {
+	// Enum type user data has the same cleanup contract as object types,
+	// typedefs, and funcdefs. Run callbacks while the engine and enum values are
+	// still valid; clients may need them to drain work that reads this metadata.
+	CleanUserData();
+
 	asUINT n;
 	for (n = 0; n < enumValues.GetLength(); n++)
 	{
