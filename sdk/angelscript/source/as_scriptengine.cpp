@@ -1759,6 +1759,19 @@ int asCScriptEngine::RegisterHandle(const char *typeName, asRESOLVEHANDLEFUNC_t 
 		type->deadHandle = dead;
 	}
 
+	// System functions keep their own copy of the sentinel (asSSystemFunctionInterface::
+	// deadHandle). PrepareEngine re-copies it before the next build, and methods registered
+	// before this call are refreshed now, so the order of RegisterHandle and the methods
+	// does not matter.
+	isPrepared = false;
+	for( asUINT f = 0; f < scriptFunctions.GetLength(); f++ )
+	{
+		asCScriptFunction *func = scriptFunctions[f];
+		if( func && func->funcType == asFUNC_SYSTEM && func->sysFuncIntf && func->objectType &&
+		    matches.IndexOf(func->objectType) >= 0 )
+			func->sysFuncIntf->deadHandle = dead;
+	}
+
 	return asSUCCESS;
 }
 

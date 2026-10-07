@@ -203,6 +203,23 @@ Large change: the 2.38.0 release added `RETURN_VALUE_MAX_SIZE` for E2K 128-bit r
 +#ifdef HAS_128_BIT_PRIMITIVES
 ```
 
+### [YOUR-PATCH] Dead-handle calls answer defaults
+A `RegisterHandle` type given a `dead` value resolves a dead handle to it, and the VM
+passes it to natives as `this`. `CallSystemFunction` (and `CallGeneric`, `asBC_Thiscall1`
+in as_context.cpp) compare the pushed `this` with the method's cached `sysFunc->deadHandle`
+and, through `AnswerDeadHandleCall`, skip the application function: the return is 0 / null
+/ a default-constructed (or, for a POD without a constructor, zeroed) value, primitive
+`&out` parameters are zeroed, and argument clean-up still runs. A return type with no
+default (a `?` return, a reference to a type without a resolver, a non-POD value type
+without a default constructor) falls through to the application function. The clean-up
+loop moved into `CleanSystemFunctionArgs` so both paths share it.
+
+The per-call test is the inline `IsDeadHandleCall` (as_callfunc.h): one compare against
+`asSSystemFunctionInterface::deadHandle`, a copy of the type's sentinel that
+`PrepareSystemFunction`/`PrepareSystemFunctionGeneric` fill and `RegisterHandle` refreshes
+(see as_scriptengine.cpp), so a live call never touches `asCObjectType`. Pinned by
+`Engine/src/AngelScript/Dispatch/test/test_dead_handle_sentinel.cpp`.
+
 ---
 
 ## source/as_callfunc_x64_gcc.cpp
@@ -265,6 +282,10 @@ Removed ~30 lines handling `ttQuestion` token type in ARM parameter passing.
 - Dispatch table entries for opcodes 201-204
 - Removed FAULT entries 201-204 from non-computed-goto switch
 - Resolve-before-Release/AddRef at 8 C++ cleanup sites (SetArgObject, FREE, CleanReturnObject, CleanArgsOnStack, CleanStackFrame x2, generic return, generic arg cleanup)
+
+### [YOUR-PATCH] Dead-handle calls answer defaults
+`CallGeneric` and `asBC_Thiscall1` route a call on a dead-handle sentinel through
+`AnswerDeadHandleCall`; see as_callfunc.cpp.
 
 ### [YOUR-PATCH] Callback signatures by value
 ```diff
@@ -358,6 +379,12 @@ Three pow overflow checks changed:
 ---
 
 ## source/as_scriptengine.cpp
+
+### [YOUR-PATCH] RegisterHandle refreshes the methods' sentinel copy
+After setting `deadHandle` on the matched types, `RegisterHandle` clears `isPrepared` and
+copies the sentinel into `sysFuncIntf->deadHandle` of every system function already
+registered on them, so registering the handle after the methods (or after a build) still
+guards. Part of "Dead-handle calls answer defaults" (as_callfunc.cpp).
 
 ### [OLDER-THAN-STOCK] Removed ParseNamespace and its usage
 Large change: the 2.38.0 release refactored namespace parsing into a shared `ParseNamespace` method. Your copy has the older inline implementation in `SetDefaultNamespace`.
@@ -993,6 +1020,7 @@ Returns true if comparing to null and the weak ref's target has been destroyed.
 - MatchFunctions declaration reorder
 - All add_on patches (scriptany module linkage, scriptarray POD, datetime, dictionary, weakref, socket fixes)
 - BNF comment modernization
+- Dead-handle calls answer defaults: `IsDeadHandleCall`/`AnswerDeadHandleCall`/`CleanSystemFunctionArgs` (as_callfunc.cpp/.h), the `asSSystemFunctionInterface::deadHandle` copy, the guards in `CallGeneric` and `asBC_Thiscall1` (as_context.cpp), and the `RegisterHandle` refresh (as_scriptengine.cpp). Depends on the AI handle-resolve feature's `deadHandle`; carry it forward with that feature.
 
 ## Older-Than-Stock (pre-2.38.0 base, features missing)
 - No GetMessageCallback

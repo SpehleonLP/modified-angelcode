@@ -57,6 +57,18 @@ int PrepareSystemFunction(asCScriptFunction *func, asSSystemFunctionInterface *i
 
 int CallSystemFunction(int id, asCContext *context);
 
+// A RegisterHandle type given a `dead` value resolves a dead handle to it rather
+// than to null; a method called on it must neither dereference it nor raise. The
+// call is answered here instead: the return type's default (0, null, or a
+// default-constructed value), defaults in primitive &out parameters, and the
+// application function is skipped. Returns false, writing nothing, when the
+// return type has no default (a `?` return, a reference to a type without a handle resolver,
+// a value type without a default constructor); the application function is then
+// called as usual and must check the sentinel itself. A null handle never gets
+// here: it resolves to 0 and raises the null-pointer exception first.
+// `args` points at the first declared parameter.
+bool AnswerDeadHandleCall(asCContext *context, asCScriptFunction *descr, asDWORD *args, void *retPointer);
+
 inline asPWORD FuncPtrToUInt(asFUNCTION_t func)
 {
 	// A little trickery as the C++ standard doesn't allow direct
@@ -110,6 +122,7 @@ struct asSSystemFunctionInterface
 	int                  compositeOffset;
 	bool                 isCompositeIndirect;
 	void                *auxiliary; // can be used for functors, e.g. by asCALL_THISCALL_ASGLOBAL or asCALL_THISCALL_OBJFIRST
+	void                *deadHandle; // the object type's dead-handle sentinel, copied here so the per-call check reads a line the call already loaded; see IsDeadHandleCall
 
 	struct SClean
 	{
@@ -143,6 +156,7 @@ struct asSSystemFunctionInterface
 		compositeOffset     = 0;
 		isCompositeIndirect = false;
 		auxiliary           = 0;
+		deadHandle          = 0;
 
 		paramAutoHandles.SetLength(0);
 		cleanArgs.SetLength(0);
@@ -162,6 +176,7 @@ struct asSSystemFunctionInterface
 		compositeOffset     = in.compositeOffset;
 		isCompositeIndirect = in.isCompositeIndirect;
 		auxiliary           = in.auxiliary;
+		deadHandle          = in.deadHandle;
 
 		cleanArgs           = in.cleanArgs;
 		paramAutoHandles    = in.paramAutoHandles;
@@ -169,6 +184,13 @@ struct asSSystemFunctionInterface
 		return *this;
 	}
 };
+
+// Inline, on a field of the interface every call already reads, so a call on a live
+// object pays one compare. `obj` is the object pointer as the script pushed it.
+inline bool IsDeadHandleCall(const asSSystemFunctionInterface *sysFunc, const void *obj)
+{
+	return sysFunc->deadHandle && obj == sysFunc->deadHandle;
+}
 
 END_AS_NAMESPACE
 

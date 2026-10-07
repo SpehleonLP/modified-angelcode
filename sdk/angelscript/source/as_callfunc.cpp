@@ -184,6 +184,8 @@ int PrepareSystemFunctionGeneric(asCScriptFunction *func, asSSystemFunctionInter
 	// Calculate the size needed for the parameters
 	internal->paramSize = func->GetSpaceNeededForArguments();
 
+	internal->deadHandle = func->objectType ? func->objectType->deadHandle : 0;
+
 	// Prepare the clean up instructions for the function arguments
 	internal->cleanArgs.SetLength(0);
 	int offset = 0;
@@ -263,6 +265,8 @@ int PrepareSystemFunction(asCScriptFunction *func, asSSystemFunctionInterface *i
 	// are asCALL_GENERIC, which are prepared by PrepareSystemFunctionGeneric
 	asASSERT(false);
 #else
+	internal->deadHandle = func->objectType ? func->objectType->deadHandle : 0;
+
 	// References are always returned as primitive data
 	if( func->returnType.IsReference() || func->returnType.IsObjectHandle() )
 	{
@@ -556,6 +560,85 @@ int PrepareSystemFunction(asCScriptFunction *func, asSSystemFunctionInterface *i
 	return 0;
 }
 
+bool AnswerDeadHandleCall(asCContext *context, asCScriptFunction *descr, asDWORD *args, void *retPointer)
+{
+	asCScriptEngine   *engine = context->m_engine;
+	const asCDataType &rt     = descr->returnType;
+	asCObjectType     *rot    = CastToObjectType(rt.GetTypeInfo());
+
+	// Decide before writing anything: a return type with no default leaves the
+	// whole call to the application function, which must then check the sentinel.
+	enum { RET_NONE, RET_VALUE_REGISTER, RET_OBJECT_REGISTER, RET_CONSTRUCT, RET_CLEAR } ret;
+	if( rt.GetTokenType() == ttQuestion )
+		return false;
+	else if( rt.IsReference() )
+	{
+		// A reference to a handle-resolve type carries handle bits, so 0 is its null.
+		// Any other reference has no object to point at.
+		if( !rt.GetTypeInfo() || !rt.GetTypeInfo()->resolveHandle )
+			return false;
+		ret = RET_VALUE_REGISTER;
+	}
+	else if( rt.GetTokenType() == ttVoid )
+		ret = RET_NONE;
+	else if( rt.IsObjectHandle() || rt.IsFuncdef() )
+		ret = RET_OBJECT_REGISTER;
+	else if( rt.IsPrimitive() )
+		ret = RET_VALUE_REGISTER;
+	else if( rot && (rot->flags & asOBJ_VALUE) && retPointer )
+	{
+		if( rot->beh.construct )
+			ret = RET_CONSTRUCT;
+		else if( rot->flags & asOBJ_POD )
+			ret = RET_CLEAR;
+		else
+			return false;
+	}
+	else
+		return false;
+
+	switch( ret )
+	{
+	case RET_NONE:            break;
+	case RET_VALUE_REGISTER:  context->m_regs.valueRegister = 0; break;
+	case RET_OBJECT_REGISTER: context->m_regs.objectRegister = 0; break;
+	case RET_CONSTRUCT:       engine->CallObjectMethod(retPointer, rot->beh.construct); break;
+	case RET_CLEAR:           memset(retPointer, 0, rot->size); break;
+	}
+
+	// The compiler default-constructs object and handle &out temporaries before the
+	// call, but leaves primitive ones uninitialised.
+	asUINT offset = 0;
+	asUINT fixed  = descr->parameterTypes.GetLength() - (descr->IsVariadic() ? 1 : 0);
+	for( asUINT n = 0; n < fixed; n++ )
+	{
+		const asCDataType &pt = descr->parameterTypes[n];
+		if( pt.IsReference() && descr->inOutFlags[n] == asTM_OUTREF )
+		{
+			void *ref  = *(void**)&args[offset];
+			int   size = 0;
+			if( pt.GetTokenType() == ttQuestion )
+			{
+				asCDataType dt = engine->GetDataTypeFromTypeId(*(int*)&args[offset + AS_PTR_SIZE]);
+				if( dt.IsPrimitive() && dt.GetTokenType() != ttVoid )
+					size = dt.GetSizeInMemoryBytes();
+			}
+			else if( pt.IsPrimitive() )
+				size = pt.GetSizeInMemoryBytes();
+
+			if( ref && size > 0 )
+				memset(ref, 0, size);
+		}
+
+		if( pt.IsObject() && !pt.IsObjectHandle() && !pt.IsReference() )
+			offset += AS_PTR_SIZE;
+		else
+			offset += pt.GetSizeOnStackDWords();
+	}
+
+	return true;
+}
+
 #ifdef AS_MAX_PORTABILITY
 
 int CallSystemFunction(int id, asCContext *context)
@@ -624,6 +707,57 @@ void CallSystemFunctionNative(asCContext *context, asCScriptFunction *descr, voi
 #endif
 
 
+// Release the handles and free the objects the script passed by value, once the
+// application function has returned (or was skipped for a dead handle).
+static void CleanSystemFunctionArgs(asCContext *context, asCScriptFunction *descr)
+{
+	asCScriptEngine            *engine   = context->m_engine;
+	asSSystemFunctionInterface *sysFunc  = descr->sysFuncIntf;
+	int                         callConv = sysFunc->callConv;
+
+	const asUINT cleanCount = sysFunc->cleanArgs.GetLength();
+	if( cleanCount )
+	{
+		asDWORD *args = context->m_regs.stackPointer;
+
+		// Skip the hidden argument for the return pointer
+		// TODO: runtime optimize: This check and increment should have been done in PrepareSystemFunction
+		if( descr->DoesReturnOnStack() )
+			args += AS_PTR_SIZE;
+
+		// Skip the object pointer on the stack
+		// TODO: runtime optimize: This check and increment should have been done in PrepareSystemFunction
+		if( callConv >= ICC_THISCALL && sysFunc->auxiliary == 0 )
+			args += AS_PTR_SIZE;
+
+		asSSystemFunctionInterface::SClean *clean = sysFunc->cleanArgs.AddressOf();
+		for( asUINT n = 0; n < cleanCount; n++, clean++ )
+		{
+			void **addr = (void**)&args[clean->off];
+			if( clean->op == 0 )
+			{
+				if( *addr != 0 )
+				{
+					void *refObj = engine->ResolveForRefCount(*addr, clean->ot);
+					if (refObj)
+						engine->CallObjectMethod(refObj, clean->ot->beh.release);
+					*addr = 0;
+				}
+			}
+			else
+			{
+				asASSERT( clean->op == 1 || clean->op == 2 );
+				asASSERT( *addr );
+
+				if( clean->op == 2 )
+					engine->CallObjectMethod(*addr, clean->ot->beh.destruct);
+
+				engine->CallFree(*addr);
+			}
+		}
+	}
+}
+
 int CallSystemFunction(int id, asCContext *context)
 {
 	asCScriptEngine            *engine  = context->m_engine;
@@ -651,6 +785,9 @@ int CallSystemFunction(int id, asCContext *context)
 	void *obj = 0;
 	void *secondObj = 0;
 
+	// The object pointer as the script pushed it, before any offset is applied
+	void *scriptThis = 0;
+
 #ifdef AS_NO_THISCALL_FUNCTOR_METHOD
 	if( callConv >= ICC_THISCALL )
 	{
@@ -671,6 +808,7 @@ int CallSystemFunction(int id, asCContext *context)
 				context->SetInternalException(TXT_NULL_POINTER_ACCESS);
 				return 0;
 			}
+			scriptThis = obj;
 
 			// Skip the object pointer
 			args += AS_PTR_SIZE;
@@ -740,6 +878,7 @@ int CallSystemFunction(int id, asCContext *context)
 				context->SetInternalException(TXT_NULL_POINTER_ACCESS);
 				return 0;
 			}
+			scriptThis = tempPtr;
 
 			// For composition we need to add the offset and/or dereference the pointer
 			tempPtr = (void*)((char*)tempPtr + sysFunc->compositeOffset);
@@ -785,6 +924,12 @@ int CallSystemFunction(int id, asCContext *context)
 	{
 		// Set the object type of the reference held in the register
 		context->m_regs.objectType = descr->returnType.GetTypeInfo();
+	}
+
+	if( IsDeadHandleCall(sysFunc, scriptThis) && AnswerDeadHandleCall(context, descr, args, retPointer) )
+	{
+		CleanSystemFunctionArgs(context, descr);
+		return popSize;
 	}
 
 	context->m_callingSystemFunction = descr;
@@ -948,48 +1093,7 @@ int CallSystemFunction(int id, asCContext *context)
 			context->m_regs.valueRegister = retQW[0];
 	}
 
-	// Clean up arguments
-	const asUINT cleanCount = sysFunc->cleanArgs.GetLength();
-	if( cleanCount )
-	{
-		args = context->m_regs.stackPointer;
-
-		// Skip the hidden argument for the return pointer
-		// TODO: runtime optimize: This check and increment should have been done in PrepareSystemFunction
-		if( descr->DoesReturnOnStack() )
-			args += AS_PTR_SIZE;
-
-		// Skip the object pointer on the stack
-		// TODO: runtime optimize: This check and increment should have been done in PrepareSystemFunction
-		if( callConv >= ICC_THISCALL && sysFunc->auxiliary == 0 )
-			args += AS_PTR_SIZE;
-
-		asSSystemFunctionInterface::SClean *clean = sysFunc->cleanArgs.AddressOf();
-		for( asUINT n = 0; n < cleanCount; n++, clean++ )
-		{
-			void **addr = (void**)&args[clean->off];
-			if( clean->op == 0 )
-			{
-				if( *addr != 0 )
-				{
-					void *refObj = engine->ResolveForRefCount(*addr, clean->ot);
-					if (refObj)
-						engine->CallObjectMethod(refObj, clean->ot->beh.release);
-					*addr = 0;
-				}
-			}
-			else
-			{
-				asASSERT( clean->op == 1 || clean->op == 2 );
-				asASSERT( *addr );
-
-				if( clean->op == 2 )
-					engine->CallObjectMethod(*addr, clean->ot->beh.destruct);
-
-				engine->CallFree(*addr);
-			}
-		}
-	}
+	CleanSystemFunctionArgs(context, descr);
 
 	return popSize;
 }

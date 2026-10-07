@@ -4853,30 +4853,35 @@ static const void *const dispatch_table[256] = {
 				l_sp += AS_PTR_SIZE;
 
 				// Pop the int arg from the stack
+				asDWORD *intArg = l_sp;
 				int arg = *(int*)l_sp;
 				l_sp++;
 
-				// Call the method
-				m_callingSystemFunction = m_engine->scriptFunctions[i];
-				void *ptr = 0;
+				asCScriptFunction *func = m_engine->scriptFunctions[i];
+				if( !(IsDeadHandleCall(func->sysFuncIntf, obj) && AnswerDeadHandleCall(this, func, intArg, 0)) )
+				{
+					// Call the method
+					m_callingSystemFunction = func;
+					void *ptr = 0;
 #ifdef AS_NO_EXCEPTIONS
-				ptr = m_engine->CallObjectMethodRetPtr(obj, arg, m_callingSystemFunction);
-#else
-				// This try/catch block is to catch potential exception that may
-				// be thrown by the registered function.
-				try
-				{
 					ptr = m_engine->CallObjectMethodRetPtr(obj, arg, m_callingSystemFunction);
-				}
-				catch (...)
-				{
-					// Convert the exception to a script exception so the VM can
-					// properly report the error to the application and then clean up
-					HandleAppException();
-				}
+#else
+					// This try/catch block is to catch potential exception that may
+					// be thrown by the registered function.
+					try
+					{
+						ptr = m_engine->CallObjectMethodRetPtr(obj, arg, m_callingSystemFunction);
+					}
+					catch (...)
+					{
+						// Convert the exception to a script exception so the VM can
+						// properly report the error to the application and then clean up
+						HandleAppException();
+					}
 #endif
-				m_callingSystemFunction = 0;
-				*(asPWORD*)&m_regs.valueRegister = (asPWORD)ptr;
+					m_callingSystemFunction = 0;
+					*(asPWORD*)&m_regs.valueRegister = (asPWORD)ptr;
+				}
 			}
 
 			// Update the program position after the call so that line number is correct
@@ -5964,9 +5969,11 @@ int asCContext::CallGeneric(asCScriptFunction *descr)
 		args += AS_PTR_SIZE;
 	}
 
+	void *retPointer = 0;
 	if( descr->DoesReturnOnStack() )
 	{
 		// Skip the address where the return value will be stored
+		retPointer = (void*)*(asPWORD*)(args);
 		args += AS_PTR_SIZE;
 		popSize += AS_PTR_SIZE;
 	}
@@ -5990,44 +5997,48 @@ int asCContext::CallGeneric(asCScriptFunction *descr)
 		popSize += sizeOfVariadicArg * (varArgCount - descr->parameterTypes.GetLength() + 1);
 	}
 
-	// TODO: variadic: Put them in different branch. Do we really need a separate object for variadics?
-	asCGeneric genOrdinary(m_engine, descr, currentObject, args);
-	asCGenericVariadic genVar(m_engine, descr, currentObject, args, varArgCount);
-
-	asCGeneric& gen = descr->IsVariadic() ? genVar : genOrdinary;
-
-	m_callingSystemFunction = descr;
-#ifdef AS_NO_EXCEPTIONS
-	func(&gen);
-#else
-	// This try/catch block is to catch potential exception that may
-	// be thrown by the registered function.
-	try
-	{
-		func(&gen);
-	}
-	catch (...)
-	{
-		// Convert the exception to a script exception so the VM can
-		// properly report the error to the application and then clean up
-		HandleAppException();
-	}
-#endif
-	m_callingSystemFunction = 0;
-
-	m_regs.valueRegister = gen.returnVal;
-	m_regs.objectRegister = gen.objectRegister;
 	m_regs.objectType = descr->returnType.GetTypeInfo();
-
-	// Increase the returned handle if the function has been declared with autohandles
-	// and the engine is not set to use the old mode for the generic calling convention
-	if (sysFunc->returnAutoHandle && m_engine->ep.genericCallMode == 1 && m_regs.objectRegister)
+	if( !(IsDeadHandleCall(sysFunc, currentObject) && AnswerDeadHandleCall(this, descr, args, retPointer)) )
 	{
-		asASSERT(!(descr->returnType.GetTypeInfo()->flags & asOBJ_NOCOUNT));
-		asCObjectType *retObjType = CastToObjectType(descr->returnType.GetTypeInfo());
-		void *refObj = m_engine->ResolveForRefCount(m_regs.objectRegister, retObjType);
-		if (refObj)
-			m_engine->CallObjectMethod(refObj, retObjType->beh.addref);
+		// TODO: variadic: Put them in different branch. Do we really need a separate object for variadics?
+		asCGeneric genOrdinary(m_engine, descr, currentObject, args);
+		asCGenericVariadic genVar(m_engine, descr, currentObject, args, varArgCount);
+
+		asCGeneric& gen = descr->IsVariadic() ? genVar : genOrdinary;
+
+		m_callingSystemFunction = descr;
+#ifdef AS_NO_EXCEPTIONS
+		func(&gen);
+#else
+		// This try/catch block is to catch potential exception that may
+		// be thrown by the registered function.
+		try
+		{
+			func(&gen);
+		}
+		catch (...)
+		{
+			// Convert the exception to a script exception so the VM can
+			// properly report the error to the application and then clean up
+			HandleAppException();
+		}
+#endif
+		m_callingSystemFunction = 0;
+
+		m_regs.valueRegister = gen.returnVal;
+		m_regs.objectRegister = gen.objectRegister;
+		m_regs.objectType = descr->returnType.GetTypeInfo();
+
+		// Increase the returned handle if the function has been declared with autohandles
+		// and the engine is not set to use the old mode for the generic calling convention
+		if (sysFunc->returnAutoHandle && m_engine->ep.genericCallMode == 1 && m_regs.objectRegister)
+		{
+			asASSERT(!(descr->returnType.GetTypeInfo()->flags & asOBJ_NOCOUNT));
+			asCObjectType *retObjType = CastToObjectType(descr->returnType.GetTypeInfo());
+			void *refObj = m_engine->ResolveForRefCount(m_regs.objectRegister, retObjType);
+			if (refObj)
+				m_engine->CallObjectMethod(refObj, retObjType->beh.addref);
+		}
 	}
 
 	// Clean up arguments
