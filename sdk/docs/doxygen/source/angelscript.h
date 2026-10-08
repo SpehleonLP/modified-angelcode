@@ -663,11 +663,11 @@ enum asEMemoryAccess : asBYTE
 	asMA_THIS         = 2,
 	//! \brief Objects reached from the object through members that are not handles.
 	asMA_OWNED        = 3,
-	//! \brief The global variables of the function's module.
+	//! \brief The global variables of the function's module, and objects of its script classes that are not shared, wherever they are reached from.
 	asMA_MODULE       = 4,
-	//! \brief The registered global properties and the other state of the engine.
+	//! \brief The registered global properties and the other state of the engine, and objects of shared script classes or of other modules' classes.
 	asMA_ENGINE       = 5,
-	//! \brief Anything, including everything reached through a handle.
+	//! \brief Anything, including objects of registered types reached through a handle, function handles and delegates, and anything of unknown type.
 	asMA_PROGRAM      = 6,
 	//! \brief An application function that has not been declared. Treat as \ref asMA_PROGRAM.
 	asMA_UNSET        = 7

@@ -20,13 +20,16 @@ The scopes form a ladder. Each scope contains every scope below it.
  It can only be declared for application functions, and only as a read scope. It is never inferred.</td></tr>
 <tr><td valign=top>\ref asMA_THIS</td><td>The object that the method is called on, and its value members.</td></tr>
 <tr><td valign=top>\ref asMA_OWNED</td><td>Objects reached from the object through members of reference types that are not handles, to any depth.</td></tr>
-<tr><td valign=top>\ref asMA_MODULE</td><td>The global variables of the function's own module.</td></tr>
-<tr><td valign=top>\ref asMA_ENGINE</td><td>The registered global properties and the other state of the engine, including what shared entities share between modules.</td></tr>
-<tr><td valign=top>\ref asMA_PROGRAM</td><td>Anything else, including everything reached through a handle.</td></tr>
+<tr><td valign=top>\ref asMA_MODULE</td><td>The global variables of the function's own module, and the objects of the module's own script classes 
+ that are not shared, wherever they are reached from. See \ref doc_adv_memory_access_home.</td></tr>
+<tr><td valign=top>\ref asMA_ENGINE</td><td>The registered global properties and the other state of the engine, including what shared entities share between modules, 
+ and the objects of shared script classes and of the script classes of other modules.</td></tr>
+<tr><td valign=top>\ref asMA_PROGRAM</td><td>Anything else, including the objects of registered types reached through a handle or a reference, 
+ function handles and delegates, <tt>?</tt> arguments, anything of a type the analysis does not know, and an object 
+ whose type differs between the paths of the function that reach it.</td></tr>
 <tr><td valign=top>\ref asMA_UNSET</td><td>An application function that has not been declared. It reads as \ref asMA_PROGRAM.</td></tr>
 </table>
 
-Objects reached through a handle are \ref asMA_PROGRAM, because the engine cannot know where the object came from. 
 Because the scopes form a ladder, a function that reads \ref asMA_MODULE may also read everything in \ref asMA_THIS 
 and \ref asMA_OWNED, and every scope above \ref asMA_WORLD_STABLE contains \ref asMA_WORLD_STABLE. 
 A function declared as <tt>{asMA_NONE, x}</tt> and one declared as <tt>{asMA_WORLD_STABLE, x}</tt> therefore 
@@ -34,6 +37,31 @@ give the same answer to both questions below.
 
 The analysis only ever widens. When it cannot tell what a function does, e.g. for an unknown bytecode instruction, 
 the function is given \ref asMA_PROGRAM for both scopes.
+
+\subsection doc_adv_memory_access_home Objects reached through handles
+
+The engine cannot know where an object reached through a handle came from. Code can only touch a member of a script object 
+by naming it, though, so such an access is counted at the home of the class that declares what is named:
+
+ - A field access is counted at the home of the class that declares the field. For an inherited field that is the base class 
+   that declares it.
+ - A method call is counted as a call on an object at the home of the class that declares the method, for each method the call 
+   may run.
+ - Any other use of the object as a whole, e.g. passing it to an application function, is counted at the home of its type. A 
+   script class counts as shared when any class or interface it derives from or implements is shared, and so does a class or 
+   interface of the module when any class of the module that derives from it or implements it does.
+
+The home of a class, seen from a function of a module, is \ref asMA_MODULE for a script class or interface of that module that 
+is not shared, \ref asMA_ENGINE for a shared script class or interface or one of another module, and \ref asMA_PROGRAM for 
+a registered type, a function definition, or a type that is not known.
+
+For example, with <tt>class In { int v; } In@ gh;</tt> a function that does <tt>gh.v = 1;</tt> writes \ref asMA_MODULE. 
+If <tt>In</tt> were shared it would write \ref asMA_ENGINE, and if <tt>In</tt> were a registered type it would write 
+\ref asMA_PROGRAM.
+
+This is sound because another module can only reach an object of this module's classes through a shared type, an 
+interface, a <tt>?</tt> or the host, all of which are \ref asMA_ENGINE or wider in that module, and \ref asMA_ENGINE overlaps 
+every module of the engine.
 
 \section doc_adv_memory_access_declare Declaring the scopes of application functions
 
@@ -121,14 +149,19 @@ The host must discard stored results when it changes world-stable state. It may 
 These rules apply to the parameters of script functions. The arguments of application functions are counted by the 
 caller, see \ref doc_adv_memory_access_args.
 
-A parameter of a reference type that is passed by value or as a non-const <tt>&in</tt> counts as \ref asMA_PROGRAM, 
+A parameter of a reference type that is passed by value or as a non-const <tt>&in</tt> is an object held anywhere, 
 because an argument that is already a temporary is passed without being copied, and a temporary handle's object may be shared. 
-A <tt>const &in</tt> parameter of an object type also counts as \ref asMA_PROGRAM, as the compiler passes it without copying. 
-So do handles, <tt>&inout</tt> references and <tt>?</tt> parameters. 
+A <tt>const &in</tt> parameter of an object type is also an object held anywhere, as the compiler passes it without copying. 
+So are handles and <tt>&inout</tt> references. Accesses to such an object are counted at the home of its type, see 
+\ref doc_adv_memory_access_home. The handle variable behind a reference to a handle, other than <tt>&out</tt>, and 
+<tt>?</tt> parameters count as \ref asMA_PROGRAM. 
 Value types passed by value or as a non-const <tt>&in</tt>, primitives passed as <tt>&in</tt>, and any type passed as 
 <tt>&out</tt>, count as \ref asMA_NONE, as the function only sees its own copy or a temporary of the caller.
 
 A function that returns a reference is treated as reading the memory that the reference points into.
+
+A handle returned by a function, other than a factory, is an object held anywhere, and is counted at the home of its type. 
+A factory, list factory or copy factory returns a fresh object, which the caller treats as its own.
 
 \section doc_adv_memory_access_contract What the host must guarantee
 

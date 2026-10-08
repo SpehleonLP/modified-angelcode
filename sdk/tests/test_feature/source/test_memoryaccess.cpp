@@ -214,9 +214,9 @@ static bool TestFrameLocal()
 	return fail;
 }
 
-// Members are reached through `this`, an owned member object is Owned, anything
-// reached through a handle is Program, and each parameter kind starts from its
-// own scope
+// Members are reached through `this`, an owned member object is Owned, an
+// object reached through a handle is at the home of the class that declares
+// what is named, and each parameter kind starts from its own scope
 static bool TestThisAndFields()
 {
 	bool fail = false;
@@ -270,22 +270,23 @@ static bool TestThisAndFields()
 			// Loading the member pointer reads `this`; the member object is Owned
 			EXPECT_ACCESS(c->GetMethodByDecl("void setInner()"), asMA_THIS, asMA_OWNED);
 			EXPECT_ACCESS(c->GetMethodByDecl("int getInner()"), asMA_OWNED, asMA_NONE);
-			// Anything reached through a handle is Program
-			EXPECT_ACCESS(c->GetMethodByDecl("void setH()"), asMA_THIS, asMA_PROGRAM);
+			// Through a handle, a field of a non-shared class of this module is Module
+			EXPECT_ACCESS(c->GetMethodByDecl("void setH()"), asMA_THIS, asMA_MODULE);
 			// The two paths select different frame slots, so the write may have
 			// changed any slot but `this`, which the compiler never assigns
 			EXPECT_ACCESS(c->GetMethodByDecl("void tern(bool)"), asMA_NONE, asMA_THIS);
 			// Parameters off offset 0 reach their fields through LoadRObjR
-			EXPECT_ACCESS(c->GetMethodByDecl("int readRef(int, const In&in)"), asMA_PROGRAM, asMA_NONE);
+			EXPECT_ACCESS(c->GetMethodByDecl("int readRef(int, const In&in)"), asMA_MODULE, asMA_NONE);
 			EXPECT_ACCESS(c->GetMethodByDecl("void writeOut(int, In&out)"), asMA_NONE, asMA_NONE);
 		}
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void outParam(int&out)"), asMA_NONE, asMA_NONE);
-		EXPECT_ACCESS(mod->GetFunctionByDecl("void inoutParam(In&inout)"), asMA_NONE, asMA_PROGRAM);
+		// An &inout object may be anywhere: its field is at its class's home
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void inoutParam(In&inout)"), asMA_NONE, asMA_MODULE);
 		// The compiler passes a const &in object without copying it
-		EXPECT_ACCESS(mod->GetFunctionByDecl("int constIn(const In&in)"), asMA_PROGRAM, asMA_NONE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int constIn(const In&in)"), asMA_MODULE, asMA_NONE);
 		// A reference type that is already a temporary is passed without a copy,
-		// and the temporary may be a handle to a shared object
-		EXPECT_ACCESS(mod->GetFunctionByDecl("int byValueIn(In&in)"), asMA_PROGRAM, asMA_NONE);
+		// and the temporary may be a handle's object
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int byValueIn(In&in)"), asMA_MODULE, asMA_NONE);
 		// A non-const &in value type is the caller's copy or its own temporary
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int vecIn(vec&in)"), asMA_NONE, asMA_NONE);
 	}
@@ -535,8 +536,8 @@ static bool TestGlobals()
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void incG()"), asMA_MODULE, asMA_MODULE);
 		// The global's object is owned by the global: still Module
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeGi()"), asMA_MODULE, asMA_MODULE);
-		// Through the global's handle: anything
-		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeGh()"), asMA_MODULE, asMA_PROGRAM);
+		// Through the global's handle: the field's class is declared in this module
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeGh()"), asMA_MODULE, asMA_MODULE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeEg()"), asMA_NONE, asMA_ENGINE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int readEg()"), asMA_ENGINE, asMA_NONE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void copyGtoG()"), asMA_ENGINE, asMA_MODULE);
@@ -698,7 +699,8 @@ static bool TestCalls()
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void localBuf()"), asMA_WORLD_STABLE, asMA_NONE);
 		// Thiscall1 on a member object: its This effects land on Owned
 		EXPECT_ACCESS(MethodOf(mod, "HasBuf", "void set()"), asMA_OWNED, asMA_OWNED);
-		// A handle returned by a non-factory may be held anywhere
+		// A handle returned by a non-factory may be held anywhere, and Buf is a
+		// registered type, whose home is Program
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void sharedB()"), asMA_PROGRAM, asMA_PROGRAM);
 		// pick writes the &out temporary whose address it gets (PSF), so the
 		// temporary no longer holds the null it held on entry, and h may then be
@@ -706,8 +708,8 @@ static bool TestCalls()
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void slotClear()"), asMA_PROGRAM, asMA_PROGRAM);
 		EXPECT_ACCESS(MethodOf(mod, "M", "void bump()"), asMA_MODULE, asMA_MODULE);
 		EXPECT_ACCESS(MethodOf(mod, "M", "void viaThis()"), asMA_MODULE, asMA_MODULE);
-		// A Module method called through a handle touches a Program object
-		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaHandle(M@)"), asMA_PROGRAM, asMA_PROGRAM);
+		// A Module method called through a handle: M is declared in this module
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaHandle(M@)"), asMA_MODULE, asMA_MODULE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void callCb(CB@)"), asMA_PROGRAM, asMA_PROGRAM);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void a(int)"), asMA_NONE, asMA_MODULE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void b(int)"), asMA_NONE, asMA_MODULE);
@@ -1022,7 +1024,8 @@ static bool TestNativeArguments()
 	{
 		// The module global's object is written through the reference
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaInout()"), asMA_MODULE, asMA_MODULE);
-		// The object the global handle refers to may be anywhere
+		// The object the global handle refers to may be anywhere, and Obj is a
+		// registered type, whose home is Program
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaInoutH()"), asMA_PROGRAM, asMA_PROGRAM);
 		// A const parameter is only read
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int viaConstIn()"), asMA_MODULE, asMA_NONE);
@@ -1062,6 +1065,104 @@ static bool TestNativeHandleReference()
 		// PGA passes the global handle's own address: the handle variable is
 		// written at Module, and the object it refers to is read at Program
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaReseat()"), asMA_PROGRAM, asMA_MODULE);
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+// Declares the array add-on for a test: its methods touch only the array, and
+// its factories and behaviours touch nothing
+static void DeclareArray(asIScriptEngine *engine)
+{
+	asITypeInfo *arr = engine->GetTypeInfoByName("array");
+	if( arr == 0 )
+	{
+		return;
+	}
+	for( asUINT n = 0; n < arr->GetFactoryCount(); n++ )
+	{
+		arr->GetFactoryByIndex(n)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	}
+	for( asUINT n = 0; n < arr->GetBehaviourCount(); n++ )
+	{
+		asEBehaviours beh;
+		asIScriptFunction *f = arr->GetBehaviourByIndex(n, &beh);
+		if( f )
+		{
+			f->SetMemoryAccess(asMA_NONE, asMA_NONE);
+		}
+	}
+	for( asUINT n = 0; n < arr->GetMethodCount(); n++ )
+	{
+		arr->GetMethodByIndex(n)->SetMemoryAccess(asMA_THIS, asMA_THIS);
+	}
+}
+
+// An object of a known script class reached from anywhere is charged at the
+// home of the class that declares what is named: Module for a non-shared class
+// of the module, Engine for a shared one, Program for a registered type
+static bool TestTypeHome()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	RegisterObj(engine);
+	RegisterScriptArray(engine, false);
+	DeclareArray(engine);
+	asIScriptModule *mod = BuildModule(engine, "typehome",
+		"interface I { int &r(); } \n"
+		"class CI : SB, I { int &r() { return b; } } \n"
+		"I@ gi; \n"
+		"void viaRef() { gi.r() = 1; } \n"
+		"shared class SB { int b; } \n"
+		"class In : SB { int v; } \n"
+		"In@ gh; \n"
+		"void writeInherited() { gh.b = 1; } \n"
+		"void writeOwn() { gh.v = 1; } \n"
+		"shared class SH { int s; } \n"
+		"SH@ gs; \n"
+		"void writeShared() { gs.s = 1; } \n"
+		"Obj@ go; \n"
+		"void writeObj() { go.v = 1; } \n"
+		"class P { int p; void bump() { p++; } } \n"
+		"P@ gp; \n"
+		"void callViaHandle() { gp.bump(); } \n"
+		"shared class SP { int p; void bump() { p++; } } \n"
+		"SP@ gsp; \n"
+		"void callSharedViaHandle() { gsp.bump(); } \n"
+		"funcdef void FD(); \n"
+		"FD@ gf; \n"
+		"void callFuncdef() { gf(); } \n"
+		"class E2 { int v; } \n"
+		"void writeElement() { array<E2@> arr(1); arr[0].v = 1; } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		// gh.b is declared in the shared base, which another module can name
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeInherited()"), asMA_MODULE, asMA_ENGINE);
+		// gh.v is declared in In, which only this module can name
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeOwn()"), asMA_MODULE, asMA_MODULE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeShared()"), asMA_MODULE, asMA_ENGINE);
+		// A registered type's home is Program
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeObj()"), asMA_MODULE, asMA_PROGRAM);
+		EXPECT_ACCESS(MethodOf(mod, "P", "void bump()"), asMA_THIS, asMA_THIS);
+		// bump's This lands on the object at P's home
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void callViaHandle()"), asMA_MODULE, asMA_MODULE);
+		// A virtual call on a shared class is Program whatever the object's home:
+		// a module built later may add an override
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void callSharedViaHandle()"), asMA_PROGRAM, asMA_PROGRAM);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void callFuncdef()"), asMA_PROGRAM, asMA_PROGRAM);
+		// opIndex's This lands on the local array; the element handle it returns a
+		// reference to refers to an E2 held anywhere, at E2's home
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeElement()"), asMA_WORLD_STABLE, asMA_MODULE);
+		// The returned reference may point anywhere in the object. I is a
+		// non-shared interface of this module, but CI implements it with a shared
+		// base, so the object as a whole is at Engine
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaRef()"), asMA_MODULE, asMA_ENGINE);
+		EXPECT_NO_WORLD_STABLE_WRITE(mod);
 	}
 	engine->ShutDownAndRelease();
 	return fail;
@@ -1317,6 +1418,10 @@ bool Test()
 		fail = true;
 	}
 	if( TestNativeHandleReference() )
+	{
+		fail = true;
+	}
+	if( TestTypeHome() )
 	{
 		fail = true;
 	}

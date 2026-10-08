@@ -50,6 +50,8 @@ BEGIN_AS_NAMESPACE
 
 class asCScriptEngine;
 class asCModule;
+class asCDataType;
+class asCObjectType;
 class asCScriptFunction;
 class asCTypeInfo;
 
@@ -67,16 +69,25 @@ const short asNO_SLOT = 0x7FFF;
 // The address of some frame slot, but paths disagree on which one
 const short asANY_SLOT = 0x7FFE;
 
+// An origin that is not a scope: an object of a known script class, held
+// anywhere. Only code that names a member can touch it, so each access is
+// charged at the home of the class that declares what it names. The class
+// travels beside the origin in the abstract value.
+const asBYTE asORIGIN_TYPE_HOME = 0x80;
+
 // The abstract value of one dword cell: a frame slot, a stack cell or a
-// register. Origins are asEMemoryAccess values. asMA_THIS as an origin means
-// "the object this function was called on", which is what the call rule rebases.
+// register. Origins are asEMemoryAccess values or asORIGIN_TYPE_HOME. asMA_THIS
+// as an origin means "the object this function was called on", which is what
+// the call rule rebases.
 struct asSAbstractValue
 {
-	asBYTE origin;  // scope of memory reached through this value
-	asBYTE loads;   // origin of a pointer read through this value (RDSPtr)
-	asBYTE hold;    // asEReferenceHold
-	short  slot;    // frame offset this value is the address of, asNO_SLOT, or asANY_SLOT
-	short  varRef;  // frame offset an asBC_VAR placeholder stands for, or asNO_SLOT
+	asBYTE         origin;     // scope of memory reached through this value
+	asBYTE         loads;      // origin of a pointer read through this value (RDSPtr)
+	asBYTE         hold;       // asEReferenceHold
+	short          slot;       // frame offset this value is the address of, asNO_SLOT, or asANY_SLOT
+	short          varRef;     // frame offset an asBC_VAR placeholder stands for, or asNO_SLOT
+	asCObjectType *originType; // the script class of an asORIGIN_TYPE_HOME origin, else 0
+	asCObjectType *loadsType;  // the same for loads
 };
 
 // The in-progress results of one module pass, indexed like m_scriptFunctions
@@ -158,19 +169,51 @@ protected:
 	bool              DoCall(State &s, asCScriptFunction *callee, asUINT kind);
 	// The type behaviours that construct: they return an object no one else holds
 	bool              IsFactory(asCScriptFunction *callee) const;
+	// The functions a call may run; false when they are not all known
+	bool              CallTargets(asCScriptFunction *callee, asUINT kind, asCArray<asCScriptFunction*> &targets);
 	void              CalleeAccess(asCScriptFunction *callee, asUINT kind, asEMemoryAccess &read, asEMemoryAccess &write, bool &drops);
-	asBYTE            FieldLoads(asBYTE baseOrigin, int typeId, int offset);
+	// The origin, and its class, of a pointer read from the field at `offset`
+	// of a `typeId` object reached through `base`
+	void              FieldLoads(const asSAbstractValue &base, int typeId, int offset, asBYTE &loads, asCObjectType *&loadsType);
 	// The scope of the storage a global's address operand names
 	asBYTE            GlobalOrigin(void *address);
-	// The origin of the pointer stored in that global
-	asBYTE            GlobalLoads(void *address);
+	// The address of a global, carrying the origin of the pointer stored in it
+	asSAbstractValue  GlobalAddress(void *address);
 	// The pointer occupying AS_PTR_SIZE cells k dwords from the top
 	bool              PtrAt(State &s, asUINT dwordsFromTop, asSAbstractValue &v);
 	// The address `offset` bytes into what `base` points to
 	asSAbstractValue  FieldOf(const asSAbstractValue &base, asBYTE loads, int offset);
+	// The same for a field of a `typeId` object, named in the bytecode
+	asSAbstractValue  FieldAt(const asSAbstractValue &base, int typeId, int offset);
+	// What a parameter slot holds on entry
+	asSAbstractValue  ParamValue(const asCDataType &dt, asETypeModifiers inOut);
+
+	// The script class an object of static type `type` belongs to, or 0 for a
+	// registered type, a funcdef or anything unknown
+	asCObjectType    *ScriptClass(asCTypeInfo *type) const;
+	// A pointer to an object of static type `type`, held anywhere
+	asSAbstractValue  TypedPointer(asCTypeInfo *type, asBYTE hold);
+	// Makes loads of `v` a pointer to an object of static type `type`, held anywhere
+	void              SetTypedLoads(asSAbstractValue &v, asCTypeInfo *type);
+	// The home of a class, seen from this module: Module, Engine or Program
+	asBYTE            HomeOf(asCObjectType *cls) const;
+	// The widest home of a class, its base classes and their interfaces
+	asBYTE            ChainHomeOf(asCObjectType *cls) const;
+	// The home of an object of static type `type` as a whole: the widest home
+	// in its base chain, its interfaces, and those of every class derived from it
+	asBYTE            WholeHomeOf(asCObjectType *type) const;
+	// The home of the class that declares the field at `offset` of a `typeId` object
+	asBYTE            FieldHome(int typeId, int offset) const;
+	// The home of the class that declares a method called on an object of static type `type`
+	asBYTE            MethodHome(asCScriptFunction *method, asCObjectType *type) const;
+	// The scope of an access to the whole of what `origin` points to
+	asBYTE            Resolve(asBYTE origin, asCObjectType *type) const;
 
 	void              RecordRead(asBYTE origin);
 	void              RecordWrite(asBYTE origin);
+	// An access to the whole of what `v` points to
+	void              RecordReadOf(const asSAbstractValue &v);
+	void              RecordWriteOf(const asSAbstractValue &v);
 
 	// Releasing `v`, a reference to an object of static type `type`
 	void              ReleaseValue(const asSAbstractValue &v, asCTypeInfo *type);

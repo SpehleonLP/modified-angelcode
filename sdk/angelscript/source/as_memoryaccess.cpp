@@ -63,6 +63,8 @@ static asSAbstractValue Value(asBYTE origin, asBYTE loads, asBYTE hold)
 	v.hold   = hold;
 	v.slot   = asNO_SLOT;
 	v.varRef = asNO_SLOT;
+	v.originType = 0;
+	v.loadsType  = 0;
 	return v;
 }
 
@@ -77,11 +79,56 @@ static asSAbstractValue Null()
 	return Value(asMA_NONE, asMA_PROGRAM, asRH_NONE);
 }
 
+// The address of a frame variable holding `held`
+static asSAbstractValue AddressOf(const asSAbstractValue &held)
+{
+	asSAbstractValue v = Value(asMA_NONE, held.origin, asRH_NONE);
+	v.loadsType = held.originType;
+	return v;
+}
+
+// The pointer read through `addr`, when the scanner does not know the location
+static asSAbstractValue PointeeOf(const asSAbstractValue &addr)
+{
+	asSAbstractValue v = Value(addr.loads, asMA_PROGRAM, asRH_NONE);
+	v.originType = addr.loadsType;
+	return v;
+}
+
+// The least origin covering both. A type-home origin sits above None and below
+// Program, and is unordered against every other origin: two different classes,
+// or a class and a scope above None, join to the first scope covering both.
+static void JoinOrigin(asBYTE a, asCObjectType *aType, asBYTE b, asCObjectType *bType, asBYTE &origin, asCObjectType *&type)
+{
+	if( a == b && aType == bType )
+	{
+		origin = a;
+		type = aType;
+		return;
+	}
+	if( a == asMA_NONE )
+	{
+		origin = b;
+		type = bType;
+		return;
+	}
+	if( b == asMA_NONE )
+	{
+		origin = a;
+		type = aType;
+		return;
+	}
+	asBYTE ca = a == asORIGIN_TYPE_HOME ? asBYTE(asMA_PROGRAM) : a;
+	asBYTE cb = b == asORIGIN_TYPE_HOME ? asBYTE(asMA_PROGRAM) : b;
+	origin = ca > cb ? ca : cb;
+	type = 0;
+}
+
 static asSAbstractValue JoinValue(const asSAbstractValue &a, const asSAbstractValue &b)
 {
 	asSAbstractValue v;
-	v.origin = a.origin > b.origin ? a.origin : b.origin;
-	v.loads  = a.loads > b.loads ? a.loads : b.loads;
+	JoinOrigin(a.origin, a.originType, b.origin, b.originType, v.origin, v.originType);
+	JoinOrigin(a.loads, a.loadsType, b.loads, b.loadsType, v.loads, v.loadsType);
 	v.hold   = a.hold > b.hold ? a.hold : b.hold;
 	// Paths that disagree on which frame slot a value addresses may still address one
 	v.slot   = a.slot == b.slot ? a.slot : asANY_SLOT;
@@ -91,7 +138,8 @@ static asSAbstractValue JoinValue(const asSAbstractValue &a, const asSAbstractVa
 
 static bool SameValue(const asSAbstractValue &a, const asSAbstractValue &b)
 {
-	return a.origin == b.origin && a.loads == b.loads && a.hold == b.hold && a.slot == b.slot && a.varRef == b.varRef;
+	return a.origin == b.origin && a.loads == b.loads && a.hold == b.hold && a.slot == b.slot && a.varRef == b.varRef &&
+	       a.originType == b.originType && a.loadsType == b.loadsType;
 }
 
 // Not monotone in s on its own: WorldStable maps to itself, while This on an
@@ -364,8 +412,8 @@ void asCMemoryAccessScanner::ReleaseValue(const asSAbstractValue &v, asCTypeInfo
 
 bool asCMemoryAccessScanner::StoreHandle(State &s, const asSAbstractValue &dest, const asSAbstractValue &value, asCTypeInfo *type)
 {
-	RecordRead(dest.origin);
-	RecordWrite(dest.origin);
+	RecordReadOf(dest);
+	RecordWriteOf(dest);
 	// REFCPY skips the AddRef and Release of these types (asCContext, asBC_REFCPY)
 	bool counted = type == 0 || !(type->flags & (asOBJ_NOCOUNT | asOBJ_VALUE));
 	if( dest.slot == asANY_SLOT )
@@ -391,7 +439,11 @@ bool asCMemoryAccessScanner::StoreHandle(State &s, const asSAbstractValue &dest,
 			ReleaseValue(*slot, type);
 		}
 		// A copy that is not counted holds whatever the variable is later freed for
-		return SetVarCells(s, dest.slot, Value(value.origin, value.loads, counted ? asRH_COPIED : asRH_OWNED), AS_PTR_SIZE);
+		asSAbstractValue stored = value;
+		stored.hold   = counted ? asRH_COPIED : asRH_OWNED;
+		stored.slot   = asNO_SLOT;
+		stored.varRef = asNO_SLOT;
+		return SetVarCells(s, dest.slot, stored, AS_PTR_SIZE);
 	}
 	// Overwriting a handle stored outside the frame drops whatever it held
 	if( counted )
@@ -428,16 +480,169 @@ bool asCMemoryAccessScanner::CleanNativeArgs(State &s, asCScriptFunction *callee
 	return true;
 }
 
+// A type-home origin reaching here unresolved would be no scope at all
 void asCMemoryAccessScanner::RecordRead(asBYTE origin)
 {
-	read = Join(read, asEMemoryAccess(origin));
+	asEMemoryAccess o = origin > asMA_UNSET ? asMA_PROGRAM : asEMemoryAccess(origin);
+	read = Join(read, o);
 }
 
 void asCMemoryAccessScanner::RecordWrite(asBYTE origin)
 {
 	// Writing world-stable state contradicts its definition, so widen it
-	asEMemoryAccess o = origin == asMA_WORLD_STABLE ? asMA_PROGRAM : asEMemoryAccess(origin);
+	asEMemoryAccess o = (origin == asMA_WORLD_STABLE || origin > asMA_UNSET) ? asMA_PROGRAM : asEMemoryAccess(origin);
 	write = Join(write, o);
+}
+
+void asCMemoryAccessScanner::RecordReadOf(const asSAbstractValue &v)
+{
+	RecordRead(Resolve(v.origin, v.originType));
+}
+
+void asCMemoryAccessScanner::RecordWriteOf(const asSAbstractValue &v)
+{
+	RecordWrite(Resolve(v.origin, v.originType));
+}
+
+asCObjectType *asCMemoryAccessScanner::ScriptClass(asCTypeInfo *type) const
+{
+	asCObjectType *ot = CastToObjectType(type);
+	// The engine's own script-object behaviours are declared on a type no script names
+	if( ot == 0 || !(ot->flags & asOBJ_SCRIPT_OBJECT) || ot == &engine->scriptTypeBehaviours )
+	{
+		return 0;
+	}
+	return ot;
+}
+
+asSAbstractValue asCMemoryAccessScanner::TypedPointer(asCTypeInfo *type, asBYTE hold)
+{
+	asCObjectType *ot = ScriptClass(type);
+	if( ot == 0 )
+	{
+		return Value(asMA_PROGRAM, asMA_PROGRAM, hold);
+	}
+	asSAbstractValue v = Value(asORIGIN_TYPE_HOME, asMA_PROGRAM, hold);
+	v.originType = ot;
+	return v;
+}
+
+void asCMemoryAccessScanner::SetTypedLoads(asSAbstractValue &v, asCTypeInfo *type)
+{
+	v.loadsType = ScriptClass(type);
+	v.loads = v.loadsType ? asORIGIN_TYPE_HOME : asBYTE(asMA_PROGRAM);
+}
+
+// Code can touch a member of a script object only by naming it, and only code
+// that sees the declaring class can name it. Another module reaches an object
+// of this module's non-shared class only through a shared type, an interface,
+// `?` or the host, each already Engine or wider there, and Engine contains
+// every module's Module.
+asBYTE asCMemoryAccessScanner::HomeOf(asCObjectType *cls) const
+{
+	if( cls == 0 || ScriptClass(cls) == 0 )
+	{
+		return asMA_PROGRAM;
+	}
+	if( !cls->IsShared() && module != 0 && cls->module == module )
+	{
+		return asMA_MODULE;
+	}
+	return asMA_ENGINE;
+}
+
+asBYTE asCMemoryAccessScanner::ChainHomeOf(asCObjectType *cls) const
+{
+	asBYTE h = asMA_NONE;
+	for( asCObjectType *c = cls; c; c = c->derivedFrom )
+	{
+		asBYTE ch = HomeOf(c);
+		h = ch > h ? ch : h;
+		for( asUINT n = 0; n < c->interfaces.GetLength(); n++ )
+		{
+			ch = HomeOf(c->interfaces[n]);
+			h = ch > h ? ch : h;
+		}
+	}
+	return h;
+}
+
+asBYTE asCMemoryAccessScanner::WholeHomeOf(asCObjectType *type) const
+{
+	asCObjectType *ot = ScriptClass(type);
+	if( ot == 0 )
+	{
+		return asMA_PROGRAM;
+	}
+	asBYTE h = ChainHomeOf(ot);
+	if( h != asMA_MODULE )
+	{
+		return h;
+	}
+	// The object may be of any class derived from the static type, or
+	// implementing it, and such a class may have a shared base or interface.
+	// A non-shared type of this module is derived from only in this module.
+	const asCArray<asCObjectType*> &classes = module->GetClassTypes();
+	for( asUINT c = 0; c < classes.GetLength(); c++ )
+	{
+		if( classes[c] && classes[c] != ot && (classes[c]->DerivesFrom(ot) || classes[c]->Implements(ot)) )
+		{
+			asBYTE ch = ChainHomeOf(classes[c]);
+			h = ch > h ? ch : h;
+		}
+	}
+	return h;
+}
+
+static asCObjectProperty *PropertyAt(asCObjectType *ot, int offset)
+{
+	for( asUINT n = 0; n < ot->properties.GetLength(); n++ )
+	{
+		if( ot->properties[n]->byteOffset == offset )
+		{
+			return ot->properties[n];
+		}
+	}
+	return 0;
+}
+
+asBYTE asCMemoryAccessScanner::FieldHome(int typeId, int offset) const
+{
+	asCObjectType *ot = ScriptClass(engine->GetObjectTypeFromTypeId(typeId));
+	asCObjectProperty *prop = ot ? PropertyAt(ot, offset) : 0;
+	if( prop == 0 )
+	{
+		return asMA_PROGRAM;
+	}
+	// A derived class keeps an inherited property at its base's offset
+	asCObjectType *decl = ot;
+	while( decl->derivedFrom )
+	{
+		asCObjectProperty *base = PropertyAt(decl->derivedFrom, offset);
+		if( base == 0 || base->name != prop->name )
+		{
+			break;
+		}
+		decl = decl->derivedFrom;
+	}
+	return HomeOf(decl);
+}
+
+asBYTE asCMemoryAccessScanner::MethodHome(asCScriptFunction *method, asCObjectType *type) const
+{
+	asCObjectType *decl = method ? ScriptClass(method->objectType) : 0;
+	if( decl )
+	{
+		return HomeOf(decl);
+	}
+	// A behaviour the engine implements for every script object, such as the
+	// default opAssign, may touch any member of the object
+	return WholeHomeOf(type);
+}
+
+asBYTE asCMemoryAccessScanner::Resolve(asBYTE origin, asCObjectType *type) const
+{
+	return origin == asORIGIN_TYPE_HOME ? WholeHomeOf(type) : origin;
 }
 
 asSAbstractValue *asCMemoryAccessScanner::Var(State &s, int offset)
@@ -637,7 +842,7 @@ bool asCMemoryAccessScanner::IsFactory(asCScriptFunction *callee) const
 	return false;
 }
 
-void asCMemoryAccessScanner::CalleeAccess(asCScriptFunction *callee, asUINT kind, asEMemoryAccess &r, asEMemoryAccess &w, bool &d)
+bool asCMemoryAccessScanner::CallTargets(asCScriptFunction *callee, asUINT kind, asCArray<asCScriptFunction*> &targets)
 {
 	// A virtual entry has no body, and its stored byte is stale inside the
 	// fixed point (Unset on a first build), so it is reached through its targets
@@ -651,36 +856,39 @@ void asCMemoryAccessScanner::CalleeAccess(asCScriptFunction *callee, asUINT kind
 	}
 	if( kind == asCALLKIND_UNKNOWN )
 	{
-		r = w = asMA_PROGRAM;
-		d = true;
-		return;
+		return false;
 	}
 	if( kind == asCALLKIND_DISPATCH )
 	{
 		// The targets are found among this module's classes, so a type owned by
 		// another module would yield an empty, falsely narrow set
-		asCArray<asCScriptFunction*> targets;
-		if( module == 0 || callee->objectType == 0 || callee->objectType->module != module ||
-			!module->GetDispatchTargets(callee, targets) )
-		{
-			r = w = asMA_PROGRAM;
-			d = true;
-			return;
-		}
-		r = w = asMA_NONE;
-		d = false;
-		for( asUINT n = 0; n < targets.GetLength(); n++ )
-		{
-			asEMemoryAccess tr, tw;
-			bool td;
-			AccessOf(targets[n], tr, tw, td);
-			r = Join(r, tr);
-			w = Join(w, tw);
-			d = d || td;
-		}
+		return module != 0 && callee->objectType != 0 && callee->objectType->module == module &&
+		       module->GetDispatchTargets(callee, targets);
+	}
+	targets.PushLast(callee);
+	return true;
+}
+
+void asCMemoryAccessScanner::CalleeAccess(asCScriptFunction *callee, asUINT kind, asEMemoryAccess &r, asEMemoryAccess &w, bool &d)
+{
+	asCArray<asCScriptFunction*> targets;
+	if( !CallTargets(callee, kind, targets) )
+	{
+		r = w = asMA_PROGRAM;
+		d = true;
 		return;
 	}
-	AccessOf(callee, r, w, d);
+	r = w = asMA_NONE;
+	d = false;
+	for( asUINT n = 0; n < targets.GetLength(); n++ )
+	{
+		asEMemoryAccess tr, tw;
+		bool td;
+		AccessOf(targets[n], tr, tw, td);
+		r = Join(r, tr);
+		w = Join(w, tw);
+		d = d || td;
+	}
 }
 
 bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT kind)
@@ -720,11 +928,48 @@ bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT 
 		objectOrigin = obj.origin;
 	}
 
-	asEMemoryAccess r, w;
+	// A returned reference points into memory the callee read, or into the
+	// object or an argument it was given. A script callee counts the reference
+	// it returns as read (asBC_RET), because taking an address reads nothing.
+	asEMemoryAccess cr, cw;
+	asBYTE refOrigin;
 	bool d;
-	CalleeAccess(callee, kind, r, w, d);
-	RecordRead(asMemoryAccessReadContribution(r, objectOrigin));
-	RecordWrite(asMemoryAccessContribution(w, objectOrigin));
+	if( objectOrigin == asORIGIN_TYPE_HOME )
+	{
+		// Each body the call may run touches the object at the home of the
+		// class that declares it
+		asCArray<asCScriptFunction*> targets;
+		if( !CallTargets(callee, kind, targets) )
+		{
+			targets.SetLength(0);
+			targets.PushLast(0);
+		}
+		cr = cw = asMA_NONE;
+		refOrigin = asMA_NONE;
+		d = false;
+		for( asUINT n = 0; n < targets.GetLength(); n++ )
+		{
+			asEMemoryAccess tr, tw;
+			bool td;
+			AccessOf(targets[n], tr, tw, td);
+			asBYTE home = targets[n] ? MethodHome(targets[n], obj.originType) : asBYTE(asMA_PROGRAM);
+			cr = Join(cr, asMemoryAccessReadContribution(tr, home));
+			cw = Join(cw, asMemoryAccessContribution(tw, home));
+			asBYTE tref = ReturnedReferenceOrigin(tr, home);
+			refOrigin = tref > refOrigin ? tref : refOrigin;
+			d = d || td;
+		}
+	}
+	else
+	{
+		asEMemoryAccess r, w;
+		CalleeAccess(callee, kind, r, w, d);
+		cr = asMemoryAccessReadContribution(r, objectOrigin);
+		cw = asMemoryAccessContribution(w, objectOrigin);
+		refOrigin = ReturnedReferenceOrigin(r, objectOrigin);
+	}
+	RecordRead(cr);
+	RecordWrite(cw);
 	if( d )
 	{
 		drops = true;
@@ -734,18 +979,15 @@ bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT 
 		return false;
 	}
 
-	// A returned reference points into memory the callee read, or into the
-	// object or an argument it was given. A script callee counts the reference
-	// it returns as read (asBC_RET), because taking an address reads nothing.
-	asBYTE refOrigin = ReturnedReferenceOrigin(r, objectOrigin);
 	// The reference may point into a frame variable the caller passed, at an
 	// offset the scanner cannot know
 	bool refIntoFrame = false;
 	if( thisSize )
 	{
-		if( obj.origin > refOrigin )
+		asBYTE o = Resolve(obj.origin, obj.originType);
+		if( o > refOrigin )
 		{
-			refOrigin = obj.origin;
+			refOrigin = o;
 		}
 		refIntoFrame = obj.slot != asNO_SLOT;
 	}
@@ -760,9 +1002,10 @@ bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT 
 			{
 				return false;
 			}
-			if( arg.origin > refOrigin )
+			asBYTE o = Resolve(arg.origin, arg.originType);
+			if( o > refOrigin )
 			{
-				refOrigin = arg.origin;
+				refOrigin = o;
 			}
 			if( arg.slot != asNO_SLOT )
 			{
@@ -797,6 +1040,11 @@ bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT 
 	if( rt.IsReference() )
 	{
 		s.valueReg = Value(refOrigin, asMA_PROGRAM, asRH_NONE);
+		// A handle read through a returned reference to one may be held anywhere
+		if( rt.IsObjectHandle() )
+		{
+			SetTypedLoads(s.valueReg, rt.GetTypeInfo());
+		}
 		if( refIntoFrame )
 		{
 			s.valueReg.slot = asANY_SLOT;
@@ -811,41 +1059,55 @@ bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT 
 		else
 		{
 			// A returned handle may be held anywhere
-			s.objectReg = Value(asMA_PROGRAM, asMA_PROGRAM, asRH_OWNED);
+			s.objectReg = TypedPointer(rt.GetTypeInfo(), asRH_OWNED);
 		}
 	}
 	return true;
 }
 
-// The origin of a pointer read from the field at `offset` of an object reached
-// by `baseOrigin`. Only script classes own the objects in their non-handle
-// reference members; every other pointer field is treated as reaching anything.
-asBYTE asCMemoryAccessScanner::FieldLoads(asBYTE baseOrigin, int typeId, int offset)
+// Only script classes own the objects in their non-handle reference members.
+// A handle member may refer to an object held anywhere, and every other
+// pointer field is treated as reaching anything.
+void asCMemoryAccessScanner::FieldLoads(const asSAbstractValue &base, int typeId, int offset, asBYTE &loads, asCObjectType *&loadsType)
 {
+	loads = asMA_PROGRAM;
+	loadsType = 0;
 	asCObjectType *ot = engine->GetObjectTypeFromTypeId(typeId);
-	if( ot == 0 || !(ot->flags & asOBJ_SCRIPT_OBJECT) )
+	asCObjectProperty *prop = (ot && (ot->flags & asOBJ_SCRIPT_OBJECT)) ? PropertyAt(ot, offset) : 0;
+	if( prop == 0 || !(prop->type.IsObjectHandle() || prop->type.IsReference()) )
 	{
-		return asMA_PROGRAM;
+		return;
 	}
-	for( asUINT n = 0; n < ot->properties.GetLength(); n++ )
+	if( prop->type.IsObjectHandle() || base.origin == asORIGIN_TYPE_HOME )
 	{
-		asCObjectProperty *prop = ot->properties[n];
-		if( prop->byteOffset != offset )
-		{
-			continue;
-		}
-		if( prop->type.IsObjectHandle() || !prop->type.IsReference() )
-		{
-			return asMA_PROGRAM;
-		}
-		// A non-handle object member is owned by the object holding it
-		if( baseOrigin == asMA_THIS || baseOrigin == asMA_OWNED )
-		{
-			return asMA_OWNED;
-		}
-		return baseOrigin;
+		// An object reached through a handle, or owned by one that was
+		loadsType = ScriptClass(prop->type.GetTypeInfo());
+		loads = loadsType ? asORIGIN_TYPE_HOME : asBYTE(asMA_PROGRAM);
+		return;
 	}
-	return asMA_PROGRAM;
+	// A non-handle object member is owned by the object holding it
+	if( base.origin == asMA_THIS || base.origin == asMA_OWNED )
+	{
+		loads = asMA_OWNED;
+		return;
+	}
+	loads = base.origin;
+}
+
+asSAbstractValue asCMemoryAccessScanner::FieldAt(const asSAbstractValue &base, int typeId, int offset)
+{
+	asBYTE loads;
+	asCObjectType *loadsType;
+	FieldLoads(base, typeId, offset, loads, loadsType);
+	asSAbstractValue v = FieldOf(base, loads, offset);
+	v.loadsType = loadsType;
+	// Code that names the field is charged at the home of its declaring class
+	if( base.origin == asORIGIN_TYPE_HOME )
+	{
+		v.origin = FieldHome(typeId, offset);
+		v.originType = 0;
+	}
+	return v;
 }
 
 // Every address operand of a global opcode is a global property's storage, which
@@ -864,20 +1126,26 @@ asBYTE asCMemoryAccessScanner::GlobalOrigin(void *address)
 	return prop->realAddress ? asMA_ENGINE : asMA_MODULE;
 }
 
-asBYTE asCMemoryAccessScanner::GlobalLoads(void *address)
+asSAbstractValue asCMemoryAccessScanner::GlobalAddress(void *address)
 {
+	asSAbstractValue v = Value(GlobalOrigin(address), asMA_PROGRAM, asRH_NONE);
 	asSMapNode<void*, asCGlobalProperty*> *cursor = 0;
 	if( !engine->varAddressMap.MoveTo(&cursor, address) )
 	{
-		return asMA_PROGRAM;
+		return v;
 	}
 	asCGlobalProperty *prop = engine->varAddressMap.GetValue(cursor);
-	if( prop->type.IsObjectHandle() || !prop->type.IsObject() )
+	if( prop->type.IsObjectHandle() )
 	{
-		return asMA_PROGRAM;
+		// The object a handle refers to may be held anywhere
+		SetTypedLoads(v, prop->type.GetTypeInfo());
 	}
-	// The object a non-handle object global holds belongs to that global
-	return GlobalOrigin(address);
+	else if( prop->type.IsObject() )
+	{
+		// The object a non-handle object global holds belongs to that global
+		v.loads = v.origin;
+	}
+	return v;
 }
 
 bool asCMemoryAccessScanner::PtrAt(State &s, asUINT k, asSAbstractValue &v)
@@ -903,6 +1171,8 @@ bool asCMemoryAccessScanner::PtrAt(State &s, asUINT k, asSAbstractValue &v)
 asSAbstractValue asCMemoryAccessScanner::FieldOf(const asSAbstractValue &base, asBYTE loads, int offset)
 {
 	asSAbstractValue v = Value(base.origin, loads, asRH_NONE);
+	// An access through it without the field's class is to the whole object
+	v.originType = base.originType;
 	// A field of an object stored inline in the frame is itself a frame address,
 	// and a write through it must reach the cells it covers
 	if( base.slot == asANY_SLOT || (base.slot != asNO_SLOT && (offset & 3)) )
@@ -1006,23 +1276,29 @@ bool asCMemoryAccessScanner::ChargeArguments(State &s, asCScriptFunction *callee
 			{
 				return false;
 			}
-			RecordRead(arg.origin);
+			RecordReadOf(arg);
 			// A reference to a handle points at the handle variable, which only a
 			// const handle protects; a handle to a const object may still be
 			// reseated. Anything else is protected by a const object.
 			bool argConst = dt.IsReference() && dt.IsObjectHandle() ? dt.IsReadOnly() : dt.IsObjectConst();
 			if( !argConst )
 			{
-				RecordWrite(arg.origin);
+				RecordWriteOf(arg);
 			}
 			// Through a reference to a handle, or to a value of unknown type, the
 			// function also reaches the object the handle refers to
 			if( dt.IsReference() && (dt.IsObjectHandle() || dt.GetTokenType() == ttQuestion) )
 			{
-				RecordRead(arg.loads);
+				asBYTE pointee = Resolve(arg.loads, arg.loadsType);
+				// A `?` reference may hold a handle of any type, whatever its static type here
+				if( dt.GetTokenType() == ttQuestion )
+				{
+					pointee = arg.loads == asORIGIN_TYPE_HOME ? asBYTE(asMA_PROGRAM) : arg.loads;
+				}
+				RecordRead(pointee);
 				if( !dt.IsObjectConst() )
 				{
-					RecordWrite(arg.loads);
+					RecordWrite(pointee);
 				}
 			}
 		}
@@ -1031,8 +1307,7 @@ bool asCMemoryAccessScanner::ChargeArguments(State &s, asCScriptFunction *callee
 	return true;
 }
 
-// What a parameter slot holds on entry
-static asSAbstractValue ParamValue(const asCDataType &dt, asETypeModifiers inOut)
+asSAbstractValue asCMemoryAccessScanner::ParamValue(const asCDataType &dt, asETypeModifiers inOut)
 {
 	if( dt.GetTokenType() == ttQuestion )
 	{
@@ -1040,30 +1315,40 @@ static asSAbstractValue ParamValue(const asCDataType &dt, asETypeModifiers inOut
 	}
 	if( dt.IsReference() )
 	{
+		asSAbstractValue v;
+		if( dt.IsObjectHandle() )
+		{
+			// A reference to a handle variable: the variable is the caller's
+			// temporary for &out and may be anywhere otherwise, while the object
+			// the handle refers to may be held anywhere
+			v = Value(inOut == asTM_OUTREF ? asMA_NONE : asMA_PROGRAM, asMA_PROGRAM, asRH_NONE);
+			SetTypedLoads(v, dt.GetTypeInfo());
+			return v;
+		}
 		if( inOut == asTM_OUTREF )
 		{
 			return Value(asMA_NONE, asMA_PROGRAM, asRH_NONE);
 		}
-		// Only &in is ever copied; any other reference may alias anything
-		if( inOut != asTM_INREF )
-		{
-			return Value(asMA_PROGRAM, asMA_PROGRAM, asRH_NONE);
-		}
 		// &in: a primitive is copied or is the caller's own frame variable, and a
-		// non-const value type is copied or is the caller's own temporary. A
-		// reference type that is already a temporary is passed without a copy
-		// (PrepareArgument), and that temporary may be a handle to a shared
-		// object, so it reaches anything; so does any const object.
-		if( dt.IsPrimitive() || (!dt.IsReadOnly() && IsPlainValueType(dt)) )
+		// non-const value type is copied or is the caller's own temporary
+		if( inOut == asTM_INREF && (dt.IsPrimitive() || (!dt.IsReadOnly() && IsPlainValueType(dt))) )
 		{
 			return Value(asMA_NONE, asMA_PROGRAM, asRH_NONE);
+		}
+		// &inout, a const &in object, and a reference type that is already a
+		// temporary, which is passed without a copy (PrepareArgument) and may be
+		// a handle's object: an object of the static type, held anywhere. A
+		// primitive &inout may alias anything.
+		if( dt.IsObject() )
+		{
+			return TypedPointer(dt.GetTypeInfo(), asRH_NONE);
 		}
 		return Value(asMA_PROGRAM, asMA_PROGRAM, asRH_NONE);
 	}
 	if( dt.IsObjectHandle() )
 	{
 		// The caller may have handed over the only reference
-		return Value(asMA_PROGRAM, asMA_PROGRAM, asRH_OWNED);
+		return TypedPointer(dt.GetTypeInfo(), asRH_OWNED);
 	}
 	if( dt.IsObject() )
 	{
@@ -1074,7 +1359,7 @@ static asSAbstractValue ParamValue(const asCDataType &dt, asETypeModifiers inOut
 		{
 			return Value(asMA_NONE, asMA_PROGRAM, asRH_OWNED);
 		}
-		return Value(asMA_PROGRAM, asMA_PROGRAM, asRH_OWNED);
+		return TypedPointer(dt.GetTypeInfo(), asRH_OWNED);
 	}
 	return Unknown();
 }
@@ -1330,7 +1615,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		// without this a caller writing through the reference would see None.
 		if( func->returnType.IsReference() )
 		{
-			RecordRead(s.valueReg.origin);
+			RecordReadOf(s.valueReg);
 		}
 		fallsThrough = false;
 		break;
@@ -1478,7 +1763,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		{
 			return false;
 		}
-		asSAbstractValue v = Value(asMA_NONE, slot->origin, asRH_NONE);
+		asSAbstractValue v = AddressOf(*slot);
 		v.slot = at;
 		Push(s, v, AS_PTR_SIZE);
 		break;
@@ -1504,7 +1789,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		{
 			return false;
 		}
-		RecordRead(addr.origin);
+		RecordReadOf(addr);
 		asSAbstractValue loaded;
 		if( addr.slot == asANY_SLOT )
 		{
@@ -1523,7 +1808,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		}
 		else
 		{
-			loaded = Value(addr.loads, asMA_PROGRAM, asRH_NONE);
+			loaded = PointeeOf(addr);
 		}
 		if( !SetCells(s, 0, loaded) )
 		{
@@ -1539,7 +1824,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 			return false;
 		}
 		short offset = asBC_SWORDARG0(instr);
-		if( !SetCells(s, 0, FieldOf(a, FieldLoads(a.origin, int(asBC_DWORDARG(instr)), offset), offset)) )
+		if( !SetCells(s, 0, FieldAt(a, int(asBC_DWORDARG(instr)), offset)) )
 		{
 			return false;
 		}
@@ -1553,7 +1838,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 			return false;
 		}
 		short offset = asBC_SWORDARG0(instr);
-		s.valueReg = FieldOf(*self, FieldLoads(self->origin, int(asBC_DWORDARG(instr)), offset), offset);
+		s.valueReg = FieldAt(*self, int(asBC_DWORDARG(instr)), offset);
 		break;
 	}
 	case asBC_LoadRObjR:
@@ -1565,7 +1850,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 			return false;
 		}
 		short offset = asBC_SWORDARG1(instr);
-		s.valueReg = FieldOf(*base, FieldLoads(base->origin, int(asBC_DWORDARG(instr + 1)), offset), offset);
+		s.valueReg = FieldAt(*base, int(asBC_DWORDARG(instr + 1)), offset);
 		break;
 	}
 	case asBC_LoadVObjR:
@@ -1579,7 +1864,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		asSAbstractValue addr = Value(asMA_NONE, asMA_PROGRAM, asRH_NONE);
 		addr.slot = at;
 		short offset = asBC_SWORDARG1(instr);
-		s.valueReg = FieldOf(addr, FieldLoads(asMA_NONE, int(asBC_DWORDARG(instr + 1)), offset), offset);
+		s.valueReg = FieldAt(addr, int(asBC_DWORDARG(instr + 1)), offset);
 		break;
 	}
 	case asBC_LDV:
@@ -1590,7 +1875,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		{
 			return false;
 		}
-		s.valueReg = Value(asMA_NONE, slot->origin, asRH_NONE);
+		s.valueReg = AddressOf(*slot);
 		s.valueReg.slot = at;
 		break;
 	}
@@ -1616,20 +1901,20 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 	case asBC_PGA:
 	{
 		void *at = (void*)asBC_PTRARG(instr);
-		Push(s, Value(GlobalOrigin(at), GlobalLoads(at), asRH_NONE), AS_PTR_SIZE);
+		Push(s, GlobalAddress(at), AS_PTR_SIZE);
 		break;
 	}
 	case asBC_PshGPtr:
 	{
 		void *at = (void*)asBC_PTRARG(instr);
 		RecordRead(GlobalOrigin(at));
-		Push(s, Value(GlobalLoads(at), asMA_PROGRAM, asRH_NONE), AS_PTR_SIZE);
+		Push(s, PointeeOf(GlobalAddress(at)), AS_PTR_SIZE);
 		break;
 	}
 	case asBC_LDG:
 	{
 		void *at = (void*)asBC_PTRARG(instr);
-		s.valueReg = Value(GlobalOrigin(at), GlobalLoads(at), asRH_NONE);
+		s.valueReg = GlobalAddress(at);
 		break;
 	}
 	case asBC_LdGRdR4:
@@ -1641,7 +1926,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 			return false;
 		}
 		// The VM leaves the global's address in the register
-		s.valueReg = Value(GlobalOrigin(at), GlobalLoads(at), asRH_NONE);
+		s.valueReg = GlobalAddress(at);
 		break;
 	}
 	case asBC_PshG4:
@@ -1668,20 +1953,20 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 
 	// Reads and writes through the value register
 	case asBC_RDR1: case asBC_RDR2: case asBC_RDR4: case asBC_RDR8:
-		RecordRead(s.valueReg.origin);
+		RecordReadOf(s.valueReg);
 		if( !SetVarCells(s, asBC_SWORDARG0(instr), Unknown(), op == asBC_RDR8 ? 2 : 1) )
 		{
 			return false;
 		}
 		break;
 	case asBC_WRTV1: case asBC_WRTV2: case asBC_WRTV4: case asBC_WRTV8:
-		RecordWrite(s.valueReg.origin);
+		RecordWriteOf(s.valueReg);
 		ForgetSlot(s, s.valueReg, op == asBC_WRTV8 ? 2 : 1);
 		break;
 	case asBC_INCi8: case asBC_INCi16: case asBC_INCi: case asBC_INCf: case asBC_INCd: case asBC_INCi64:
 	case asBC_DECi8: case asBC_DECi16: case asBC_DECi: case asBC_DECf: case asBC_DECd: case asBC_DECi64:
-		RecordRead(s.valueReg.origin);
-		RecordWrite(s.valueReg.origin);
+		RecordReadOf(s.valueReg);
+		RecordWriteOf(s.valueReg);
 		ForgetSlot(s, s.valueReg, (op == asBC_INCd || op == asBC_DECd || op == asBC_INCi64 || op == asBC_DECi64) ? 2 : 1);
 		break;
 
@@ -1693,8 +1978,8 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		{
 			return false;
 		}
-		RecordRead(src.origin);
-		RecordWrite(dst.origin);
+		RecordReadOf(src);
+		RecordWriteOf(dst);
 		ForgetSlot(s, dst, asBC_WORDARG0(instr));
 		if( !Pop(s, AS_PTR_SIZE) || !SetCells(s, 0, dst) )
 		{
@@ -1709,7 +1994,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		{
 			return false;
 		}
-		RecordRead(a.origin);
+		RecordReadOf(a);
 		break;
 	}
 
@@ -1733,7 +2018,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		{
 			return false;
 		}
-		asSAbstractValue v = Value(asMA_NONE, slot->origin, asRH_NONE);
+		asSAbstractValue v = AddressOf(*slot);
 		v.slot = ph.varRef;
 		if( !SetCells(s, asBC_WORDARG0(instr), v) )
 		{
@@ -1875,7 +2160,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		{
 			return false;
 		}
-		RecordWrite(slot->origin);
+		RecordWriteOf(*slot);
 		ForgetSlot(s, FieldOf(*slot, asMA_PROGRAM, int(asBC_DWORDARG(instr))), 1);
 		break;
 	}
@@ -1981,7 +2266,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 				ForgetArgument(s, cell);
 			}
 		}
-		RecordWrite(destination.origin);
+		RecordWriteOf(destination);
 		if( !Pop(s, args + AS_PTR_SIZE) )
 		{
 			return false;
@@ -2008,11 +2293,14 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		{
 			return false;
 		}
-		RecordRead(addr.origin);
-		asBYTE origin = addr.loads;
+		RecordReadOf(addr);
+		// The object keeps its origin. A type-home origin keeps the static type
+		// it had before the cast: its home covers every class derived from it
+		// or implementing it, and the object is one of those.
+		asSAbstractValue cast = PointeeOf(addr);
 		if( addr.slot == asANY_SLOT )
 		{
-			origin = asMA_PROGRAM;
+			cast = Unknown();
 		}
 		else if( addr.slot != asNO_SLOT )
 		{
@@ -2021,14 +2309,16 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 			{
 				return false;
 			}
-			origin = slot->origin;
+			cast = Value(slot->origin, asMA_PROGRAM, asRH_NONE);
+			cast.originType = slot->originType;
 		}
 		if( !Pop(s, AS_PTR_SIZE) )
 		{
 			return false;
 		}
 		// A failed cast leaves the register null, which this value covers
-		s.objectReg = Value(origin, asMA_PROGRAM, asRH_COPIED);
+		cast.hold = asRH_COPIED;
+		s.objectReg = cast;
 		break;
 	}
 
