@@ -87,7 +87,7 @@ The host must discard stored results when it changes world-stable state. It may 
 A parameter of a reference type that is passed by value or as a non-const <tt>&in</tt> counts as \ref asMA_PROGRAM, 
 because an argument that is already a temporary is passed without being copied, and a temporary handle's object may be shared. 
 A <tt>const &in</tt> parameter of an object type also counts as \ref asMA_PROGRAM, as the compiler passes it without copying. 
-Value types passed by value, or as <tt>&out</tt>, and primitives passed as <tt>&in</tt> count as \ref asMA_NONE.
+Value types passed by value, as <tt>&out</tt> or as a non-const <tt>&in</tt>, and primitives passed as <tt>&in</tt>, count as \ref asMA_NONE.
 
 A function that returns a reference is treated as reading the memory that the reference points into.
 
