@@ -344,6 +344,9 @@ public:
 	asCArray<asETypeModifiers>   inOutFlags;
 	asCArray<asCString *>        defaultArgs;
 	asSFunctionTraits            traits;
+	// Read scope in the high nibble, write scope in the low nibble. Bit 3 of
+	// each nibble is reserved. Placed here to fill the padding before objectType.
+	asBYTE                       memoryAccess;
 	asCObjectType               *objectType;
 	int                          signatureId;
 
@@ -351,10 +354,6 @@ public:
 
 	asEFuncType                  funcType;
 	asDWORD                      accessMask;
-
-	// Read scope in the high nibble, write scope in the low nibble. Bit 3 of
-	// each nibble is reserved.
-	asBYTE                       memoryAccess;
 
 	// Namespace will be null for funcdefs that are declared as child funcdefs
 	// of a class. In this case the namespace shall be taken from the parentClass

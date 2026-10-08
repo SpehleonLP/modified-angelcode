@@ -14,8 +14,9 @@ the scopes of the functions that it registers.
 The scopes form a ladder. Each scope contains every scope below it.
 
 <table border=0 cellspacing=0 cellpadding=0>
-<tr><td width=150 valign=top>\ref asMA_NONE</td><td>Local variables, and the objects passed as arguments. For an application function the caller counts what the 
- function can reach through its arguments, see \ref doc_adv_memory_access_args.</td></tr>
+<tr><td width=150 valign=top>\ref asMA_NONE</td><td>Local variables, and the objects passed as arguments to an application function: the caller counts what the 
+ function can reach through its arguments, see \ref doc_adv_memory_access_args. The parameters of a script function are 
+ counted as described in \ref doc_adv_memory_access_params.</td></tr>
 <tr><td valign=top>\ref asMA_WORLD_STABLE</td><td>State that may change, but never while the VM runs, e.g. configuration or loaded tables. 
  It can only be declared for application functions, and only as a read scope. It is never inferred.</td></tr>
 <tr><td valign=top>\ref asMA_THIS</td><td>The object that the method is called on, and its value members.</td></tr>
@@ -59,9 +60,10 @@ For example, with <tt>class In { int v; } In@ gh;</tt> a function that does <tt>
 If <tt>In</tt> were shared it would write \ref asMA_ENGINE, and if <tt>In</tt> were a registered type it would write 
 \ref asMA_PROGRAM.
 
-This is sound because another module can only reach an object of this module's classes through a shared type, an 
-interface, a <tt>?</tt> or the host, all of which are \ref asMA_ENGINE or wider in that module, and \ref asMA_ENGINE overlaps 
-every module of the engine.
+This is sound because another module can only reach an object of this module's classes through a shared class or 
+interface or a <tt>?</tt>, all of which are \ref asMA_ENGINE or wider in that module, and \ref asMA_ENGINE overlaps 
+every module of the engine. The host's own calls on such an object, e.g. a method that reports \ref asMA_THIS, are covered 
+by the rule for \ref asMA_THIS and \ref asMA_OWNED in \ref doc_adv_memory_access_conflict.
 
 \section doc_adv_memory_access_declare Declaring the scopes of application functions
 
@@ -125,8 +127,13 @@ Two calls conflict when the write scope of one overlaps the read or write scope 
    either object can be reached from the other through members that are not handles, e.g. when the host holds a handle 
    to the member <tt>outer.inner</tt> and calls methods on both <tt>outer</tt> and that member. 
    A host that cannot tell must treat them as overlapping.
- - \ref asMA_THIS and \ref asMA_OWNED overlap \ref asMA_MODULE or \ref asMA_ENGINE when the object can belong to that 
-   module or engine, e.g. when it is held in one of its global variables. A host that cannot tell must treat them as overlapping.
+ - \ref asMA_THIS and \ref asMA_OWNED of a call on object X overlap \ref asMA_MODULE of a module when X, or any object 
+   that can be reached from X through members that are not handles, is of a script class of that module that is not shared, 
+   wherever it is held, or when X is held in one of the module's global variables. They overlap \ref asMA_ENGINE of an engine 
+   whenever X is a script object of that engine. A host that cannot tell must treat them as overlapping. 
+   For example, with <tt>class E { int v; void m() { v++; } }</tt> and <tt>void param(E@ e) { e.v = 1; }</tt> in a module, 
+   <tt>param</tt> is <tt>{asMA_NONE, asMA_MODULE}</tt> and <tt>E::m</tt> is <tt>{asMA_THIS, asMA_THIS}</tt>. 
+   Called on the same object they conflict, even when no global variable holds it.
  - \ref asMA_MODULE overlaps only within the same module.
  - \ref asMA_ENGINE overlaps only within the same engine.
  - \ref asMA_PROGRAM overlaps everything.

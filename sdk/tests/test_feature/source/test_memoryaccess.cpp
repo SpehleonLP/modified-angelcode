@@ -1152,7 +1152,8 @@ static bool TestTypeHome()
 		// bump's This lands on the object at P's home
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void callViaHandle()"), asMA_MODULE, asMA_MODULE);
 		// A virtual call on a shared class is Program whatever the object's home:
-		// a module built later may add an override
+		// a module built later may add an override. The shared-dispatch rule pins
+		// this, not the type home, which would give Engine
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void callSharedViaHandle()"), asMA_PROGRAM, asMA_PROGRAM);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void callFuncdef()"), asMA_PROGRAM, asMA_PROGRAM);
 		// opIndex's This lands on the local array; the element handle it returns a
