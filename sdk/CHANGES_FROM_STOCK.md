@@ -208,8 +208,11 @@ A `RegisterHandle` type given a `dead` value resolves a dead handle to it, and t
 passes it to natives as `this`. `CallSystemFunction` (and `CallGeneric`, `asBC_Thiscall1`
 in as_context.cpp) compare the pushed `this` with the method's cached `sysFunc->deadHandle`
 and, through `AnswerDeadHandleCall`, skip the application function: the return is 0 / null
-/ a default-constructed (or, for a POD without a constructor, zeroed) value, primitive
-`&out` parameters are zeroed, and argument clean-up still runs. A return type with no
+/ a default-constructed (or, for a POD without a constructor, zeroed) value, and primitive
+`&out` parameters are zeroed. Argument ownership is unchanged by the skip: by-value objects
+and `@+` handles are released by the usual clean-up, and a plain `@` handle (which the
+callee would release) is released by `AnswerDeadHandleCall` itself, so a dead call neither
+leaks nor double-releases a reference. A return type with no
 default (a `?` return, a reference to a type without a resolver, a non-POD value type
 without a default constructor) falls through to the application function. The clean-up
 loop moved into `CleanSystemFunctionArgs` so both paths share it.

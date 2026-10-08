@@ -630,6 +630,29 @@ bool AnswerDeadHandleCall(asCContext *context, asCScriptFunction *descr, asDWORD
 				memset(ref, 0, size);
 		}
 
+		// A plain `@` argument belongs to the callee, which the skip bypasses, so the
+		// reference the VM pushed for it is released here. By-value objects and `@+`
+		// handles already have a cleanArgs entry at this offset and are left to it.
+		if( pt.IsObjectHandle() && !pt.IsReference() )
+		{
+			bool cleaned = false;
+			asSSystemFunctionInterface *sysFunc = descr->sysFuncIntf;
+			for( asUINT c = 0; c < sysFunc->cleanArgs.GetLength(); c++ )
+				if( sysFunc->cleanArgs[c].off == (short)offset )
+					cleaned = true;
+
+			asCObjectType *ot = pt.IsFuncdef() ? &engine->functionBehaviours : CastToObjectType(pt.GetTypeInfo());
+			void **addr = (void**)&args[offset];
+			if( !cleaned && ot && ot->beh.release && *addr != 0
+			&& (pt.IsFuncdef() || ((ot->flags & asOBJ_REF) && !(ot->flags & asOBJ_NOCOUNT))) )
+			{
+				void *refObj = engine->ResolveForRefCount(*addr, ot);
+				if( refObj )
+					engine->CallObjectMethod(refObj, ot->beh.release);
+				*addr = 0;
+			}
+		}
+
 		if( pt.IsObject() && !pt.IsObjectHandle() && !pt.IsReference() )
 			offset += AS_PTR_SIZE;
 		else
