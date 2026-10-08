@@ -163,17 +163,235 @@ void asCMemoryAccessScanner::AccessOf(asCScriptFunction *f, asEMemoryAccess &r, 
 
 void asCMemoryAccessScanner::DestructionOf(asCTypeInfo *type, asEMemoryAccess &r, asEMemoryAccess &w, bool &d)
 {
+	r = w = asMA_NONE;
+	d = false;
 	asCArray<asCTypeInfo*> visited;
 	DestructionWalk(type, r, w, d, visited);
 }
 
+// Joins what running `f` on a dying object adds: only effects outside it count
+static void JoinDestruction(asCMemoryAccessScanner *scanner, asCScriptFunction *f, asEMemoryAccess &r, asEMemoryAccess &w, bool &d)
+{
+	asEMemoryAccess fr, fw;
+	bool fd;
+	scanner->AccessOf(f, fr, fw, fd);
+	d = d || fd;
+	r = Join(r, asMemoryAccessOfDestruction(fr));
+	w = Join(w, asMemoryAccessOfDestruction(fw));
+}
+
 void asCMemoryAccessScanner::DestructionWalk(asCTypeInfo *type, asEMemoryAccess &r, asEMemoryAccess &w, bool &d, asCArray<asCTypeInfo*> &visited)
 {
-	UNUSED_VAR(type);
-	UNUSED_VAR(visited);
-	// Task 7 walks the type's destructor and members; until then any destruction may reach anything
-	r = w = asMA_PROGRAM;
-	d = true;
+	if( type == 0 || type == &engine->functionBehaviours || CastToFuncdefType(type) || (type->flags & asOBJ_TEMPLATE_SUBTYPE) )
+	{
+		// Unknown, or a delegate that may hold the last reference to anything
+		r = w = asMA_PROGRAM;
+		d = true;
+		return;
+	}
+	if( visited.IndexOf(type) >= 0 )
+	{
+		return;
+	}
+	visited.PushLast(type);
+
+	asCObjectType *ot = CastToObjectType(type);
+	if( ot == 0 )
+	{
+		// Enums and primitives: nothing to destroy
+		return;
+	}
+
+	if( ot->flags & asOBJ_LIST_PATTERN )
+	{
+		// The buffer holds copies of the elements its list pattern names
+		asCObjectType *target = ot->templateSubTypes.GetLength() ? CastToObjectType(ot->templateSubTypes[0].GetTypeInfo()) : 0;
+		asCScriptFunction *lf = target && target->beh.listFactory ? FunctionById(target->beh.listFactory) : 0;
+		if( lf == 0 )
+		{
+			r = w = asMA_PROGRAM;
+			d = true;
+			return;
+		}
+		for( asSListPatternNode *node = lf->listPattern; node; node = node->next )
+		{
+			if( node->type != asLPT_TYPE )
+			{
+				continue;
+			}
+			const asCDataType &dt = static_cast<asSListPatternDataTypeNode*>(node)->dataType;
+			if( dt.GetTokenType() == ttQuestion )
+			{
+				r = w = asMA_PROGRAM;
+				d = true;
+				return;
+			}
+			if( dt.IsObject() || dt.IsObjectHandle() )
+			{
+				DestructionWalk(dt.GetTypeInfo(), r, w, d, visited);
+			}
+		}
+		return;
+	}
+
+	// A handle of static type T may hold any class derived from T, or
+	// implementing T. The set is complete only for a type of this module that
+	// is not shared: a shared type may gain subclasses in a module built later.
+	if( ot->flags & asOBJ_SCRIPT_OBJECT )
+	{
+		if( ot->IsShared() || module == 0 || ot->module != module )
+		{
+			r = w = asMA_PROGRAM;
+			d = true;
+			return;
+		}
+		const asCArray<asCObjectType*> &classes = module->GetClassTypes();
+		// An interface is a script object too, with no body or members of its own
+		if( ot->IsInterface() )
+		{
+			for( asUINT c = 0; c < classes.GetLength(); c++ )
+			{
+				if( classes[c] && classes[c] != ot && classes[c]->Implements(ot) )
+				{
+					DestructionWalk(classes[c], r, w, d, visited);
+				}
+			}
+			return;
+		}
+		if( ot->beh.destruct )
+		{
+			JoinDestruction(this, FunctionById(ot->beh.destruct), r, w, d);
+		}
+		if( ot->derivedFrom )
+		{
+			DestructionWalk(ot->derivedFrom, r, w, d, visited);
+		}
+		for( asUINT n = 0; n < ot->properties.GetLength(); n++ )
+		{
+			const asCDataType &dt = ot->properties[n]->type;
+			if( dt.IsObject() || dt.IsObjectHandle() )
+			{
+				DestructionWalk(dt.GetTypeInfo(), r, w, d, visited);
+			}
+		}
+		for( asUINT c = 0; c < classes.GetLength(); c++ )
+		{
+			if( classes[c] && classes[c] != ot && classes[c]->DerivesFrom(ot) )
+			{
+				DestructionWalk(classes[c], r, w, d, visited);
+			}
+		}
+		return;
+	}
+
+	// A registered type: the host's Release (reference types) or destructor
+	// (value types), whose declared scope is the worst case, when it destroys
+	int id = (ot->flags & asOBJ_REF) ? ot->beh.release : ot->beh.destruct;
+	if( id )
+	{
+		JoinDestruction(this, FunctionById(id), r, w, d);
+	}
+}
+
+void asCMemoryAccessScanner::DestroyUnbalanced(asCTypeInfo *type)
+{
+	asEMemoryAccess r, w;
+	bool d;
+	DestructionOf(type, r, w, d);
+	RecordRead(r);
+	RecordWrite(w);
+	// A destruction that clears a stored handle can make an earlier balanced
+	// release the last one (spec 2.4)
+	if( d )
+	{
+		drops = true;
+	}
+}
+
+void asCMemoryAccessScanner::ReleaseValue(const asSAbstractValue &v, asCTypeInfo *type)
+{
+	if( v.hold == asRH_NONE )
+	{
+		return;
+	}
+	// The VM never releases an object of a type without a reference count
+	if( type && (type->flags & asOBJ_NOCOUNT) )
+	{
+		return;
+	}
+	if( v.hold == asRH_COPIED )
+	{
+		// Counted only if this function also drops a stored handle, which is
+		// known at the end of Scan
+		if( copiedReleases.IndexOf(type) < 0 )
+		{
+			copiedReleases.PushLast(type);
+		}
+		return;
+	}
+	DestroyUnbalanced(type);
+}
+
+bool asCMemoryAccessScanner::StoreHandle(State &s, const asSAbstractValue &dest, const asSAbstractValue &value, asCTypeInfo *type)
+{
+	RecordRead(dest.origin);
+	RecordWrite(dest.origin);
+	// REFCPY skips the AddRef and Release of these types (asCContext, asBC_REFCPY)
+	bool counted = type == 0 || !(type->flags & (asOBJ_NOCOUNT | asOBJ_VALUE));
+	if( dest.slot == asANY_SLOT )
+	{
+		// Some frame slot, but which one is unknown: its old value is unknown too
+		DestroyUnbalanced(type);
+		ForgetSlot(s, dest, AS_PTR_SIZE);
+		return true;
+	}
+	if( dest.slot != asNO_SLOT )
+	{
+		asSAbstractValue *slot = Var(s, dest.slot);
+		if( slot == 0 )
+		{
+			return false;
+		}
+		if( counted )
+		{
+			ReleaseValue(*slot, type);
+		}
+		// A copy that is not counted holds whatever the variable is later freed for
+		return SetVarCells(s, dest.slot, Value(value.origin, value.loads, counted ? asRH_COPIED : asRH_OWNED), AS_PTR_SIZE);
+	}
+	// Overwriting a handle stored outside the frame drops whatever it held
+	if( counted )
+	{
+		drops = true;
+		DestroyUnbalanced(type);
+	}
+	return true;
+}
+
+bool asCMemoryAccessScanner::CleanNativeArgs(State &s, asCScriptFunction *callee, asUINT k)
+{
+	// asSSystemFunctionInterface::cleanArgs releases auto handles and destroys
+	// objects passed by value, and the native itself releases any other handle
+	// it is given, so every handle and object argument is released here
+	if( callee->funcType != asFUNC_SYSTEM )
+	{
+		return true;
+	}
+	for( asUINT n = 0; n < callee->parameterTypes.GetLength(); n++ )
+	{
+		const asCDataType &dt = callee->parameterTypes[n];
+		if( !dt.IsReference() && (dt.IsObject() || dt.IsObjectHandle()) )
+		{
+			asSAbstractValue arg;
+			if( !PtrAt(s, k, arg) )
+			{
+				return false;
+			}
+			ReleaseValue(arg, dt.GetTypeInfo());
+		}
+		k += dt.GetSizeOnStackDWords();
+	}
+	return true;
 }
 
 void asCMemoryAccessScanner::RecordRead(asBYTE origin)
@@ -507,8 +725,11 @@ bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT 
 				refIntoFrame = true;
 			}
 		}
-		// Task 7 adds the clean-up of handle and by-value arguments after a system call here
 		k += dt.GetSizeOnStackDWords();
+	}
+	if( !CleanNativeArgs(s, callee, thisSize + retSize) )
+	{
+		return false;
 	}
 
 	// The callee may write any frame variable whose address it was given:
@@ -935,7 +1156,41 @@ asSMemoryScanResult asCMemoryAccessScanner::Scan(asCScriptFunction *f)
 		}
 	}
 
-	// Task 7 adds exception clean-up and the copied-release rule here
+	// An exception or an abort can unwind at any reached position, and
+	// asCContext::CleanStackFrame then releases every object variable, the
+	// parameters included, as it holds it there. `this` is not a variable. The
+	// state after a call covers what the callee may have written before it
+	// raised, and the arguments pending in a call were counted at GETOBJ.
+	for( asUINT pos = 0; ok && pos < bcLen; pos++ )
+	{
+		if( !states[pos].reached )
+		{
+			continue;
+		}
+		for( asUINT n = 0; n < f->scriptData->variables.GetLength(); n++ )
+		{
+			asSScriptVariable *v = f->scriptData->variables[n];
+			// The VM skips a variable of no known type: it holds null or a borrowed reference
+			if( v->type.IsReference() || v->type.GetTypeInfo() == 0 || !(v->type.IsObject() || v->type.IsObjectHandle()) )
+			{
+				continue;
+			}
+			asSAbstractValue *slot = Var(states[pos], v->stackOffset);
+			if( slot )
+			{
+				ReleaseValue(*slot, v->type.GetTypeInfo());
+			}
+		}
+	}
+	// A copied release is balanced unless this function drops stored handles itself.
+	// It runs last, because releases above may both add copies and set the flag.
+	if( ok && drops )
+	{
+		for( asUINT n = 0; n < copiedReleases.GetLength(); n++ )
+		{
+			DestroyUnbalanced(copiedReleases[n]);
+		}
+	}
 
 	ReleaseStates();
 	if( !ok )
@@ -1403,7 +1658,8 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 	}
 	case asBC_GETOBJ:
 	{
-		// Moves the reference into the argument; Task 7 accounts for its release
+		// Moves the reference into the argument. The callee destroys it, or the
+		// exception clean-up does if the call never starts, so it counts here.
 		asSAbstractValue ph;
 		if( !PtrAt(s, asBC_WORDARG0(instr), ph) || ph.varRef == asNO_SLOT )
 		{
@@ -1414,6 +1670,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		{
 			return false;
 		}
+		ReleaseValue(*slot, VarType(ph.varRef));
 		asSAbstractValue moved = *slot;
 		moved.varRef = asNO_SLOT;
 		if( !SetVarCells(s, ph.varRef, Null(), AS_PTR_SIZE) || !SetCells(s, asBC_WORDARG0(instr), moved) )
@@ -1451,6 +1708,52 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 			return false;
 		}
 		break;
+
+	// Releases (spec 2.4)
+	case asBC_FREE:
+	{
+		asSAbstractValue *slot = Var(s, asBC_SWORDARG0(instr));
+		if( slot == 0 )
+		{
+			return false;
+		}
+		ReleaseValue(*slot, (asCTypeInfo*)asBC_PTRARG(instr));
+		if( !SetVarCells(s, asBC_SWORDARG0(instr), Null(), AS_PTR_SIZE) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_REFCPY:
+	{
+		// Pops the destination address and leaves the source handle on top
+		asSAbstractValue dest, value;
+		if( !PtrAt(s, 0, dest) || !PtrAt(s, AS_PTR_SIZE, value) || !Pop(s, AS_PTR_SIZE) )
+		{
+			return false;
+		}
+		if( !StoreHandle(s, dest, value, (asCTypeInfo*)asBC_PTRARG(instr)) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_RefCpyV:
+	{
+		// PSF var; REFCPY
+		asSAbstractValue value;
+		if( !PtrAt(s, 0, value) )
+		{
+			return false;
+		}
+		asSAbstractValue dest = Value(asMA_NONE, asMA_PROGRAM, asRH_NONE);
+		dest.slot = asBC_SWORDARG0(instr);
+		if( !StoreHandle(s, dest, value, (asCTypeInfo*)asBC_PTRARG(instr)) )
+		{
+			return false;
+		}
+		break;
+	}
 
 	// Initialisation-list buffers: fresh memory only this frame holds
 	case asBC_AllocMem:
@@ -1562,7 +1865,10 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 			{
 				drops = true;
 			}
-			// Task 7 adds the clean-up of handle and by-value arguments here
+			if( !CleanNativeArgs(s, ctor, 0) )
+			{
+				return false;
+			}
 			for( asUINT n = 0; n < args; n++ )
 			{
 				asSAbstractValue cell = *Cell(s, n);

@@ -608,6 +608,8 @@ public:
 	int data[8];
 };
 static CBuf *BufFactory() { return new CBuf(); }
+static CBuf *BufListFactory(void *) { return new CBuf(); }
+static void SinkRel(CBuf *) {}
 static CBuf *g_sharedBuf = 0;
 static CBuf *SharedBuf() { g_sharedBuf->AddRef(); return g_sharedBuf; }
 static void Pick(CBuf **out) { *out = SharedBuf(); }
@@ -676,20 +678,17 @@ static bool TestCalls()
 	{
 		EXPECT_ACCESS(mod->GetFunctionByDecl("float callPure(float)"), asMA_NONE, asMA_NONE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void callUndeclared()"), asMA_UNSET, asMA_UNSET);
-#if 0 // enabled by Task 7
-		// A factory returns a fresh object, so This on it is None
-		EXPECT_ACCESS(mod->GetFunctionByDecl("void localBuf()"), asMA_NONE, asMA_NONE);
-#endif
+		// A factory returns a fresh object, so This on it is None. The read keeps
+		// the WorldStable floor of opIndex's This read (spec 2.2).
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void localBuf()"), asMA_WORLD_STABLE, asMA_NONE);
 		// Thiscall1 on a member object: its This effects land on Owned
 		EXPECT_ACCESS(MethodOf(mod, "HasBuf", "void set()"), asMA_OWNED, asMA_OWNED);
-#if 0 // enabled by Task 7
 		// A handle returned by a non-factory may be held anywhere
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void sharedB()"), asMA_PROGRAM, asMA_PROGRAM);
 		// pick writes the &out temporary whose address it gets (PSF), so the
 		// temporary no longer holds the null it held on entry, and h may then be
 		// the shared object. Fails if the call leaves the slot's old value.
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void slotClear()"), asMA_PROGRAM, asMA_PROGRAM);
-#endif
 		EXPECT_ACCESS(MethodOf(mod, "M", "void bump()"), asMA_MODULE, asMA_MODULE);
 		EXPECT_ACCESS(MethodOf(mod, "M", "void viaThis()"), asMA_MODULE, asMA_MODULE);
 		// Spec 2.2: a Module method called through a handle touches a Program object
@@ -783,11 +782,9 @@ static bool TestCallPins()
 	else
 	{
 		EXPECT_ACCESS(MethodOf(mod, "W", "void setX()"), asMA_NONE, asMA_THIS);
-#if 0 // enabled by Task 7
 		// Spec 2.2: setX's This lands on the module global's object. The compiler
 		// keeps the object alive in a temporary (RefCpyV ... FREE).
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void callOnGlobal()"), asMA_MODULE, asMA_MODULE);
-#endif
 		// Spec 2.2: the callee's This lands on an owned member's object (RDSPtr reads this)
 		EXPECT_ACCESS(MethodOf(mod, "HasW", "void go()"), asMA_THIS, asMA_OWNED);
 		// ... on a module global's object (PshGPtr reads the global's storage)
@@ -823,6 +820,96 @@ static bool TestCallPins()
 		}
 		// VAR and GETREF pass the address of a temporary
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void callOut()"), asMA_NONE, asMA_NONE);
+		EXPECT_NO_WORLD_STABLE_WRITE(mod);
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+// Releases count only when they may be the last one, and only for what
+// destruction does outside the dying object (spec 2.4)
+static bool TestDestruction()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	RegisterTestNatives(engine);
+	int r = engine->RegisterObjectBehaviour("Buf", asBEHAVE_LIST_FACTORY, "Buf@ f(int &in) {repeat int}", asFUNCTION(BufListFactory), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	// A host type whose Release, when it destroys, touches engine state
+	r = engine->RegisterObjectType("Rel", 0, asOBJ_REF); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("Rel", asBEHAVE_FACTORY, "Rel@ f()", asFUNCTION(BufFactory), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterObjectBehaviour("Rel", asBEHAVE_ADDREF, "void f()", asMETHOD(CBuf, AddRef), asCALL_THISCALL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterObjectBehaviour("Rel", asBEHAVE_RELEASE, "void f()", asMETHOD(CBuf, Release), asCALL_THISCALL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_ENGINE, asMA_ENGINE);
+	// The VM releases an auto handle argument after the native returns
+	r = engine->RegisterGlobalFunction("void sinkRel(Rel@+)", asFUNCTION(SinkRel), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	asIScriptModule *mod = BuildModule(engine, "destruction",
+		"int counter; \n"
+		"class D { ~D() { counter++; } } \n"
+		"class Q { } \n"
+		"D@ gd; \n"
+		"class E \n"
+		"{ \n"
+		"  Q@ q; \n"
+		"  void copyOnly() { D@ local = gd; } \n"
+		"  void copyAndDrop() { D@ local = gd; @q = null; } \n"
+		"  void copyThenKill() { D@ local = gd; Z z; } \n"
+		"} \n"
+		"void fresh() { D d; } \n"
+		"class T { int x; ~T() { x = 0; } } \n"
+		"void freshClean() { T t; } \n"
+		"funcdef void CB(); \n"
+		"void nop() {} \n"
+		"CB@ make() { return nop; } \n"
+		"void ownedFuncdef() { CB@ cb = make(); } \n"
+		"void spin(D@ h) { while( true ) {} } \n"
+		"void spinFor(D@ h) { for(;;) {} } \n"
+		"void listInit() { Buf b = {1, 2, 3}; } \n"
+		"class B2 { } \n"
+		"class D2 : B2 { ~D2() { counter++; } } \n"
+		"void takeB(B2@ b) { } \n"
+		"interface I3 { } \n"
+		"class C3 : I3 { ~C3() { counter++; } } \n"
+		"void takeI(I3@ i) { } \n"
+		"class Z { Q@ h; ~Z() { @h = null; } } \n"
+		"void passRel() { sinkRel(Rel()); } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		// Balanced: gd still holds the object, so the release cannot destroy it
+		EXPECT_ACCESS(MethodOf(mod, "E", "void copyOnly()"), asMA_MODULE, asMA_NONE);
+		// Dropping any stored handle voids that argument
+		EXPECT_ACCESS(MethodOf(mod, "E", "void copyAndDrop()"), asMA_MODULE, asMA_MODULE);
+		// ~Z's own effects stay on the dying Z, but it clears a stored handle,
+		// so the balanced release of `local` may be the last one
+		EXPECT_ACCESS(MethodOf(mod, "E", "void copyThenKill()"), asMA_MODULE, asMA_MODULE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void fresh()"), asMA_MODULE, asMA_MODULE);
+		// The dying object's own memory is private
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void freshClean()"), asMA_NONE, asMA_NONE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("CB@ make()"), asMA_NONE, asMA_NONE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void ownedFuncdef()"), asMA_PROGRAM, asMA_PROGRAM);
+		// The compiler does not fold the loop test (SetV1; JLowZ), so the FREE of
+		// `h` after the loop is reachable as far as the bytecode shows
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void spin(D@)"), asMA_MODULE, asMA_MODULE);
+		// Here the loop is a bare JMP and no RET is reachable, so only an abort
+		// or exception releases `h`, and that may run ~D
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void spinFor(D@)"), asMA_MODULE, asMA_MODULE);
+		// The buffer's pattern names only ints, and Buf's declared Release is None
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void listInit()"), asMA_NONE, asMA_NONE);
+		// A handle of static type B2 may hold a D2, whose destructor writes a global
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void takeB(B2@)"), asMA_MODULE, asMA_MODULE);
+		// ... and one of interface type I3 any class implementing it
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void takeI(I3@)"), asMA_MODULE, asMA_MODULE);
+		// The fresh Rel moves into the native's argument (GETOBJ), and the VM
+		// releases it after the call, which may run Rel's Release to destruction
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void passRel()"), asMA_ENGINE, asMA_ENGINE);
 		EXPECT_NO_WORLD_STABLE_WRITE(mod);
 	}
 	engine->ShutDownAndRelease();
@@ -873,6 +960,10 @@ bool Test()
 		fail = true;
 	}
 	if( TestCallPins() )
+	{
+		fail = true;
+	}
+	if( TestDestruction() )
 	{
 		fail = true;
 	}

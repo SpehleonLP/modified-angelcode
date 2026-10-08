@@ -168,6 +168,15 @@ protected:
 	void              RecordRead(asBYTE origin);
 	void              RecordWrite(asBYTE origin);
 
+	// Releasing `v`, a reference to an object of static type `type` (spec 2.4)
+	void              ReleaseValue(const asSAbstractValue &v, asCTypeInfo *type);
+	// A release that may be the last one
+	void              DestroyUnbalanced(asCTypeInfo *type);
+	// A handle assignment into `dest`: releases the old value, AddRefs the new one
+	bool              StoreHandle(State &s, const asSAbstractValue &dest, const asSAbstractValue &value, asCTypeInfo *type);
+	// What the VM releases or destroys of a system function's arguments after it returns
+	bool              CleanNativeArgs(State &s, asCScriptFunction *callee, asUINT firstArg);
+
 	void DestructionWalk(asCTypeInfo *type, asEMemoryAccess &read, asEMemoryAccess &write, bool &drops, asCArray<asCTypeInfo*> &visited);
 
 	asCScriptEngine            *engine;
