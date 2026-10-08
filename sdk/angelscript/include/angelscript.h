@@ -398,6 +398,20 @@ enum asEFuncType
 	asFUNC_TEMPLATE  = 7
 };
 
+// The scope of memory a function may read or write. Each scope contains every
+// scope below it. Unset marks a native nobody declared; treat it as Program.
+enum asEMemoryAccess : asBYTE
+{
+	asMA_NONE         = 0,
+	asMA_WORLD_STABLE = 1,
+	asMA_THIS         = 2,
+	asMA_OWNED        = 3,
+	asMA_MODULE       = 4,
+	asMA_ENGINE       = 5,
+	asMA_PROGRAM      = 6,
+	asMA_UNSET        = 7
+};
+
 // Is the target a 64bit system?
 #if defined(__LP64__) || defined(__amd64__) || defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 	#ifndef AS_64BIT_PTR
@@ -1159,6 +1173,8 @@ public:
 #endif
 	virtual const char      *GetConfigGroup() const = 0;
 	virtual asDWORD          GetAccessMask() const = 0;
+	virtual int              SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write) = 0;
+	virtual void             GetMemoryAccess(asEMemoryAccess *read, asEMemoryAccess *write) const = 0;
 	virtual void            *GetAuxiliary() const = 0;
 
 	// Function signature

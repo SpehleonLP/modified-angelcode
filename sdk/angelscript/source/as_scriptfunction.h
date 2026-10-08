@@ -147,6 +147,10 @@ struct asSSystemFunctionInterface;
 
 void RegisterScriptFunction(asCScriptEngine *engine);
 
+inline asBYTE          asPackMemoryAccess(asEMemoryAccess read, asEMemoryAccess write) { return asBYTE((read << 4) | write); }
+inline asEMemoryAccess asMemoryAccessRead(asBYTE packed)  { return asEMemoryAccess((packed >> 4) & 7); }
+inline asEMemoryAccess asMemoryAccessWrite(asBYTE packed) { return asEMemoryAccess(packed & 7); }
+
 class asCScriptFunction : public asIScriptFunction
 {
 public:
@@ -168,6 +172,8 @@ public:
 #endif
 	const char          *GetConfigGroup() const;
 	asDWORD              GetAccessMask() const;
+	int                  SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write);
+	void                 GetMemoryAccess(asEMemoryAccess *read, asEMemoryAccess *write) const;
 	void                *GetAuxiliary() const;
 
 	// Function signature
@@ -328,6 +334,10 @@ public:
 
 	asEFuncType                  funcType;
 	asDWORD                      accessMask;
+
+	// Read scope in the high nibble, write scope in the low nibble. Bit 3 of
+	// each nibble is reserved.
+	asBYTE                       memoryAccess;
 
 	// Namespace will be null for funcdefs that are declared as child funcdefs
 	// of a class. In this case the namespace shall be taken from the parentClass

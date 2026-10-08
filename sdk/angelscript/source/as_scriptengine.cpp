@@ -4137,6 +4137,8 @@ asCScriptFunction *asCScriptEngine::GenerateFactoryStubForTemplateObjectInstance
 	AddScriptFunction(func);
 
 	func->traits = factory->traits;
+	// The stub only forwards to the registered factory, so it touches what the factory touches
+	func->memoryAccess = factory->memoryAccess;
 	func->SetShared(true);
 	if( templateType->flags & asOBJ_REF )
 	{
@@ -4290,6 +4292,7 @@ bool asCScriptEngine::GenerateFunctionForTemplateObjectInstance(asCObjectType *t
 	func2->parameterNames = func->parameterNames;
 	func2->inOutFlags = func->inOutFlags;
 	func2->traits = func->traits;
+	func2->memoryAccess = func->memoryAccess;
 	func2->SetReadOnly(func->IsReadOnly());
 	func2->objectType = ot;
 	func2->objectType->AddRefInternal();

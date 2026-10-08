@@ -659,6 +659,7 @@
     <ClCompile Include="..\..\source\test_scriptstring.cpp" />
     <ClCompile Include="..\..\source\test_scriptstruct.cpp" />
     <ClCompile Include="..\..\source\test_shared.cpp" />
+    <ClCompile Include="..\..\source\test_memoryaccess.cpp" />
     <ClCompile Include="..\..\source\test_shark.cpp" />
     <ClCompile Include="..\..\source\test_singleton.cpp" />
     <ClCompile Include="..\..\source\test_stack2.cpp" />

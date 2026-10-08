@@ -167,6 +167,20 @@ void RegisterScriptFunction(asCScriptEngine *engine)
 	// Change the return type so the VM will know the function really returns a handle
 	engine->scriptFunctions[r]->returnType = asCDataType::CreateType(&engine->functionBehaviours, false);
 	engine->scriptFunctions[r]->returnType.MakeHandle(true);
+
+	// The delegate factory allocates a fresh delegate and AddRefs the function and the
+	// object it binds, which touch only their atomic reference counts
+	engine->scriptFunctions[r]->SetMemoryAccess(asMA_NONE, asMA_NONE);
+
+	asCObjectType &ot = engine->functionBehaviours;
+	engine->scriptFunctions[ot.beh.addref]->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	// Releasing a delegate may release, and so destroy, the object it holds
+	engine->scriptFunctions[ot.beh.release]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+	engine->scriptFunctions[ot.beh.gcGetRefCount]->SetMemoryAccess(asMA_THIS, asMA_NONE);
+	engine->scriptFunctions[ot.beh.gcSetFlag]->SetMemoryAccess(asMA_NONE, asMA_THIS);
+	engine->scriptFunctions[ot.beh.gcGetFlag]->SetMemoryAccess(asMA_THIS, asMA_NONE);
+	engine->scriptFunctions[ot.beh.gcEnumReferences]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+	engine->scriptFunctions[ot.beh.gcReleaseAllReferences]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
 }
 
 asCScriptFunction *CreateDelegate(asCScriptFunction *func, void *obj)
@@ -370,6 +384,8 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	gcFlag                 = false;
 	id                     = 0;
 	accessMask             = 0xFFFFFFFF;
+	// Zero would be None, the most permissive scope; an undeclared function must not look safe
+	memoryAccess           = asPackMemoryAccess(asMA_UNSET, asMA_UNSET);
 	nameSpace              = engine->nameSpaces[0];
 	objForDelegate         = 0;
 	funcForDelegate        = 0;
@@ -1553,6 +1569,45 @@ const char *asCScriptFunction::GetConfigGroup() const
 asDWORD asCScriptFunction::GetAccessMask() const
 {
 	return accessMask;
+}
+
+// interface
+int asCScriptFunction::SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write)
+{
+	// Script functions get their scopes from the analysis
+	if( funcType != asFUNC_SYSTEM )
+	{
+		return asNOT_SUPPORTED;
+	}
+	if( read > asMA_PROGRAM || write > asMA_PROGRAM )
+	{
+		return asINVALID_ARG;
+	}
+	// World-stable state only changes while the VM is stopped
+	if( write == asMA_WORLD_STABLE )
+	{
+		return asINVALID_ARG;
+	}
+	if( objectType == 0 &&
+		(read == asMA_THIS || read == asMA_OWNED || write == asMA_THIS || write == asMA_OWNED) )
+	{
+		return asINVALID_ARG;
+	}
+	memoryAccess = asPackMemoryAccess(read, write);
+	return asSUCCESS;
+}
+
+// interface
+void asCScriptFunction::GetMemoryAccess(asEMemoryAccess *read, asEMemoryAccess *write) const
+{
+	if( read )
+	{
+		*read = asMemoryAccessRead(memoryAccess);
+	}
+	if( write )
+	{
+		*write = asMemoryAccessWrite(memoryAccess);
+	}
 }
 
 // interface
