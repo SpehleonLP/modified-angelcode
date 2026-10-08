@@ -130,6 +130,7 @@ SRCNAMES = \
   as_gc.cpp \
   as_globalproperty.cpp \
   as_memory.cpp \
+  as_memoryaccess.cpp \
   as_module.cpp \
   as_objecttype.cpp \
   as_outputbuffer.cpp \

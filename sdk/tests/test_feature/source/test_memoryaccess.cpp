@@ -152,12 +152,91 @@ static bool TestEngineBuiltins()
 	return fail;
 }
 
+static asIScriptEngine *CreateEngine(COutStream &out)
+{
+	asIScriptEngine *engine = asCreateScriptEngine();
+	engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+	return engine;
+}
+
+static asIScriptModule *BuildModule(asIScriptEngine *engine, const char *name, const char *code)
+{
+	asIScriptModule *mod = engine->GetModule(name, asGM_ALWAYS_CREATE);
+	mod->AddScriptSection(name, code);
+	if( mod->Build() < 0 )
+	{
+		PRINTF("module '%s' failed to build\n", name);
+		return 0;
+	}
+	return mod;
+}
+
+static bool TestFrameLocal()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	asIScriptModule *mod = BuildModule(engine, "frame",
+		"int add(int a, int b) { int c = a + b; return c * 2; } \n"
+		"void loop() { for( int i = 0; i < 10; i++ ) {} } \n"
+		"int fact(int n) { if( n <= 1 ) return 1; return n * fact(n - 1); } \n"
+		"int even(int n) { if( n == 0 ) return 1; return odd(n - 1); } \n"
+		"int odd(int n) { if( n == 0 ) return 0; return even(n - 1); } \n"
+		"double conv(int a) { float f = a; return f * 2.0; } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int add(int, int)"), asMA_NONE, asMA_NONE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void loop()"), asMA_NONE, asMA_NONE);
+#if 0 // enabled by Task 6
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int fact(int)"), asMA_NONE, asMA_NONE);
+#endif
+#if 0 // enabled by Task 6
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int even(int)"), asMA_NONE, asMA_NONE);
+#endif
+#if 0 // enabled by Task 6
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int odd(int)"), asMA_NONE, asMA_NONE);
+#endif
+		EXPECT_ACCESS(mod->GetFunctionByDecl("double conv(int)"), asMA_NONE, asMA_NONE);
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+// A function using an opcode the scanner does not model yet must come out as
+// Program, never as something narrower. Task 4 makes this function precise;
+// this test then moves to its final expectation there.
+static bool TestFailsClosed()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	asIScriptModule *mod = BuildModule(engine, "closed",
+		"class C { int x; int get() { return x; } } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		asITypeInfo *c = mod->GetTypeInfoByName("C");
+		EXPECT_ACCESS(c->GetMethodByDecl("int get()"), asMA_PROGRAM, asMA_PROGRAM);
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
 bool Test()
 {
 	bool fail = false;
 	if( TestApi() ) fail = true;
 	if( TestTemplateInheritance() ) fail = true;
 	if( TestEngineBuiltins() ) fail = true;
+	if( TestFrameLocal() ) fail = true;
+	if( TestFailsClosed() ) fail = true;
 	return fail;
 }
 

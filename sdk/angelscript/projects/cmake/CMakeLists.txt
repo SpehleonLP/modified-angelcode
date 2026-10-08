@@ -48,6 +48,7 @@ set(ANGELSCRIPT_HEADERS
     ../../source/as_generic.h
     ../../source/as_map.h
     ../../source/as_memory.h
+    ../../source/as_memoryaccess.h
     ../../source/as_module.h
     ../../source/as_objecttype.h
     ../../source/as_outputbuffer.h
@@ -87,6 +88,7 @@ set(ANGELSCRIPT_SOURCE
     ../../source/as_generic.cpp
     ../../source/as_globalproperty.cpp
     ../../source/as_memory.cpp
+    ../../source/as_memoryaccess.cpp
     ../../source/as_module.cpp
     ../../source/as_objecttype.cpp
     ../../source/as_outputbuffer.cpp

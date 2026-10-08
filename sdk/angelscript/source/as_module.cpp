@@ -43,6 +43,7 @@
 #include "as_texts.h"
 #include "as_debug.h"
 #include "as_restore.h"
+#include "as_memoryaccess.h"
 
 BEGIN_AS_NAMESPACE
 
@@ -309,6 +310,7 @@ int asCModule::Build()
 		return r;
 	}
 
+	ComputeTransitiveFunctionMetadata();
 	JITCompile();
 
 	m_engine->PrepareEngine();
@@ -1663,6 +1665,11 @@ int asCModule::LoadByteCode(asIBinaryStream *in, bool *wasDebugInfoStripped)
 
 	JITCompile();
 
+	// The stream carries each function's scopes, but this engine's natives may
+	// be declared differently from the one that saved it. Recompute when a
+	// compiler is present, so every result describes this engine.
+	RefreshTransitiveFunctionMetadata();
+
 #ifdef AS_DEBUG
 	// Verify that there are no unwanted gaps in the scriptFunctions array.
 	for( asUINT n = 1; n < m_engine->scriptFunctions.GetLength(); n++ )
@@ -1779,6 +1786,15 @@ int asCModule::CompileFunction(const char* sectionName, const char* code, int li
 
 	if (r >= 0)
 	{
+		if (m_scriptFunctions.IndexOf(func) >= 0)
+		{
+			ComputeTransitiveFunctionMetadata();
+		}
+		else
+		{
+			ComputeMemoryAccessOfDetachedFunction(func);
+		}
+
 		// Invoke the JIT compiler if it has been set
 		if (m_engine->jitCompiler)
 			func->JITCompile();
@@ -1856,6 +1872,210 @@ asDWORD asCModule::SetAccessMask(asDWORD mask)
 	asDWORD old = m_accessMask;
 	m_accessMask = mask;
 	return old;
+}
+
+// Declared inside #ifndef AS_NO_COMPILER in as_module.h; the definitions must
+// live inside the same guard or an AS_NO_COMPILER build fails to compile.
+#ifndef AS_NO_COMPILER
+// Every function a CALLINTF on `called` can dispatch to. Returns false when the
+// set is open: a shared type can gain implementations in a module built later,
+// so a result computed now would be too narrow then.
+bool asCModule::GetDispatchTargets(asCScriptFunction *called, asCArray<asCScriptFunction*> &outTargets) const
+{
+	if( called == 0 || called->objectType == 0 || called->objectType->IsShared() )
+	{
+		return false;
+	}
+	asCObjectType *baseType = called->objectType;
+	int vfIdx = called->vfTableIdx;
+	if( vfIdx < 0 )
+	{
+		return false;
+	}
+	for( asUINT c = 0; c < m_classTypes.GetLength(); c++ )
+	{
+		asCObjectType *classType = m_classTypes[c];
+		if( classType == 0 )
+		{
+			continue;
+		}
+		if( baseType->IsInterface() )
+		{
+			for( asUINT k = 0; k < classType->interfaces.GetLength(); k++ )
+			{
+				if( classType->interfaces[k] == baseType )
+				{
+					asUINT at = classType->interfaceVFTOffsets[k] + asUINT(vfIdx);
+					if( at >= classType->virtualFunctionTable.GetLength() )
+					{
+						return false;
+					}
+					if( classType->virtualFunctionTable[at] )
+					{
+						outTargets.PushLast(classType->virtualFunctionTable[at]);
+					}
+					break;
+				}
+			}
+			continue;
+		}
+		if( classType != baseType && !classType->DerivesFrom(baseType) )
+		{
+			continue;
+		}
+		if( asUINT(vfIdx) >= classType->virtualFunctionTable.GetLength() )
+		{
+			return false;
+		}
+		if( classType->virtualFunctionTable[vfIdx] )
+		{
+			outTargets.PushLast(classType->virtualFunctionTable[vfIdx]);
+		}
+	}
+	return true;
+}
+
+// Called after Build() completes, so all class types and function bodies are
+// finalized. Idempotent: a pure function of current module state, re-runnable
+// at any time, and it writes a function's byte only when the value changes, so
+// re-running it while contexts execute this module writes nothing.
+void asCModule::ComputeTransitiveFunctionMetadata()
+{
+	asUINT funcCount = (asUINT)m_scriptFunctions.GetLength();
+
+	// Build id -> index map over m_scriptFunctions only. Init funcs are never
+	// callees (no bytecode CALL targets them), so they don't need to be in this map.
+	asCMap<int, asUINT> funcIdToIndex;
+	for (asUINT i = 0; i < funcCount; i++)
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if (func && func->scriptData)
+		{
+			funcIdToIndex.Insert(func->id, i);
+		}
+	}
+
+	// Memory access: the least fixed point from {None, None}. A scan is
+	// monotone in its callees' scopes and in the destructors it consults, so
+	// results only rise and the loop ends. Round-robin rather than a worklist,
+	// because a function also depends on destructors it never calls directly.
+	asSMemoryAccessTable table;
+	table.funcIdToIndex = &funcIdToIndex;
+	table.access.SetLength(funcCount);
+	table.drops.SetLength(funcCount);
+	for (asUINT i = 0; i < funcCount; i++)
+	{
+		table.access[i] = asPackMemoryAccess(asMA_NONE, asMA_NONE);
+		table.drops[i] = false;
+	}
+	asCMemoryAccessScanner scanner(m_engine, this, &table);
+	bool changed = true;
+	while (changed)
+	{
+		changed = false;
+		for (asUINT i = 0; i < funcCount; i++)
+		{
+			asCScriptFunction *func = m_scriptFunctions[i];
+			if (!func || !func->scriptData)
+			{
+				continue;
+			}
+			asSMemoryScanResult res = scanner.Scan(func);
+			asBYTE packed = asPackMemoryAccess(res.read, res.write);
+			if (packed != table.access[i] || res.dropsStoredHandle != table.drops[i])
+			{
+				table.access[i] = packed;
+				table.drops[i] = res.dropsStoredHandle;
+				changed = true;
+			}
+		}
+	}
+	for (asUINT i = 0; i < funcCount; i++)
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if (func && func->scriptData && func->memoryAccess != table.access[i])
+		{
+			func->memoryAccess = table.access[i];
+		}
+	}
+
+	// A virtual or interface method has no body. A host asking about it gets
+	// the join over everything a call through it can reach.
+	for (asUINT i = 0; i < funcCount; i++)
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if (!func || (func->funcType != asFUNC_VIRTUAL && func->funcType != asFUNC_INTERFACE))
+		{
+			continue;
+		}
+		asEMemoryAccess r = asMA_PROGRAM, w = asMA_PROGRAM;
+		asCArray<asCScriptFunction*> targets;
+		if (GetDispatchTargets(func, targets))
+		{
+			r = w = asMA_NONE;
+			for (asUINT n = 0; n < targets.GetLength(); n++)
+			{
+				asEMemoryAccess tr, tw;
+				bool td;
+				scanner.AccessOf(targets[n], tr, tw, td);
+				if (tr > r)
+				{
+					r = tr;
+				}
+				if (tw > w)
+				{
+					w = tw;
+				}
+			}
+		}
+		asBYTE packed = asPackMemoryAccess(r, w);
+		if (func->memoryAccess != packed)
+		{
+			func->memoryAccess = packed;
+		}
+	}
+
+	// Global-property init funcs are pure sources: nothing calls them, so one
+	// scan against the settled table is final.
+	asCSymbolTableIterator<asCGlobalProperty> globIt = m_scriptGlobals.List();
+	while (globIt)
+	{
+		asCScriptFunction *initFunc = (*globIt)->GetInitFunc();
+		globIt++;
+		if (!initFunc)
+		{
+			continue;
+		}
+		asSMemoryScanResult res = scanner.Scan(initFunc);
+		asBYTE packed = asPackMemoryAccess(res.read, res.write);
+		if (initFunc->memoryAccess != packed)
+		{
+			initFunc->memoryAccess = packed;
+		}
+	}
+}
+
+// A CompileFunction product that was not added to the module: nothing calls it,
+// so one scan against the module's stored results is final.
+void asCModule::ComputeMemoryAccessOfDetachedFunction(asCScriptFunction *func)
+{
+	asCMemoryAccessScanner scanner(m_engine, this, 0);
+	asSMemoryScanResult res = scanner.Scan(func);
+	asBYTE packed = asPackMemoryAccess(res.read, res.write);
+	if (func->memoryAccess != packed)
+	{
+		func->memoryAccess = packed;
+	}
+}
+#endif // !AS_NO_COMPILER
+
+// Runs ComputeTransitiveFunctionMetadata when this build has a compiler. A
+// build without one keeps the results restored from the bytecode.
+void asCModule::RefreshTransitiveFunctionMetadata()
+{
+#ifndef AS_NO_COMPILER
+	ComputeTransitiveFunctionMetadata();
+#endif
 }
 
 END_AS_NAMESPACE

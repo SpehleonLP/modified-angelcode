@@ -187,6 +187,9 @@ public:
 	void JITCompile();
 
 #ifndef AS_NO_COMPILER
+	void ComputeTransitiveFunctionMetadata();
+	void ComputeMemoryAccessOfDetachedFunction(asCScriptFunction *func);
+	bool GetDispatchTargets(asCScriptFunction *called, asCArray<asCScriptFunction*> &outTargets) const;
 	int  AddScriptFunction(int sectionIdx, int declaredAt, int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asCString> &paramNames, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, bool isInterface, asCObjectType *objType = 0, bool isGlobalFunction = false, asSFunctionTraits funcTraits = asSFunctionTraits(), asSNameSpace *ns = 0);
 	int  AddScriptFunction(asCScriptFunction *func);
 	int  AddImportedFunction(int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, asSFunctionTraits funcTraits, asSNameSpace *ns, const asCString &moduleName);
@@ -195,6 +198,7 @@ public:
 
 	int                GetNextImportedFunctionId();
 	asCScriptFunction *GetImportedFunction(int funcId) const;
+	void               RefreshTransitiveFunctionMetadata();
 	asCTypeInfo       *GetType(const asCString &type, asSNameSpace *ns) const;
 	asCObjectType     *GetObjectType(const char *type, asSNameSpace *ns) const;
 	asCGlobalProperty *AllocateGlobalProperty(const char *name, const asCDataType &dt, asSNameSpace *ns);

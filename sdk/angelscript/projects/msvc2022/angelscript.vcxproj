@@ -458,6 +458,7 @@
     <ClCompile Include="..\..\source\as_generic.cpp" />
     <ClCompile Include="..\..\source\as_globalproperty.cpp" />
     <ClCompile Include="..\..\source\as_memory.cpp" />
+    <ClCompile Include="..\..\source\as_memoryaccess.cpp" />
     <ClCompile Include="..\..\source\as_module.cpp" />
     <ClCompile Include="..\..\source\as_objecttype.cpp" />
     <ClCompile Include="..\..\source\as_outputbuffer.cpp" />
@@ -493,6 +494,7 @@
     <ClInclude Include="..\..\source\as_generic.h" />
     <ClInclude Include="..\..\source\as_map.h" />
     <ClInclude Include="..\..\source\as_memory.h" />
+    <ClInclude Include="..\..\source\as_memoryaccess.h" />
     <ClInclude Include="..\..\source\as_module.h" />
     <ClInclude Include="..\..\source\as_objecttype.h" />
     <ClInclude Include="..\..\source\as_outputbuffer.h" />
