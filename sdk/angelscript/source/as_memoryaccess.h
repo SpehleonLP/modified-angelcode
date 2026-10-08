@@ -64,6 +64,8 @@ enum asEReferenceHold
 };
 
 const short asNO_SLOT = 0x7FFF;
+// The address of some frame slot, but paths disagree on which one
+const short asANY_SLOT = 0x7FFE;
 
 // The abstract value of one dword cell: a frame slot, a stack cell or a
 // register. Origins are asEMemoryAccess values. asMA_THIS as an origin means
@@ -73,7 +75,7 @@ struct asSAbstractValue
 	asBYTE origin;  // scope of memory reached through this value
 	asBYTE loads;   // origin of a pointer read through this value (RDSPtr)
 	asBYTE hold;    // asEReferenceHold
-	short  slot;    // frame offset this value is the address of, or asNO_SLOT
+	short  slot;    // frame offset this value is the address of, asNO_SLOT, or asANY_SLOT
 	short  varRef;  // frame offset an asBC_VAR placeholder stands for, or asNO_SLOT
 };
 
@@ -137,6 +139,15 @@ protected:
 	bool              Pop(State &s, asUINT dwords);
 	asSAbstractValue *Cell(State &s, asUINT dwordsFromTop);
 	bool              SetCells(State &s, asUINT dwordsFromTop, const asSAbstractValue &v);
+	// A pointer or 8-byte value spans the base cell and the one below it
+	bool              SetVarCells(State &s, int offset, const asSAbstractValue &v, asUINT dwords);
+	// A write through `addr` may change the frame slot it points to
+	void              ForgetSlot(State &s, const asSAbstractValue &addr, asUINT dwords);
+	asBYTE            FieldLoads(asBYTE baseOrigin, int typeId, int offset);
+	// The pointer occupying AS_PTR_SIZE cells k dwords from the top
+	bool              PtrAt(State &s, asUINT dwordsFromTop, asSAbstractValue &v);
+	// The address `offset` bytes into what `base` points to
+	asSAbstractValue  FieldOf(const asSAbstractValue &base, asBYTE loads, int offset);
 
 	void              RecordRead(asBYTE origin);
 	void              RecordWrite(asBYTE origin);

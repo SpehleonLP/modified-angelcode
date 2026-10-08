@@ -83,7 +83,8 @@ static asSAbstractValue JoinValue(const asSAbstractValue &a, const asSAbstractVa
 	v.origin = a.origin > b.origin ? a.origin : b.origin;
 	v.loads  = a.loads > b.loads ? a.loads : b.loads;
 	v.hold   = a.hold > b.hold ? a.hold : b.hold;
-	v.slot   = a.slot == b.slot ? a.slot : asNO_SLOT;
+	// Paths that disagree on which frame slot a value addresses may still address one
+	v.slot   = a.slot == b.slot ? a.slot : asANY_SLOT;
 	v.varRef = a.varRef == b.varRef ? a.varRef : asNO_SLOT;
 	return v;
 }
@@ -249,6 +250,114 @@ bool asCMemoryAccessScanner::SetCells(State &s, asUINT k, const asSAbstractValue
 	return true;
 }
 
+bool asCMemoryAccessScanner::SetVarCells(State &s, int offset, const asSAbstractValue &v, asUINT dwords)
+{
+	for( asUINT n = 0; n < dwords; n++ )
+	{
+		asSAbstractValue *c = Var(s, offset - int(n));
+		if( c == 0 )
+		{
+			return false;
+		}
+		*c = v;
+	}
+	return true;
+}
+
+void asCMemoryAccessScanner::ForgetSlot(State &s, const asSAbstractValue &addr, asUINT dwords)
+{
+	if( addr.slot == asNO_SLOT )
+	{
+		return;
+	}
+	if( addr.slot == asANY_SLOT )
+	{
+		// Which slot is unknown, so any of them may have changed
+		for( asUINT n = 0; n < s.vars.GetLength(); n++ )
+		{
+			s.vars[n] = Unknown();
+		}
+		return;
+	}
+	// A slot the write covers only partly is out of the frame's range, which
+	// the bytecode never produces; the cells that are in range still change
+	for( asUINT n = 0; n < dwords; n++ )
+	{
+		asSAbstractValue *c = Var(s, addr.slot - int(n));
+		if( c )
+		{
+			*c = Unknown();
+		}
+	}
+}
+
+// The origin of a pointer read from the field at `offset` of an object reached
+// by `baseOrigin`. Only script classes own the objects in their non-handle
+// reference members; every other pointer field is treated as reaching anything.
+asBYTE asCMemoryAccessScanner::FieldLoads(asBYTE baseOrigin, int typeId, int offset)
+{
+	asCObjectType *ot = engine->GetObjectTypeFromTypeId(typeId);
+	if( ot == 0 || !(ot->flags & asOBJ_SCRIPT_OBJECT) )
+	{
+		return asMA_PROGRAM;
+	}
+	for( asUINT n = 0; n < ot->properties.GetLength(); n++ )
+	{
+		asCObjectProperty *prop = ot->properties[n];
+		if( prop->byteOffset != offset )
+		{
+			continue;
+		}
+		if( prop->type.IsObjectHandle() || !prop->type.IsReference() )
+		{
+			return asMA_PROGRAM;
+		}
+		// A non-handle object member is owned by the object holding it
+		if( baseOrigin == asMA_THIS || baseOrigin == asMA_OWNED )
+		{
+			return asMA_OWNED;
+		}
+		return baseOrigin;
+	}
+	return asMA_PROGRAM;
+}
+
+bool asCMemoryAccessScanner::PtrAt(State &s, asUINT k, asSAbstractValue &v)
+{
+	asSAbstractValue *c = Cell(s, k);
+	if( c == 0 )
+	{
+		return false;
+	}
+	v = *c;
+	for( asUINT n = 1; n < AS_PTR_SIZE; n++ )
+	{
+		c = Cell(s, k + n);
+		if( c == 0 )
+		{
+			return false;
+		}
+		v = JoinValue(v, *c);
+	}
+	return true;
+}
+
+asSAbstractValue asCMemoryAccessScanner::FieldOf(const asSAbstractValue &base, asBYTE loads, int offset)
+{
+	asSAbstractValue v = Value(base.origin, loads, asRH_NONE);
+	// A field of an object stored inline in the frame is itself a frame address,
+	// and a write through it must reach the cells it covers
+	if( base.slot == asANY_SLOT || (base.slot != asNO_SLOT && (offset & 3)) )
+	{
+		v.slot = asANY_SLOT;
+	}
+	else if( base.slot != asNO_SLOT )
+	{
+		v.slot = short(base.slot - offset / 4);
+	}
+	return v;
+}
+
 bool asCMemoryAccessScanner::Merge(State &into, const State &from, bool &mismatch)
 {
 	mismatch = false;
@@ -298,6 +407,45 @@ bool asCMemoryAccessScanner::Merge(State &into, const State &from, bool &mismatc
 	return changed;
 }
 
+// What a parameter slot holds on entry (spec 2.1)
+static asSAbstractValue ParamValue(const asCDataType &dt, asETypeModifiers inOut)
+{
+	if( dt.GetTokenType() == ttQuestion )
+	{
+		return Value(asMA_PROGRAM, asMA_PROGRAM, asRH_NONE);
+	}
+	if( dt.IsReference() )
+	{
+		if( inOut == asTM_OUTREF )
+		{
+			return Value(asMA_NONE, asMA_PROGRAM, asRH_NONE);
+		}
+		// Only &in is ever copied; any other reference may alias anything
+		if( inOut != asTM_INREF )
+		{
+			return Value(asMA_PROGRAM, asMA_PROGRAM, asRH_NONE);
+		}
+		// &in: a primitive is copied or is the caller's own frame variable, and a
+		// non-const object is copied, but a const object is passed as it is
+		if( dt.IsPrimitive() || !dt.IsReadOnly() )
+		{
+			return Value(asMA_NONE, asMA_PROGRAM, asRH_NONE);
+		}
+		return Value(asMA_PROGRAM, asMA_PROGRAM, asRH_NONE);
+	}
+	if( dt.IsObjectHandle() )
+	{
+		// The caller may have handed over the only reference
+		return Value(asMA_PROGRAM, asMA_PROGRAM, asRH_OWNED);
+	}
+	if( dt.IsObject() )
+	{
+		// By value: a copy the callee owns
+		return Value(asMA_NONE, asMA_PROGRAM, asRH_OWNED);
+	}
+	return Unknown();
+}
+
 void asCMemoryAccessScanner::InitialState(State &s)
 {
 	s.reached = true;
@@ -323,7 +471,29 @@ void asCMemoryAccessScanner::InitialState(State &s)
 			}
 		}
 	}
-	// Task 4 adds `this`, the return pointer and the parameters here
+
+	if( func->objectType )
+	{
+		SetVarCells(s, 0, Value(asMA_THIS, asMA_PROGRAM, asRH_NONE), AS_PTR_SIZE);
+	}
+	// The caller's temporary for a value type returned by value
+	if( func->DoesReturnOnStack() )
+	{
+		SetVarCells(s, func->objectType ? -AS_PTR_SIZE : 0, Value(asMA_NONE, asMA_PROGRAM, asRH_NONE), AS_PTR_SIZE);
+	}
+	// Same offsets as asCCompiler::SetupParametersAndReturnVariable
+	int offset = -((func->objectType ? AS_PTR_SIZE : 0) + (func->DoesReturnOnStack() ? AS_PTR_SIZE : 0));
+	for( asUINT n = 0; n < func->parameterTypes.GetLength(); n++ )
+	{
+		const asCDataType &dt = func->parameterTypes[n];
+		asETypeModifiers inOut = n < func->inOutFlags.GetLength() ? func->inOutFlags[n] : asTM_NONE;
+		// A primitive by value is already Unknown, and its slot may be a single dword
+		if( dt.IsReference() || dt.IsObject() || dt.GetTokenType() == ttQuestion )
+		{
+			SetVarCells(s, offset, ParamValue(dt, inOut), AS_PTR_SIZE);
+		}
+		offset -= dt.GetSizeOnStackDWords();
+	}
 }
 
 void asCMemoryAccessScanner::CatchState(State &s, asUINT stackSize)
@@ -622,6 +792,325 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 	// The line callback is host code outside the analysis, like the GC
 	case asBC_SUSPEND:
 		break;
+
+	// Addresses of frame slots, and pointers held in them
+	case asBC_PSF:
+	{
+		short at = asBC_SWORDARG0(instr);
+		asSAbstractValue *slot = Var(s, at);
+		if( slot == 0 )
+		{
+			return false;
+		}
+		asSAbstractValue v = Value(asMA_NONE, slot->origin, asRH_NONE);
+		v.slot = at;
+		Push(s, v, AS_PTR_SIZE);
+		break;
+	}
+	case asBC_PshVPtr:
+	{
+		asSAbstractValue *slot = Var(s, asBC_SWORDARG0(instr));
+		if( slot == 0 )
+		{
+			return false;
+		}
+		// A copy borrows the reference the slot keeps
+		asSAbstractValue v = *slot;
+		v.hold   = asRH_NONE;
+		v.varRef = asNO_SLOT;
+		Push(s, v, AS_PTR_SIZE);
+		break;
+	}
+	case asBC_RDSPtr:
+	{
+		asSAbstractValue addr;
+		if( !PtrAt(s, 0, addr) )
+		{
+			return false;
+		}
+		RecordRead(addr.origin);
+		asSAbstractValue loaded;
+		if( addr.slot == asANY_SLOT )
+		{
+			loaded = Unknown();
+		}
+		else if( addr.slot != asNO_SLOT )
+		{
+			asSAbstractValue *slot = Var(s, addr.slot);
+			if( slot == 0 )
+			{
+				return false;
+			}
+			loaded = *slot;
+			loaded.hold   = asRH_NONE;
+			loaded.varRef = asNO_SLOT;
+		}
+		else
+		{
+			loaded = Value(addr.loads, asMA_PROGRAM, asRH_NONE);
+		}
+		if( !SetCells(s, 0, loaded) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_ADDSi:
+	{
+		asSAbstractValue a;
+		if( !PtrAt(s, 0, a) )
+		{
+			return false;
+		}
+		short offset = asBC_SWORDARG0(instr);
+		if( !SetCells(s, 0, FieldOf(a, FieldLoads(a.origin, int(asBC_DWORDARG(instr)), offset), offset)) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_LoadThisR:
+	{
+		asSAbstractValue *self = Var(s, 0);
+		if( self == 0 )
+		{
+			return false;
+		}
+		short offset = asBC_SWORDARG0(instr);
+		s.valueReg = FieldOf(*self, FieldLoads(self->origin, int(asBC_DWORDARG(instr)), offset), offset);
+		break;
+	}
+	case asBC_LoadRObjR:
+	{
+		// rW_W_DW: the type id is in the third dword, after the two words
+		asSAbstractValue *base = Var(s, asBC_SWORDARG0(instr));
+		if( base == 0 )
+		{
+			return false;
+		}
+		short offset = asBC_SWORDARG1(instr);
+		s.valueReg = FieldOf(*base, FieldLoads(base->origin, int(asBC_DWORDARG(instr + 1)), offset), offset);
+		break;
+	}
+	case asBC_LoadVObjR:
+	{
+		// A field of a value object stored inline in the frame
+		short at = asBC_SWORDARG0(instr);
+		if( Var(s, at) == 0 )
+		{
+			return false;
+		}
+		asSAbstractValue addr = Value(asMA_NONE, asMA_PROGRAM, asRH_NONE);
+		addr.slot = at;
+		short offset = asBC_SWORDARG1(instr);
+		s.valueReg = FieldOf(addr, FieldLoads(asMA_NONE, int(asBC_DWORDARG(instr + 1)), offset), offset);
+		break;
+	}
+	case asBC_LDV:
+	{
+		short at = asBC_SWORDARG0(instr);
+		asSAbstractValue *slot = Var(s, at);
+		if( slot == 0 )
+		{
+			return false;
+		}
+		s.valueReg = Value(asMA_NONE, slot->origin, asRH_NONE);
+		s.valueReg.slot = at;
+		break;
+	}
+	case asBC_PopRPtr:
+	{
+		asSAbstractValue a;
+		if( !PtrAt(s, 0, a) )
+		{
+			return false;
+		}
+		s.valueReg = a;
+		if( !Pop(s, AS_PTR_SIZE) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_PshRPtr:
+		Push(s, s.valueReg, AS_PTR_SIZE);
+		break;
+
+	// Reads and writes through the value register
+	case asBC_RDR1: case asBC_RDR2: case asBC_RDR4: case asBC_RDR8:
+		RecordRead(s.valueReg.origin);
+		if( !SetVarCells(s, asBC_SWORDARG0(instr), Unknown(), op == asBC_RDR8 ? 2 : 1) )
+		{
+			return false;
+		}
+		break;
+	case asBC_WRTV1: case asBC_WRTV2: case asBC_WRTV4: case asBC_WRTV8:
+		RecordWrite(s.valueReg.origin);
+		ForgetSlot(s, s.valueReg, op == asBC_WRTV8 ? 2 : 1);
+		break;
+	case asBC_INCi8: case asBC_INCi16: case asBC_INCi: case asBC_INCf: case asBC_INCd: case asBC_INCi64:
+	case asBC_DECi8: case asBC_DECi16: case asBC_DECi: case asBC_DECf: case asBC_DECd: case asBC_DECi64:
+		RecordRead(s.valueReg.origin);
+		RecordWrite(s.valueReg.origin);
+		ForgetSlot(s, s.valueReg, (op == asBC_INCd || op == asBC_DECd || op == asBC_INCi64 || op == asBC_DECi64) ? 2 : 1);
+		break;
+
+	// COPY: reads *src, writes *dst, and leaves dst on the stack
+	case asBC_COPY:
+	{
+		asSAbstractValue dst, src;
+		if( !PtrAt(s, 0, dst) || !PtrAt(s, AS_PTR_SIZE, src) )
+		{
+			return false;
+		}
+		RecordRead(src.origin);
+		RecordWrite(dst.origin);
+		ForgetSlot(s, dst, asBC_WORDARG0(instr));
+		if( !Pop(s, AS_PTR_SIZE) || !SetCells(s, 0, dst) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_ChkRefS:
+	{
+		asSAbstractValue a;
+		if( !PtrAt(s, 0, a) )
+		{
+			return false;
+		}
+		RecordRead(a.origin);
+		break;
+	}
+
+	// Argument placeholders, patched just before a call
+	case asBC_VAR:
+	{
+		asSAbstractValue v = Unknown();
+		v.varRef = asBC_SWORDARG0(instr);
+		Push(s, v, AS_PTR_SIZE);
+		break;
+	}
+	case asBC_GETREF:
+	{
+		asSAbstractValue ph;
+		if( !PtrAt(s, asBC_WORDARG0(instr), ph) || ph.varRef == asNO_SLOT )
+		{
+			return false;
+		}
+		asSAbstractValue *slot = Var(s, ph.varRef);
+		if( slot == 0 )
+		{
+			return false;
+		}
+		asSAbstractValue v = Value(asMA_NONE, slot->origin, asRH_NONE);
+		v.slot = ph.varRef;
+		if( !SetCells(s, asBC_WORDARG0(instr), v) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_GETOBJREF:
+	{
+		asSAbstractValue ph;
+		if( !PtrAt(s, asBC_WORDARG0(instr), ph) || ph.varRef == asNO_SLOT )
+		{
+			return false;
+		}
+		asSAbstractValue *slot = Var(s, ph.varRef);
+		if( slot == 0 )
+		{
+			return false;
+		}
+		asSAbstractValue v = *slot;
+		v.hold   = asRH_NONE;
+		v.varRef = asNO_SLOT;
+		if( !SetCells(s, asBC_WORDARG0(instr), v) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_GETOBJ:
+	{
+		// Moves the reference into the argument; Task 7 accounts for its release
+		asSAbstractValue ph;
+		if( !PtrAt(s, asBC_WORDARG0(instr), ph) || ph.varRef == asNO_SLOT )
+		{
+			return false;
+		}
+		asSAbstractValue *slot = Var(s, ph.varRef);
+		if( slot == 0 )
+		{
+			return false;
+		}
+		asSAbstractValue moved = *slot;
+		moved.varRef = asNO_SLOT;
+		if( !SetVarCells(s, ph.varRef, Null(), AS_PTR_SIZE) || !SetCells(s, asBC_WORDARG0(instr), moved) )
+		{
+			return false;
+		}
+		break;
+	}
+
+	// Registers holding objects
+	case asBC_LOADOBJ:
+	{
+		asSAbstractValue *slot = Var(s, asBC_SWORDARG0(instr));
+		if( slot == 0 )
+		{
+			return false;
+		}
+		s.objectReg = *slot;
+		if( !SetVarCells(s, asBC_SWORDARG0(instr), Null(), AS_PTR_SIZE) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_STOREOBJ:
+		if( !SetVarCells(s, asBC_SWORDARG0(instr), s.objectReg, AS_PTR_SIZE) )
+		{
+			return false;
+		}
+		s.objectReg = Null();
+		break;
+	case asBC_ClrVPtr:
+		if( !SetVarCells(s, asBC_SWORDARG0(instr), Null(), AS_PTR_SIZE) )
+		{
+			return false;
+		}
+		break;
+
+	// Initialisation-list buffers: fresh memory only this frame holds
+	case asBC_AllocMem:
+		if( !SetVarCells(s, asBC_SWORDARG0(instr), Value(asMA_NONE, asMA_PROGRAM, asRH_OWNED), AS_PTR_SIZE) )
+		{
+			return false;
+		}
+		break;
+	case asBC_SetListSize: case asBC_SetListType:
+	{
+		asSAbstractValue *slot = Var(s, asBC_SWORDARG0(instr));
+		if( slot == 0 )
+		{
+			return false;
+		}
+		RecordWrite(slot->origin);
+		ForgetSlot(s, FieldOf(*slot, asMA_PROGRAM, int(asBC_DWORDARG(instr))), 1);
+		break;
+	}
+	case asBC_PshListElmnt:
+	{
+		asSAbstractValue *slot = Var(s, asBC_SWORDARG0(instr));
+		if( slot == 0 )
+		{
+			return false;
+		}
+		Push(s, FieldOf(*slot, asMA_PROGRAM, int(asBC_DWORDARG(instr))), AS_PTR_SIZE);
+		break;
+	}
 
 	default:
 		// Fail closed: an opcode this scanner does not model makes the function Program

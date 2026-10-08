@@ -206,16 +206,35 @@ static bool TestFrameLocal()
 	return fail;
 }
 
-// A function using an opcode the scanner does not model yet must come out as
-// Program, never as something narrower. Task 4 makes this function precise;
-// this test then moves to its final expectation there.
-static bool TestFailsClosed()
+// Members are reached through `this`, an owned member object is Owned, anything
+// reached through a handle is Program, and each parameter kind starts from its
+// own scope (spec 2.1)
+static bool TestThisAndFields()
 {
 	bool fail = false;
 	COutStream out;
 	asIScriptEngine *engine = CreateEngine(out);
-	asIScriptModule *mod = BuildModule(engine, "closed",
-		"class C { int x; int get() { return x; } } \n");
+	asIScriptModule *mod = BuildModule(engine, "fields",
+		"class In { int v; } \n"
+		"class C \n"
+		"{ \n"
+		"  int x; \n"
+		"  In inner; \n"
+		"  In@ h; \n"
+		"  int get() { return x; } \n"
+		"  int getX() { return x; } \n"
+		"  void setX() { x = 1; } \n"
+		"  void setInner() { inner.v = 1; } \n"
+		"  int getInner() { return inner.v; } \n"
+		"  void setH() { h.v = 1; } \n"
+		"  void tern(bool c) { int a = 0; int b = 0; (c ? a : b) = 5; x = a; } \n"
+		"  int readRef(int a, const In &in o) { return o.v; } \n"
+		"  void writeOut(int a, In &out o) { o.v = 1; } \n"
+		"} \n"
+		"void outParam(int &out o) { o = 1; } \n"
+		"void inoutParam(In &inout o) { o.v = 1; } \n"
+		"int constIn(const In &in o) { return o.v; } \n"
+		"int byValueIn(In &in o) { return o.v; } \n");
 	if( mod == 0 )
 	{
 		TEST_FAILED;
@@ -229,8 +248,27 @@ static bool TestFailsClosed()
 		}
 		else
 		{
-			EXPECT_ACCESS(c->GetMethodByDecl("int get()"), asMA_PROGRAM, asMA_PROGRAM);
+			EXPECT_ACCESS(c->GetMethodByDecl("int get()"), asMA_THIS, asMA_NONE);
+			EXPECT_ACCESS(c->GetMethodByDecl("int getX()"), asMA_THIS, asMA_NONE);
+			EXPECT_ACCESS(c->GetMethodByDecl("void setX()"), asMA_NONE, asMA_THIS);
+			// Loading the member pointer reads `this`; the member object is Owned
+			EXPECT_ACCESS(c->GetMethodByDecl("void setInner()"), asMA_THIS, asMA_OWNED);
+			EXPECT_ACCESS(c->GetMethodByDecl("int getInner()"), asMA_OWNED, asMA_NONE);
+			// Anything reached through a handle is Program
+			EXPECT_ACCESS(c->GetMethodByDecl("void setH()"), asMA_THIS, asMA_PROGRAM);
+			// The two paths select different frame slots, so the write may have
+			// changed any slot, `this` included, and the member write is Program
+			EXPECT_ACCESS(c->GetMethodByDecl("void tern(bool)"), asMA_NONE, asMA_PROGRAM);
+			// Parameters off offset 0 reach their fields through LoadRObjR
+			EXPECT_ACCESS(c->GetMethodByDecl("int readRef(int, const In&in)"), asMA_PROGRAM, asMA_NONE);
+			EXPECT_ACCESS(c->GetMethodByDecl("void writeOut(int, In&out)"), asMA_NONE, asMA_NONE);
 		}
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void outParam(int&out)"), asMA_NONE, asMA_NONE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void inoutParam(In&inout)"), asMA_NONE, asMA_PROGRAM);
+		// The compiler passes a const &in object without copying it (spec 2.1)
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int constIn(const In&in)"), asMA_PROGRAM, asMA_NONE);
+		// A non-const &in is the caller's copy
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int byValueIn(In&in)"), asMA_NONE, asMA_NONE);
 	}
 	engine->ShutDownAndRelease();
 	return fail;
@@ -255,11 +293,13 @@ static bool TestDispatch()
 	COutStream out;
 	asIScriptEngine *engine = CreateEngine(out);
 
-	// D's override reads a member, which no task so far models, so the join reaches Program;
-	// E has a single frame-local body, which shows the narrowing path is live
+	// D's override writes a global, which no task so far models, so the join reaches
+	// Program (Task 5 moves it to {None, Module}); E has a single frame-local body,
+	// which shows the narrowing path is live
 	asIScriptModule *mod = BuildModule(engine, "overrides",
+		"int gx; \n"
 		"class B { int f(int a) { return a + 1; } } \n"
-		"class D : B { int x; int f(int a) override { return x; } } \n"
+		"class D : B { int f(int a) override { gx = a; return a; } } \n"
 		"class E { int g(int a) { return a; } } \n");
 	if( mod == 0 )
 	{
@@ -280,12 +320,15 @@ static bool TestDispatch()
 	}
 	else
 	{
-		EXPECT_ACCESS(MethodOf(mod, "S", "int h(int)"), asMA_PROGRAM, asMA_PROGRAM);	}
+		EXPECT_ACCESS(MethodOf(mod, "S", "int h(int)"), asMA_PROGRAM, asMA_PROGRAM);
+	}
 
+	// Q writes a global, which no task so far models (Task 5 moves I::k to {None, Module})
 	mod = BuildModule(engine, "interface",
+		"int gy; \n"
 		"interface I { int k(int a); } \n"
 		"class P : I { int k(int a) { return a; } } \n"
-		"class Q : I { int y; int k(int a) { return y; } } \n");
+		"class Q : I { int k(int a) { gy = a; return a; } } \n");
 	if( mod == 0 )
 	{
 		TEST_FAILED;
@@ -294,6 +337,21 @@ static bool TestDispatch()
 	{
 		EXPECT_ACCESS(MethodOf(mod, "I", "int k(int)"), asMA_PROGRAM, asMA_PROGRAM);
 		EXPECT_ACCESS(MethodOf(mod, "P", "int k(int)"), asMA_NONE, asMA_NONE);
+	}
+
+	// A member read in one implementation lifts the entry to This, above P's None
+	mod = BuildModule(engine, "interface4",
+		"interface J { int k(int a); } \n"
+		"class P2 : J { int k(int a) { return a; } } \n"
+		"class Q2 : J { int y; int k(int a) { return y; } } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(MethodOf(mod, "Q2", "int k(int)"), asMA_THIS, asMA_NONE);
+		EXPECT_ACCESS(MethodOf(mod, "J", "int k(int)"), asMA_THIS, asMA_NONE);
 	}
 
 	// Without Q every implementation is frame-local
@@ -411,7 +469,7 @@ bool Test()
 	{
 		fail = true;
 	}
-	if( TestFailsClosed() )
+	if( TestThisAndFields() )
 	{
 		fail = true;
 	}
