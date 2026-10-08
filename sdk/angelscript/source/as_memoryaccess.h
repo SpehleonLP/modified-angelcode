@@ -143,6 +143,18 @@ protected:
 	bool              SetVarCells(State &s, int offset, const asSAbstractValue &v, asUINT dwords);
 	// A write through `addr` may change the frame slot it points to
 	void              ForgetSlot(State &s, const asSAbstractValue &addr, asUINT dwords);
+	// The dwords of the variable at `offset`, or 0 when no variable starts there
+	asUINT            VarDwords(int offset) const;
+	// A callee handed the address `a` may have written the whole variable it points into
+	void              ForgetArgument(State &s, const asSAbstractValue &a);
+
+	// 0 for an id outside the engine's function table
+	asCScriptFunction *FunctionById(int id) const;
+	// Applies one call's effects and stack traffic; `callee` gives the signature
+	bool              DoCall(State &s, asCScriptFunction *callee, asUINT kind);
+	// The type behaviours that construct: they return an object no one else holds (spec 2.5)
+	bool              IsFactory(asCScriptFunction *callee) const;
+	void              CalleeAccess(asCScriptFunction *callee, asUINT kind, asEMemoryAccess &read, asEMemoryAccess &write, bool &drops);
 	asBYTE            FieldLoads(asBYTE baseOrigin, int typeId, int offset);
 	// The scope of the storage a global's address operand names
 	asBYTE            GlobalOrigin(void *address);

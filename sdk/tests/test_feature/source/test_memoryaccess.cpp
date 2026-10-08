@@ -191,15 +191,10 @@ static bool TestFrameLocal()
 	{
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int add(int, int)"), asMA_NONE, asMA_NONE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void loop()"), asMA_NONE, asMA_NONE);
-#if 0 // enabled by Task 6
+		// Recursion and mutual recursion settle at the least fixed point
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int fact(int)"), asMA_NONE, asMA_NONE);
-#endif
-#if 0 // enabled by Task 6
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int even(int)"), asMA_NONE, asMA_NONE);
-#endif
-#if 0 // enabled by Task 6
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int odd(int)"), asMA_NONE, asMA_NONE);
-#endif
 		EXPECT_ACCESS(mod->GetFunctionByDecl("double conv(int)"), asMA_NONE, asMA_NONE);
 	}
 	engine->ShutDownAndRelease();
@@ -474,6 +469,7 @@ static bool TestCompileGlobalVar()
 }
 
 static int g_engineInt = 0;
+static int g_engineVec = 0;
 
 // A script global is Module, a registered property is Engine, and the object a
 // non-handle global holds belongs to that global
@@ -488,6 +484,11 @@ static bool TestGlobals()
 	}
 	if( engine->RegisterObjectType("vec", sizeof(int), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_PRIMITIVE) < 0 ||
 		engine->RegisterObjectProperty("vec", "int x", 0) < 0 )
+	{
+		TEST_FAILED;
+	}
+	// A registered object global: PGA yields &realAddress, a pointer to the application's object
+	if( engine->RegisterGlobalProperty("vec rv", &g_engineVec) < 0 )
 	{
 		TEST_FAILED;
 	}
@@ -507,7 +508,9 @@ static bool TestGlobals()
 		"int postInc() { return g++; } \n"
 		"vec gv; \n"
 		"int readGv() { return gv.x; } \n"
-		"void writeGv() { gv.x = 1; } \n");
+		"void writeGv() { gv.x = 1; } \n"
+		"void writeRv() { rv.x = 1; } \n"
+		"void incEg() { eg++; } \n");
 	if( mod == 0 )
 	{
 		TEST_FAILED;
@@ -527,6 +530,299 @@ static bool TestGlobals()
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int postInc()"), asMA_MODULE, asMA_MODULE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int readGv()"), asMA_MODULE, asMA_NONE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeGv()"), asMA_MODULE, asMA_MODULE);
+		// Loading the object pointer reads the property; the object belongs to the engine
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeRv()"), asMA_ENGINE, asMA_ENGINE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void incEg()"), asMA_ENGINE, asMA_ENGINE);
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+// Nothing writes world-stable state while the VM runs, so no inferred write
+// scope may ever be WorldStable. Returns true on a violation.
+static bool CheckWriteNotWorldStable(asIScriptFunction *func, int line)
+{
+	if( func == 0 )
+	{
+		return false;
+	}
+	asEMemoryAccess r = asMA_UNSET, w = asMA_UNSET;
+	func->GetMemoryAccess(&r, &w);
+	if( w == asMA_WORLD_STABLE )
+	{
+		PRINTF("memory access of '%s' writes WorldStable (line %d)\n", func->GetDeclaration(true, true, true), line);
+		return true;
+	}
+	return false;
+}
+
+static bool CheckModuleWrites(asIScriptModule *mod, int line)
+{
+	bool bad = false;
+	for( asUINT n = 0; n < mod->GetFunctionCount(); n++ )
+	{
+		if( CheckWriteNotWorldStable(mod->GetFunctionByIndex(n), line) )
+		{
+			bad = true;
+		}
+	}
+	for( asUINT t = 0; t < mod->GetObjectTypeCount(); t++ )
+	{
+		asITypeInfo *type = mod->GetObjectTypeByIndex(t);
+		for( asUINT n = 0; n < type->GetMethodCount(); n++ )
+		{
+			if( CheckWriteNotWorldStable(type->GetMethodByIndex(n, true), line) ||
+				CheckWriteNotWorldStable(type->GetMethodByIndex(n, false), line) )
+			{
+				bad = true;
+			}
+		}
+		for( asUINT n = 0; n < type->GetFactoryCount(); n++ )
+		{
+			if( CheckWriteNotWorldStable(type->GetFactoryByIndex(n), line) )
+			{
+				bad = true;
+			}
+		}
+		for( asUINT n = 0; n < type->GetBehaviourCount(); n++ )
+		{
+			if( CheckWriteNotWorldStable(type->GetBehaviourByIndex(n, 0), line) )
+			{
+				bad = true;
+			}
+		}
+	}
+	return bad;
+}
+
+#define EXPECT_NO_WORLD_STABLE_WRITE(mod) if( CheckModuleWrites((mod), __LINE__) ) TEST_FAILED
+
+class CBuf
+{
+public:
+	CBuf() : refCount(1) { memset(data, 0, sizeof(data)); }
+	void AddRef() { refCount++; }
+	void Release() { if( --refCount == 0 ) delete this; }
+	int &At(int i) { return data[i & 7]; }
+	int refCount;
+	int data[8];
+};
+static CBuf *BufFactory() { return new CBuf(); }
+static CBuf *g_sharedBuf = 0;
+static CBuf *SharedBuf() { g_sharedBuf->AddRef(); return g_sharedBuf; }
+static void Pick(CBuf **out) { *out = SharedBuf(); }
+static float PureFn(float f) { return f * 2; }
+static int PureFnInt(int i) { return i * 2; }
+static int g_config = 3;
+static int Config() { return g_config; }
+
+static void RegisterTestNatives(asIScriptEngine *engine)
+{
+	int r;
+	r = engine->RegisterGlobalFunction("float pureFn(float)", asFUNCTION(PureFn), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterGlobalFunction("int pureFnInt(int)", asFUNCTION(PureFnInt), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	// Reads configuration the host changes only while the VM is stopped
+	r = engine->RegisterGlobalFunction("int config()", asFUNCTION(Config), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_WORLD_STABLE, asMA_NONE);
+	r = engine->RegisterGlobalFunction("void undeclared()", asFUNCTION(NativeNoop), asCALL_CDECL); assert( r >= 0 );
+
+	r = engine->RegisterObjectType("Buf", 0, asOBJ_REF); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("Buf", asBEHAVE_FACTORY, "Buf@ f()", asFUNCTION(BufFactory), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterObjectBehaviour("Buf", asBEHAVE_ADDREF, "void f()", asMETHOD(CBuf, AddRef), asCALL_THISCALL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterObjectBehaviour("Buf", asBEHAVE_RELEASE, "void f()", asMETHOD(CBuf, Release), asCALL_THISCALL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterObjectMethod("Buf", "int &opIndex(int)", asMETHOD(CBuf, At), asCALL_THISCALL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_THIS);
+	r = engine->RegisterGlobalFunction("Buf@ sharedBuf()", asFUNCTION(SharedBuf), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	// Hands out the shared object through an argument
+	r = engine->RegisterGlobalFunction("void pick(Buf@ &out)", asFUNCTION(Pick), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+}
+
+static bool TestCalls()
+{
+	bool fail = false;
+	g_sharedBuf = new CBuf();
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	RegisterTestNatives(engine);
+	asIScriptModule *mod = BuildModule(engine, "calls",
+		"int g; \n"
+		"int counter; \n"
+		"float callPure(float a) { return pureFn(a); } \n"
+		"void callUndeclared() { undeclared(); } \n"
+		"void localBuf() { Buf b; b[0] = 1; } \n"
+		"class HasBuf { Buf b; void set() { b[0] = 1; } } \n"
+		"void sharedB() { Buf@ b = sharedBuf(); b[0] = 1; } \n"
+		"void slotClear() { Buf b; Buf@ h = b; pick(h); h[0] = 1; } \n"
+		"class M { void bump() { counter++; } void viaThis() { bump(); } } \n"
+		"void viaHandle(M@ m) { m.bump(); } \n"
+		"funcdef void CB(); \n"
+		"void callCb(CB@ cb) { cb(); } \n"
+		"void a(int n) { if( n > 0 ) b(n - 1); } \n"
+		"void b(int n) { g = n; a(n); } \n"
+		"void tc() { try { g = 1; } catch { counter = 2; } } \n"
+		"shared class S { void f() {} void h() { f(); } } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(mod->GetFunctionByDecl("float callPure(float)"), asMA_NONE, asMA_NONE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void callUndeclared()"), asMA_UNSET, asMA_UNSET);
+#if 0 // enabled by Task 7
+		// A factory returns a fresh object, so This on it is None
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void localBuf()"), asMA_NONE, asMA_NONE);
+#endif
+		// Thiscall1 on a member object: its This effects land on Owned
+		EXPECT_ACCESS(MethodOf(mod, "HasBuf", "void set()"), asMA_OWNED, asMA_OWNED);
+#if 0 // enabled by Task 7
+		// A handle returned by a non-factory may be held anywhere
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void sharedB()"), asMA_PROGRAM, asMA_PROGRAM);
+		// pick writes the &out temporary whose address it gets (PSF), so the
+		// temporary no longer holds the null it held on entry, and h may then be
+		// the shared object. Fails if the call leaves the slot's old value.
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void slotClear()"), asMA_PROGRAM, asMA_PROGRAM);
+#endif
+		EXPECT_ACCESS(MethodOf(mod, "M", "void bump()"), asMA_MODULE, asMA_MODULE);
+		EXPECT_ACCESS(MethodOf(mod, "M", "void viaThis()"), asMA_MODULE, asMA_MODULE);
+		// Spec 2.2: a Module method called through a handle touches a Program object
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaHandle(M@)"), asMA_PROGRAM, asMA_PROGRAM);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void callCb(CB@)"), asMA_PROGRAM, asMA_PROGRAM);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void a(int)"), asMA_NONE, asMA_MODULE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void b(int)"), asMA_NONE, asMA_MODULE);
+		// The catch block starts from a fresh state, and its write still counts
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void tc()"), asMA_NONE, asMA_MODULE);
+		// A shared class may gain overrides later
+		EXPECT_ACCESS(MethodOf(mod, "S", "void h()"), asMA_PROGRAM, asMA_PROGRAM);
+		EXPECT_NO_WORLD_STABLE_WRITE(mod);
+	}
+	engine->ShutDownAndRelease();
+	g_sharedBuf->Release();
+	g_sharedBuf = 0;
+	return fail;
+}
+
+static bool TestVirtualJoin()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	asIScriptModule *plain = BuildModule(engine, "plain",
+		"class Base { void f() {} void g() { f(); } } \n");
+	asIScriptModule *derived = BuildModule(engine, "derived",
+		"int counter; \n"
+		"class Base { void f() {} void g() { f(); } } \n"
+		"class Derived : Base { void f() override { counter++; } } \n");
+	if( plain == 0 || derived == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(MethodOf(plain, "Base", "void g()"), asMA_NONE, asMA_NONE);
+		// Dispatch may land on the override
+		EXPECT_ACCESS(MethodOf(derived, "Base", "void g()"), asMA_MODULE, asMA_MODULE);
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+static void VecSet(int *v)
+{
+	*v = 1;
+}
+static int g_pinVec = 0;
+
+// The contribution rule, ALLOC, returned references and the opcodes calls bring in
+static bool TestCallPins()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	RegisterTestNatives(engine);
+	int r;
+	r = engine->RegisterObjectType("vec", sizeof(int), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_PRIMITIVE); assert( r >= 0 );
+	r = engine->RegisterObjectProperty("vec", "int x", 0); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("vec", "void set()", asFUNCTION(VecSet), asCALL_CDECL_OBJLAST); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_THIS);
+	r = engine->RegisterGlobalProperty("vec rv", &g_pinVec); assert( r >= 0 );
+	asIScriptModule *mod = BuildModule(engine, "callpins",
+		"int g; \n"
+		"int counter; \n"
+		"class W { int x; void setX() { x = 1; } } \n"
+		"W gw; \n"
+		"void callOnGlobal() { gw.setX(); } \n"
+		"class HasW { W w; void go() { w.setX(); } } \n"
+		"vec gv; \n"
+		"void setGv() { gv.set(); } \n"
+		"void setRv() { rv.set(); } \n"
+		"void setLocal() { vec a; a.set(); } \n"
+		"class HasV { vec v; void go() { v.set(); } } \n"
+		"void copyVec() { vec a; gv = a; } \n"
+		"K3@ mk() { return K3(); } \n"
+		"int passG() { return pureFnInt(g); } \n"
+		"int readConfig() { return config(); } \n"
+		"int &refG() { return g; } \n"
+		"void writeRefG() { refG() = 1; } \n"
+		"class K3 { int v; K3() { v = 1; } } \n"
+		"class K2 { K2() { counter = 1; } } \n"
+		"void outInt(int &out o) { o = 1; } \n"
+		"void callOut() { int x; outInt(x); } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(MethodOf(mod, "W", "void setX()"), asMA_NONE, asMA_THIS);
+#if 0 // enabled by Task 7
+		// Spec 2.2: setX's This lands on the module global's object. The compiler
+		// keeps the object alive in a temporary (RefCpyV ... FREE).
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void callOnGlobal()"), asMA_MODULE, asMA_MODULE);
+#endif
+		// Spec 2.2: the callee's This lands on an owned member's object (RDSPtr reads this)
+		EXPECT_ACCESS(MethodOf(mod, "HasW", "void go()"), asMA_THIS, asMA_OWNED);
+		// ... on a module global's object (PshGPtr reads the global's storage)
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void setGv()"), asMA_MODULE, asMA_MODULE);
+		// ... on a registered global's object
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void setRv()"), asMA_ENGINE, asMA_ENGINE);
+		// ... on a local stored inline in the frame
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void setLocal()"), asMA_NONE, asMA_NONE);
+		// ... and on a value member stored inline in `this`
+		EXPECT_ACCESS(MethodOf(mod, "HasV", "void go()"), asMA_NONE, asMA_THIS);
+		// COPY writes the global's object; loading its pointer reads the global
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void copyVec()"), asMA_MODULE, asMA_MODULE);
+		// CALL of a factory stub, STOREOBJ, LOADOBJ
+		EXPECT_ACCESS(mod->GetFunctionByDecl("K3@ mk()"), asMA_NONE, asMA_NONE);
+		// PshG4 reads the module global for the argument
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int passG()"), asMA_MODULE, asMA_NONE);
+		// WorldStable passes through a call unchanged
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int readConfig()"), asMA_WORLD_STABLE, asMA_NONE);
+		// Returning a reference exposes what it points to, though taking the address reads nothing
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int& refG()"), asMA_MODULE, asMA_NONE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeRefG()"), asMA_MODULE, asMA_MODULE);
+		// ALLOC: the constructor's This lands on a fresh object, LOADOBJ hands it over
+		asITypeInfo *k3 = mod->GetTypeInfoByName("K3");
+		asITypeInfo *k2 = mod->GetTypeInfoByName("K2");
+		if( k3 == 0 || k2 == 0 )
+		{
+			TEST_FAILED;
+		}
+		else
+		{
+			EXPECT_ACCESS(k3->GetFactoryByIndex(0), asMA_NONE, asMA_NONE);
+			EXPECT_ACCESS(k2->GetFactoryByIndex(0), asMA_NONE, asMA_MODULE);
+		}
+		// VAR and GETREF pass the address of a temporary
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void callOut()"), asMA_NONE, asMA_NONE);
+		EXPECT_NO_WORLD_STABLE_WRITE(mod);
 	}
 	engine->ShutDownAndRelease();
 	return fail;
@@ -564,6 +860,18 @@ bool Test()
 		fail = true;
 	}
 	if( TestGlobals() )
+	{
+		fail = true;
+	}
+	if( TestCalls() )
+	{
+		fail = true;
+	}
+	if( TestVirtualJoin() )
+	{
+		fail = true;
+	}
+	if( TestCallPins() )
 	{
 		fail = true;
 	}

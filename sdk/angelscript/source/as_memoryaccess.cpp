@@ -304,6 +304,253 @@ void asCMemoryAccessScanner::ForgetSlot(State &s, const asSAbstractValue &addr, 
 	}
 }
 
+asCScriptFunction *asCMemoryAccessScanner::FunctionById(int id) const
+{
+	if( id < 0 || asUINT(id) >= engine->scriptFunctions.GetLength() )
+	{
+		return 0;
+	}
+	return engine->scriptFunctions[asUINT(id)];
+}
+
+// Same sizes as asCCompiler::GetVariableOffset. The compiler reuses a slot
+// only for an identical type, so every variable at an offset has one size.
+asUINT asCMemoryAccessScanner::VarDwords(int offset) const
+{
+	for( asUINT n = 0; n < func->scriptData->variables.GetLength(); n++ )
+	{
+		asSScriptVariable *v = func->scriptData->variables[n];
+		if( v->stackOffset != offset )
+		{
+			continue;
+		}
+		int size;
+		if( !v->type.IsReference() && !v->onHeap && v->type.IsObject() )
+		{
+			size = v->type.GetSizeInMemoryDWords();
+		}
+		else
+		{
+			size = v->type.GetSizeOnStackDWords();
+		}
+		return asUINT(size > AS_PTR_SIZE ? size : AS_PTR_SIZE);
+	}
+	return 0;
+}
+
+void asCMemoryAccessScanner::ForgetArgument(State &s, const asSAbstractValue &a)
+{
+	if( a.slot == asNO_SLOT )
+	{
+		return;
+	}
+	asUINT dwords = a.slot == asANY_SLOT ? 0 : VarDwords(a.slot);
+	if( dwords == 0 )
+	{
+		// An address inside a variable, or of no known variable: the callee
+		// may write anywhere in it, and its extent is unknown
+		asSAbstractValue any = a;
+		any.slot = asANY_SLOT;
+		ForgetSlot(s, any, 0);
+		return;
+	}
+	ForgetSlot(s, a, dwords);
+}
+
+enum
+{
+	asCALLKIND_DIRECT,   // CALL, CALLSYS, Thiscall1, ALLOC: the callee is known
+	asCALLKIND_DISPATCH, // CALLINTF: the callee is a virtual or interface method
+	asCALLKIND_UNKNOWN   // CallPtr, CALLBND: only the signature is known
+};
+
+bool asCMemoryAccessScanner::IsFactory(asCScriptFunction *callee) const
+{
+	asCObjectType *ot = CastToObjectType(callee->returnType.GetTypeInfo());
+	if( ot == 0 )
+	{
+		return false;
+	}
+	if( ot->beh.listFactory == callee->id || ot->beh.copyfactory == callee->id )
+	{
+		return true;
+	}
+	for( asUINT n = 0; n < ot->beh.factories.GetLength(); n++ )
+	{
+		if( ot->beh.factories[n] == callee->id )
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+void asCMemoryAccessScanner::CalleeAccess(asCScriptFunction *callee, asUINT kind, asEMemoryAccess &r, asEMemoryAccess &w, bool &d)
+{
+	// A virtual entry has no body, and its stored byte is stale inside the
+	// fixed point (Unset on a first build), so it is reached through its targets
+	if( callee->funcType == asFUNC_VIRTUAL || callee->funcType == asFUNC_INTERFACE )
+	{
+		kind = asCALLKIND_DISPATCH;
+	}
+	else if( callee->funcType == asFUNC_FUNCDEF || callee->funcType == asFUNC_IMPORTED || callee->funcType == asFUNC_DELEGATE )
+	{
+		kind = asCALLKIND_UNKNOWN;
+	}
+	if( kind == asCALLKIND_UNKNOWN )
+	{
+		r = w = asMA_PROGRAM;
+		d = true;
+		return;
+	}
+	if( kind == asCALLKIND_DISPATCH )
+	{
+		// The targets are found among this module's classes, so a type owned by
+		// another module would yield an empty, falsely narrow set
+		asCArray<asCScriptFunction*> targets;
+		if( module == 0 || callee->objectType == 0 || callee->objectType->module != module ||
+			!module->GetDispatchTargets(callee, targets) )
+		{
+			r = w = asMA_PROGRAM;
+			d = true;
+			return;
+		}
+		r = w = asMA_NONE;
+		d = false;
+		for( asUINT n = 0; n < targets.GetLength(); n++ )
+		{
+			asEMemoryAccess tr, tw;
+			bool td;
+			AccessOf(targets[n], tr, tw, td);
+			r = Join(r, tr);
+			w = Join(w, tw);
+			d = d || td;
+		}
+		return;
+	}
+	AccessOf(callee, r, w, d);
+}
+
+bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT kind)
+{
+	if( callee == 0 || callee->IsVariadic() )
+	{
+		return false;
+	}
+	asUINT thisSize = callee->objectType ? AS_PTR_SIZE : 0;
+	asUINT retSize  = callee->DoesReturnOnStack() ? AS_PTR_SIZE : 0;
+	asUINT total    = thisSize + retSize + asUINT(callee->GetSpaceNeededForArguments());
+	if( s.stack.GetLength() < total )
+	{
+		return false;
+	}
+
+	asBYTE objectOrigin = asMA_THIS; // identity for calls without an object
+	asSAbstractValue obj;
+	if( thisSize && !PtrAt(s, 0, obj) )
+	{
+		return false;
+	}
+	if( thisSize )
+	{
+		objectOrigin = obj.origin;
+	}
+
+	asEMemoryAccess r, w;
+	bool d;
+	CalleeAccess(callee, kind, r, w, d);
+	RecordRead(asMemoryAccessReadContribution(r, objectOrigin));
+	RecordWrite(asMemoryAccessContribution(w, objectOrigin));
+	if( d )
+	{
+		drops = true;
+	}
+
+	// A returned reference points into memory the callee read, or into the
+	// object or an argument it was given (spec 2.5). A script callee counts
+	// the reference it returns as read (asBC_RET), because taking an address
+	// reads nothing.
+	asBYTE refOrigin = asMemoryAccessContribution(r, objectOrigin);
+	if( refOrigin == asMA_WORLD_STABLE )
+	{
+		// Nothing may write through it
+		refOrigin = asMA_PROGRAM;
+	}
+	// The reference may point into a frame variable the caller passed, at an
+	// offset the scanner cannot know
+	bool refIntoFrame = false;
+	if( thisSize )
+	{
+		if( obj.origin > refOrigin )
+		{
+			refOrigin = obj.origin;
+		}
+		refIntoFrame = obj.slot != asNO_SLOT;
+	}
+	asUINT k = thisSize + retSize;
+	for( asUINT n = 0; n < callee->parameterTypes.GetLength(); n++ )
+	{
+		const asCDataType &dt = callee->parameterTypes[n];
+		if( dt.IsReference() || dt.IsObjectHandle() || dt.IsObject() || dt.GetTokenType() == ttQuestion )
+		{
+			asSAbstractValue arg;
+			if( !PtrAt(s, k, arg) )
+			{
+				return false;
+			}
+			if( arg.origin > refOrigin )
+			{
+				refOrigin = arg.origin;
+			}
+			if( arg.slot != asNO_SLOT )
+			{
+				refIntoFrame = true;
+			}
+		}
+		// Task 7 adds the clean-up of handle and by-value arguments after a system call here
+		k += dt.GetSizeOnStackDWords();
+	}
+
+	// The callee may write any frame variable whose address it was given:
+	// `this` of an inline value, the return location, or an argument
+	for( asUINT n = 0; n < total; n++ )
+	{
+		asSAbstractValue cell = *Cell(s, n);
+		ForgetArgument(s, cell);
+	}
+
+	if( !Pop(s, total) )
+	{
+		return false;
+	}
+
+	// Where the result lands (opcode-semantics.md, section C). Any call may
+	// leave the value register changed.
+	s.valueReg = Unknown();
+	const asCDataType &rt = callee->returnType;
+	if( rt.IsReference() )
+	{
+		s.valueReg = Value(refOrigin, asMA_PROGRAM, asRH_NONE);
+		if( refIntoFrame )
+		{
+			s.valueReg.slot = asANY_SLOT;
+		}
+	}
+	else if( rt.IsObjectHandle() || rt.IsFuncdef() || (rt.IsObject() && !callee->DoesReturnOnStack()) )
+	{
+		if( kind == asCALLKIND_DIRECT && IsFactory(callee) )
+		{
+			s.objectReg = Value(asMA_NONE, asMA_PROGRAM, asRH_OWNED);
+		}
+		else
+		{
+			// A returned handle may be held anywhere (spec 2.5)
+			s.objectReg = Value(asMA_PROGRAM, asMA_PROGRAM, asRH_OWNED);
+		}
+	}
+	return true;
+}
+
 // The origin of a pointer read from the field at `offset` of an object reached
 // by `baseOrigin`. Only script classes own the objects in their non-handle
 // reference members; every other pointer field is treated as reaching anything.
@@ -717,6 +964,13 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 	{
 	// Control flow
 	case asBC_RET:
+		// Returning a reference hands the caller what it points to. Taking the
+		// address of a member or a global reads nothing (LoadThisR, LDG), so
+		// without this a caller writing through the reference would see None.
+		if( func->returnType.IsReference() )
+		{
+			RecordRead(s.valueReg.origin);
+		}
 		fallsThrough = false;
 		break;
 	case asBC_JMP:
@@ -1224,6 +1478,145 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 			return false;
 		}
 		Push(s, FieldOf(*slot, asMA_PROGRAM, int(asBC_DWORDARG(instr))), AS_PTR_SIZE);
+		break;
+	}
+
+	// Calls (spec 2.2)
+	case asBC_CALL: case asBC_CALLSYS:
+		if( !DoCall(s, FunctionById(asBC_INTARG(instr)), asCALLKIND_DIRECT) )
+		{
+			return false;
+		}
+		break;
+	case asBC_CALLINTF:
+		if( !DoCall(s, FunctionById(asBC_INTARG(instr)), asCALLKIND_DISPATCH) )
+		{
+			return false;
+		}
+		break;
+	case asBC_Thiscall1:
+	{
+		// T &obj::f(int): pops `this` and one int; the reference lands in the value register
+		asCScriptFunction *callee = FunctionById(asBC_INTARG(instr));
+		if( callee == 0 || callee->objectType == 0 || callee->DoesReturnOnStack() || callee->GetSpaceNeededForArguments() != 1 )
+		{
+			return false;
+		}
+		if( !DoCall(s, callee, asCALLKIND_DIRECT) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_CallPtr:
+	{
+		// The signature comes from the funcdef type of the variable holding the pointer
+		asCFuncdefType *fd = CastToFuncdefType(VarType(asBC_SWORDARG0(instr)));
+		if( fd == 0 || !DoCall(s, fd->funcdef, asCALLKIND_UNKNOWN) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_CALLBND:
+	{
+		int importIdx = asBC_INTARG(instr) & ~FUNC_IMPORTED;
+		if( importIdx < 0 || asUINT(importIdx) >= engine->importedFunctions.GetLength() || engine->importedFunctions[importIdx] == 0 )
+		{
+			return false;
+		}
+		if( !DoCall(s, engine->importedFunctions[importIdx]->importedFunctionSignature, asCALLKIND_UNKNOWN) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_ALLOC:
+	{
+		// Constructs a fresh object at *dest: the constructor runs on an object only this frame holds
+		int ctorId = asBC_INTARG(instr + AS_PTR_SIZE);
+		asCScriptFunction *ctor = 0;
+		if( ctorId )
+		{
+			ctor = FunctionById(ctorId);
+			if( ctor == 0 || ctor->IsVariadic() )
+			{
+				return false;
+			}
+		}
+		// A template's hidden type argument is one of the constructor's parameters
+		asUINT args = ctor ? asUINT(ctor->GetSpaceNeededForArguments()) : 0;
+		asSAbstractValue destination;
+		if( !PtrAt(s, args, destination) )
+		{
+			return false;
+		}
+		if( ctor )
+		{
+			asEMemoryAccess r, w;
+			bool d;
+			CalleeAccess(ctor, asCALLKIND_DIRECT, r, w, d);
+			RecordRead(asMemoryAccessReadContribution(r, asMA_NONE));
+			RecordWrite(asMemoryAccessContribution(w, asMA_NONE));
+			if( d )
+			{
+				drops = true;
+			}
+			// Task 7 adds the clean-up of handle and by-value arguments here
+			for( asUINT n = 0; n < args; n++ )
+			{
+				asSAbstractValue cell = *Cell(s, n);
+				ForgetArgument(s, cell);
+			}
+		}
+		RecordWrite(destination.origin);
+		if( !Pop(s, args + AS_PTR_SIZE) )
+		{
+			return false;
+		}
+		if( destination.slot == asANY_SLOT )
+		{
+			ForgetSlot(s, destination, AS_PTR_SIZE);
+		}
+		else if( destination.slot != asNO_SLOT )
+		{
+			if( !SetVarCells(s, destination.slot, Value(asMA_NONE, asMA_PROGRAM, asRH_OWNED), AS_PTR_SIZE) )
+			{
+				return false;
+			}
+		}
+		s.valueReg = Unknown();
+		break;
+	}
+	case asBC_Cast:
+	{
+		// Reads the handle at the address; the result is a new reference to the same object
+		asSAbstractValue addr;
+		if( !PtrAt(s, 0, addr) )
+		{
+			return false;
+		}
+		RecordRead(addr.origin);
+		asBYTE origin = addr.loads;
+		if( addr.slot == asANY_SLOT )
+		{
+			origin = asMA_PROGRAM;
+		}
+		else if( addr.slot != asNO_SLOT )
+		{
+			asSAbstractValue *slot = Var(s, addr.slot);
+			if( slot == 0 )
+			{
+				return false;
+			}
+			origin = slot->origin;
+		}
+		if( !Pop(s, AS_PTR_SIZE) )
+		{
+			return false;
+		}
+		// A failed cast leaves the register null, which this value covers
+		s.objectReg = Value(origin, asMA_PROGRAM, asRH_COPIED);
 		break;
 	}
 
