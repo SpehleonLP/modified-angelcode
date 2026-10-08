@@ -1447,12 +1447,23 @@ asCScriptFunction *asCReader::ReadFunction(bool &isNew, bool addToModule, bool a
 					for (asUINT n = 0; n < countParam; n++)
 						ReadString(&func->parameterNames[n]);
 				}
+
+				// Memory access; the reserved bits are dropped. Stored regardless of debug info,
+				// so that an engine without the compiler still knows the scopes
+				asBYTE access = 0;
+				ReadData(&access, 1);
+				func->memoryAccess = asPackMemoryAccess(asMemoryAccessRead(access), asMemoryAccessWrite(access));
 			}
 		}
 	}
 	else if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
 	{
 		func->vfTableIdx = ReadEncodedUInt();
+
+		// Memory access: the join over the dispatch targets, which only a compiler build can recompute
+		asBYTE access = 0;
+		ReadData(&access, 1);
+		func->memoryAccess = asPackMemoryAccess(asMemoryAccessRead(access), asMemoryAccessWrite(access));
 	}
 	else if( func->funcType == asFUNC_FUNCDEF )
 	{
@@ -4469,11 +4480,17 @@ void asCWriter::WriteFunction(asCScriptFunction* func)
 			for( asUINT n = 0; n < count; n++ )
 				WriteString(&func->parameterNames[n]);
 		}
+
+		// Memory access, so that an engine without the compiler still knows it.
+		// Written regardless of stripDebugInfo, matching the reader
+		WriteData(&func->memoryAccess, 1);
 	}
 	else if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
 	{
 		// TODO: Do we really need to store this? It can probably be reconstructed by the reader
 		WriteEncodedInt64(func->vfTableIdx);
+
+		WriteData(&func->memoryAccess, 1);
 	}
 	else if( func->funcType == asFUNC_FUNCDEF )
 	{

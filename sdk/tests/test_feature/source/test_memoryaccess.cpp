@@ -933,6 +933,158 @@ static bool TestDestruction()
 	return fail;
 }
 
+// Every function a module owns, methods included, with its packed byte
+static void SnapshotAccess(asIScriptModule *mod, std::vector<asBYTE> &bytes)
+{
+	bytes.clear();
+	for( asUINT n = 0; n < mod->GetFunctionCount(); n++ )
+	{
+		asEMemoryAccess r, w;
+		mod->GetFunctionByIndex(n)->GetMemoryAccess(&r, &w);
+		bytes.push_back(asBYTE((r << 4) | w));
+	}
+	for( asUINT t = 0; t < mod->GetObjectTypeCount(); t++ )
+	{
+		asITypeInfo *type = mod->GetObjectTypeByIndex(t);
+		for( asUINT m = 0; m < type->GetMethodCount(); m++ )
+		{
+			asEMemoryAccess r, w;
+			type->GetMethodByIndex(m, false)->GetMemoryAccess(&r, &w);
+			bytes.push_back(asBYTE((r << 4) | w));
+		}
+	}
+}
+
+static bool TestSaveLoadAndRerun()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	RegisterTestNatives(engine);
+	const char *code =
+		"int g; \n"
+		"class C { int x; void set() { x = 1; } } \n"
+		"void writeG() { g = 1; } \n"
+		"void callUndeclared() { undeclared(); } \n";
+	asIScriptModule *mod = BuildModule(engine, "saved", code);
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+		engine->ShutDownAndRelease();
+		return fail;
+	}
+
+	CBytecodeStream stream(__FILE__"1");
+	if( mod->SaveByteCode(&stream) < 0 )
+	{
+		TEST_FAILED;
+	}
+	asIScriptModule *loaded = engine->GetModule("loaded", asGM_ALWAYS_CREATE);
+	if( loaded->LoadByteCode(&stream) < 0 )
+	{
+		TEST_FAILED;
+	}
+
+	const char *decls[] = { "void writeG()", "void callUndeclared()" };
+	for( asUINT n = 0; n < 2; n++ )
+	{
+		asEMemoryAccess r, w;
+		mod->GetFunctionByDecl(decls[n])->GetMemoryAccess(&r, &w);
+		EXPECT_ACCESS(loaded->GetFunctionByDecl(decls[n]), r, w);
+	}
+	EXPECT_ACCESS(mod->GetFunctionByDecl("void writeG()"), asMA_NONE, asMA_MODULE);
+	EXPECT_ACCESS(loaded->GetFunctionByDecl("void writeG()"), asMA_NONE, asMA_MODULE);
+	EXPECT_ACCESS(loaded->GetFunctionByDecl("void callUndeclared()"), asMA_UNSET, asMA_UNSET);
+	EXPECT_ACCESS(loaded->GetTypeInfoByName("C")->GetMethodByDecl("void set()"), asMA_NONE, asMA_THIS);
+
+	// Bytecode saved with the debug info stripped carries the byte too
+	CBytecodeStream stripped(__FILE__"2");
+	if( mod->SaveByteCode(&stripped, true) < 0 )
+	{
+		TEST_FAILED;
+	}
+	asIScriptModule *loadedStripped = engine->GetModule("loadedStripped", asGM_ALWAYS_CREATE);
+	if( loadedStripped->LoadByteCode(&stripped) < 0 )
+	{
+		TEST_FAILED;
+	}
+	EXPECT_ACCESS(loadedStripped->GetFunctionByDecl("void writeG()"), asMA_NONE, asMA_MODULE);
+	EXPECT_ACCESS(loadedStripped->GetFunctionByDecl("void callUndeclared()"), asMA_UNSET, asMA_UNSET);
+
+	// Detached CompileFunction products are analysed too, and the module's own functions stay as they were
+	std::vector<asBYTE> before, after;
+	SnapshotAccess(mod, before);
+	asIScriptFunction *detached = 0;
+	if( mod->CompileFunction("detached", "void d() { g = 5; }", 0, 0, &detached) < 0 )
+	{
+		TEST_FAILED;
+	}
+	EXPECT_ACCESS(detached, asMA_NONE, asMA_MODULE);
+	if( detached )
+	{
+		detached->Release();
+	}
+	SnapshotAccess(mod, after);
+	if( before != after )
+	{
+		TEST_FAILED;
+	}
+
+	// A rebuild of identical source gives identical results
+	asIScriptModule *again = BuildModule(engine, "again", code);
+	if( again == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(again->GetFunctionByDecl("void writeG()"), asMA_NONE, asMA_MODULE);
+		SnapshotAccess(again, after);
+		if( before != after )
+		{
+			TEST_FAILED;
+		}
+	}
+
+	// Re-running the pass over the same function objects: CompileGlobalVar and
+	// CompileFunction(ADD_TO_MODULE) both rerun it for the whole module. Nothing
+	// here touches existing code, so every byte must come out as it went in
+	SnapshotAccess(mod, before);
+	if( mod->CompileGlobalVar("extra", "int extra = 3;", 0) < 0 )
+	{
+		TEST_FAILED;
+	}
+	asIScriptFunction *added = 0;
+	if( mod->CompileFunction("added", "void added() { g = 2; }", 0, asCOMP_ADD_TO_MODULE, &added) < 0 )
+	{
+		TEST_FAILED;
+	}
+	if( added )
+	{
+		added->Release();
+	}
+	SnapshotAccess(mod, after);
+	// The added function is the only new entry, and it is last among the module functions
+	if( after.size() != before.size() + 1 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		asUINT fc = mod->GetFunctionCount();
+		std::vector<asBYTE> trimmed(after);
+		trimmed.erase(trimmed.begin() + (fc - 1));
+		if( trimmed != before )
+		{
+			TEST_FAILED;
+		}
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void added()"), asMA_NONE, asMA_MODULE);
+	}
+
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
 bool Test()
 {
 	bool fail = false;
@@ -981,6 +1133,10 @@ bool Test()
 		fail = true;
 	}
 	if( TestDestruction() )
+	{
+		fail = true;
+	}
+	if( TestSaveLoadAndRerun() )
 	{
 		fail = true;
 	}
