@@ -1007,7 +1007,11 @@ bool asCMemoryAccessScanner::ChargeArguments(State &s, asCScriptFunction *callee
 				return false;
 			}
 			RecordRead(arg.origin);
-			if( !dt.IsObjectConst() )
+			// A reference to a handle points at the handle variable, which only a
+			// const handle protects; a handle to a const object may still be
+			// reseated. Anything else is protected by a const object.
+			bool argConst = dt.IsReference() && dt.IsObjectHandle() ? dt.IsReadOnly() : dt.IsObjectConst();
+			if( !argConst )
 			{
 				RecordWrite(arg.origin);
 			}

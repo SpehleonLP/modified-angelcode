@@ -961,15 +961,10 @@ static CObj *ObjFactory() { return new CObj(); }
 static void Touch(CObj &o) { o.v++; }
 static int Peek(const CObj &o) { return o.v; }
 static const int &CfgRef() { return g_config; }
+static void Reseat(const CObj *&h) { if( h ) { const_cast<CObj*>(h)->Release(); } h = 0; }
 
-// An application function is opaque, so the caller charges what it may touch
-// through its arguments at the scope those arguments have. A declaration of
-// {None, None} covers only what the function reaches beyond them.
-static bool TestNativeArguments()
+static void RegisterObj(asIScriptEngine *engine)
 {
-	bool fail = false;
-	COutStream out;
-	asIScriptEngine *engine = CreateEngine(out);
 	int r;
 	r = engine->RegisterObjectType("Obj", 0, asOBJ_REF); assert( r >= 0 );
 	r = engine->RegisterObjectBehaviour("Obj", asBEHAVE_FACTORY, "Obj@ f()", asFUNCTION(ObjFactory), asCALL_CDECL); assert( r >= 0 );
@@ -980,6 +975,18 @@ static bool TestNativeArguments()
 	r = engine->RegisterObjectBehaviour("Obj", asBEHAVE_RELEASE, "void f()", asMETHOD(CObj, Release), asCALL_THISCALL); assert( r >= 0 );
 	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
 	r = engine->RegisterObjectProperty("Obj", "int v", asOFFSET(CObj, v)); assert( r >= 0 );
+}
+
+// An application function is opaque, so the caller charges what it may touch
+// through its arguments at the scope those arguments have. A declaration of
+// {None, None} covers only what the function reaches beyond them.
+static bool TestNativeArguments()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	RegisterObj(engine);
+	int r;
 	// Writes its argument and nothing else
 	r = engine->RegisterGlobalFunction("void touch(Obj &inout)", asFUNCTION(Touch), asCALL_CDECL); assert( r >= 0 );
 	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
@@ -989,6 +996,15 @@ static bool TestNativeArguments()
 	// Returns a reference into configuration the host changes only while the VM is stopped
 	r = engine->RegisterGlobalFunction("const int &cfgRef()", asFUNCTION(CfgRef), asCALL_CDECL); assert( r >= 0 );
 	engine->GetFunctionById(r)->SetMemoryAccess(asMA_WORLD_STABLE, asMA_NONE);
+	// A template instance's factory is a stub that forwards to the application
+	// factory, so its arguments are charged like the factory's own
+	r = engine->RegisterObjectType("tmpl<class T>", 0, asOBJ_REF | asOBJ_TEMPLATE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("tmpl<T>", asBEHAVE_FACTORY, "tmpl<T>@ f(int&in, Obj &inout)", asFUNCTION(TmplFactoryGeneric), asCALL_GENERIC); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterObjectBehaviour("tmpl<T>", asBEHAVE_ADDREF, "void f()", asFUNCTION(TmplNoopGeneric), asCALL_GENERIC); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterObjectBehaviour("tmpl<T>", asBEHAVE_RELEASE, "void f()", asFUNCTION(TmplNoopGeneric), asCALL_GENERIC); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
 	asIScriptModule *mod = BuildModule(engine, "nativeargs",
 		"Obj g; \n"
 		"Obj@ gh; \n"
@@ -996,7 +1012,8 @@ static bool TestNativeArguments()
 		"void viaInoutH() { touch(gh); } \n"
 		"int viaConstIn() { return peek(g); } \n"
 		"void viaLocal() { Obj o; touch(o); } \n"
-		"int readCfg() { return cfgRef(); } \n");
+		"int readCfg() { return cfgRef(); } \n"
+		"void viaStub() { tmpl<int> t(g); } \n");
 	if( mod == 0 )
 	{
 		TEST_FAILED;
@@ -1013,7 +1030,38 @@ static bool TestNativeArguments()
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaLocal()"), asMA_NONE, asMA_NONE);
 		// Reading through a reference into world-stable state reads nothing more
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int readCfg()"), asMA_WORLD_STABLE, asMA_NONE);
+		// The stub's &inout argument writes the module global's object
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaStub()"), asMA_MODULE, asMA_MODULE);
 		EXPECT_NO_WORLD_STABLE_WRITE(mod);
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+// With unsafe references a handle can be passed by &inout. A handle to a const
+// object protects the object, not the handle variable the function may reseat.
+static bool TestNativeHandleReference()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	engine->SetEngineProperty(asEP_ALLOW_UNSAFE_REFERENCES, true);
+	RegisterObj(engine);
+	// Writes the handle variable it is given, and touches nothing else
+	int r = engine->RegisterGlobalFunction("void reseat(const Obj@ &inout)", asFUNCTION(Reseat), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	asIScriptModule *mod = BuildModule(engine, "handleref",
+		"const Obj@ gc; \n"
+		"void viaReseat() { reseat(gc); } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		// PGA passes the global handle's own address: the handle variable is
+		// written at Module, and the object it refers to is read at Program
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaReseat()"), asMA_PROGRAM, asMA_MODULE);
 	}
 	engine->ShutDownAndRelease();
 	return fail;
@@ -1265,6 +1313,10 @@ bool Test()
 		fail = true;
 	}
 	if( TestNativeArguments() )
+	{
+		fail = true;
+	}
+	if( TestNativeHandleReference() )
 	{
 		fail = true;
 	}

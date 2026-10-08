@@ -61,8 +61,10 @@ so a script function that calls one is given \ref asMA_UNSET for both scopes.
 The engine cannot see what an application function does with its arguments, so it counts them on the side of the 
 caller. For every argument that is passed by reference as <tt>&in</tt> or <tt>&inout</tt>, by handle, or by value of 
 a reference type, the call reads the memory that the argument refers to, at the scope that the argument has in the caller. 
-It also writes that memory, unless the parameter is const. For a reference to a handle the object that the handle refers 
-to is counted too. An <tt>&out</tt> argument is a temporary of the caller, and a value type passed by value is a copy, 
+It also writes that memory, unless that memory is const: a const object, e.g. <tt>const obj &in</tt>, or for a reference 
+to a handle a const handle, e.g. <tt>obj@ const &in</tt>. A handle to a const object, e.g. <tt>const obj@ &inout</tt>, 
+does not protect the handle itself, which the function may still reassign. For a reference to a handle the object that the 
+handle refers to is counted too, and written unless it is a const object. An <tt>&out</tt> argument is a temporary of the caller, and a value type passed by value is a copy, 
 so neither is counted.
 
 The declared scopes therefore only need to cover what the function reaches beyond the objects passed as arguments, e.g. 
