@@ -579,6 +579,8 @@ extern "C"
 
 	// Context
 	AS_API asIScriptContext *asGetActiveContext();
+	AS_API int               asPushActiveContext(asIScriptContext *ctx);
+	AS_API int               asPopActiveContext(asIScriptContext *ctx);
 
 	// Thread support
 	AS_API int               asPrepareMultithread(asIThreadManager *externalMgr = 0);

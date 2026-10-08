@@ -539,6 +539,7 @@ public:
 
 	// Callbacks
 #ifndef AS_NO_EXCEPTIONS
+	void                       HandleAppException(asIScriptContext *ctx);
 	bool                       translateExceptionCallback;
 	asSSystemFunctionInterface translateExceptionCallbackFunc;
 	void *                     translateExceptionCallbackObj;

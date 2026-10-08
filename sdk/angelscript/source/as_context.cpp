@@ -163,7 +163,7 @@ AS_API asIScriptContext *asGetActiveContext()
 }
 
 // internal
-asCThreadLocalData *asPushActiveContext(asIScriptContext *ctx)
+static asCThreadLocalData *PushActiveContext(asIScriptContext *ctx)
 {
 	asCThreadLocalData *tld = asCThreadManager::GetLocalData();
 	asASSERT( tld );
@@ -174,12 +174,39 @@ asCThreadLocalData *asPushActiveContext(asIScriptContext *ctx)
 }
 
 // internal
-void asPopActiveContext(asCThreadLocalData *tld, asIScriptContext *ctx)
+static void PopActiveContext(asCThreadLocalData *tld, asIScriptContext *ctx)
 {
 	UNUSED_VAR(ctx);
 	asASSERT(tld && tld->activeContexts[tld->activeContexts.GetLength() - 1] == ctx);
 	if (tld)
 		tld->activeContexts.PopLast();
+}
+
+// interface
+// Lets the application make its own asIScriptContext implementation the active
+// context while it calls a registered function directly, so that the
+// function's asGetActiveContext() finds it
+AS_API int asPushActiveContext(asIScriptContext *ctx)
+{
+	if( ctx == 0 )
+		return asINVALID_ARG;
+	asCThreadLocalData *tld = asCThreadManager::GetLocalData();
+	if( tld == 0 )
+		return asERROR;
+	tld->activeContexts.PushLast(ctx);
+	return asSUCCESS;
+}
+
+// interface
+AS_API int asPopActiveContext(asIScriptContext *ctx)
+{
+	asCThreadLocalData *tld = asCThreadManager::GetLocalData();
+	if( tld == 0 ||
+		tld->activeContexts.GetLength() == 0 ||
+		tld->activeContexts[tld->activeContexts.GetLength() - 1] != ctx )
+		return asERROR;
+	tld->activeContexts.PopLast();
+	return asSUCCESS;
 }
 
 asCContext::asCContext(asCScriptEngine *engine, bool holdRef)
@@ -815,7 +842,7 @@ int asCContext::Unprepare()
 		return asCONTEXT_ACTIVE;
 
 	// Set the context as active so that any clean up code can use access it if desired
-	asCThreadLocalData *tld = asPushActiveContext((asIScriptContext *)this);
+	asCThreadLocalData *tld = PushActiveContext((asIScriptContext *)this);
 	asDWORD count = m_refCount.get();
 	UNUSED_VAR(count);
 
@@ -832,7 +859,7 @@ int asCContext::Unprepare()
 	// TODO: Unprepare is called during destruction, so nobody
 	//       must be allowed to keep an extra reference
 	asASSERT(m_refCount.get() == count);
-	asPopActiveContext(tld, this);
+	PopActiveContext(tld, this);
 
 	// Release the object if it is a script object
 	if( m_initialFunction && m_initialFunction->objectType && (m_initialFunction->objectType->flags & asOBJ_SCRIPT_OBJECT) )
@@ -1514,7 +1541,7 @@ int asCContext::Execute()
 
 	m_status = asEXECUTION_ACTIVE;
 
-	asCThreadLocalData *tld = asPushActiveContext((asIScriptContext *)this);
+	asCThreadLocalData *tld = PushActiveContext((asIScriptContext *)this);
 
 	// Make sure there are not too many nested calls, as it could crash the application
 	// by filling up the thread call stack
@@ -1566,7 +1593,7 @@ int asCContext::Execute()
 	}
 
 	// Pop the active context
-	asPopActiveContext(tld, this);
+	PopActiveContext(tld, this);
 
 	if( m_status == asEXECUTION_FINISHED )
 	{
@@ -5912,18 +5939,7 @@ void asCContext::CallExceptionCallback()
 void asCContext::HandleAppException()
 {
 	// This method is called from within a catch(...) block
-	if (m_engine->translateExceptionCallback)
-	{
-		// Allow the application to translate the application exception to a proper exception string
-		if (m_engine->translateExceptionCallbackFunc.callConv < ICC_THISCALL)
-			m_engine->CallGlobalFunction(this, m_engine->translateExceptionCallbackObj, &m_engine->translateExceptionCallbackFunc, 0);
-		else
-			m_engine->CallObjectMethod(m_engine->translateExceptionCallbackObj, this, &m_engine->translateExceptionCallbackFunc, 0);
-	}
-
-	// Make sure an exception is set even if the application decides not to do any specific translation
-	if( m_status != asEXECUTION_EXCEPTION )
-		SetException(TXT_EXCEPTION_CAUGHT);
+	m_engine->HandleAppException(this);
 }
 #endif
 
