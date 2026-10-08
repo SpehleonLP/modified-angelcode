@@ -54,7 +54,7 @@ class asCScriptFunction;
 class asCTypeInfo;
 
 // How a frame slot or register holds the reference it points to. It decides
-// whether releasing that reference can destroy the object (spec 2.4).
+// whether releasing that reference can destroy the object.
 // Ordered so that the join of two holds is their max.
 enum asEReferenceHold
 {
@@ -94,11 +94,11 @@ struct asSMemoryScanResult
 	bool            dropsStoredHandle;
 };
 
-// What calling a function with scope `callee` on an object reached by `objectOrigin` adds to the caller (spec 2.2)
+// What calling a function with scope `callee` on an object reached by `objectOrigin` adds to the caller
 asEMemoryAccess asMemoryAccessContribution(asEMemoryAccess callee, asBYTE objectOrigin);
-// The read side of asMemoryAccessContribution, floored at WorldStable for any callee above None (spec 2.2)
+// The read side of asMemoryAccessContribution, floored at WorldStable for any callee above None
 asEMemoryAccess asMemoryAccessReadContribution(asEMemoryAccess callee, asBYTE objectOrigin);
-// What destroying an object adds, given its destructor's scope: the dying object's own memory is private (spec 2.4)
+// What destroying an object adds, given its destructor's scope: the dying object's own memory is private
 asEMemoryAccess asMemoryAccessOfDestruction(asEMemoryAccess s);
 
 class asCMemoryAccessScanner
@@ -109,10 +109,14 @@ public:
 
 	asSMemoryScanResult Scan(asCScriptFunction *func);
 
+	// Collects, into `log`, the table index of each script function a scan
+	// calls directly. 0 stops collecting.
+	void SetCalleeLog(asCArray<asUINT> *log);
+
 	// The current scopes of a callee, and whether calling it may drop a stored handle
 	void AccessOf(asCScriptFunction *func, asEMemoryAccess &read, asEMemoryAccess &write, bool &drops) const;
 
-	// The scope destroying an object of static type `type` may reach (spec 2.4)
+	// The scope destroying an object of static type `type` may reach
 	// `drops` reports whether the destruction may itself drop a stored handle
 	void DestructionOf(asCTypeInfo *type, asEMemoryAccess &read, asEMemoryAccess &write, bool &drops);
 
@@ -152,7 +156,7 @@ protected:
 	asCScriptFunction *FunctionById(int id) const;
 	// Applies one call's effects and stack traffic; `callee` gives the signature
 	bool              DoCall(State &s, asCScriptFunction *callee, asUINT kind);
-	// The type behaviours that construct: they return an object no one else holds (spec 2.5)
+	// The type behaviours that construct: they return an object no one else holds
 	bool              IsFactory(asCScriptFunction *callee) const;
 	void              CalleeAccess(asCScriptFunction *callee, asUINT kind, asEMemoryAccess &read, asEMemoryAccess &write, bool &drops);
 	asBYTE            FieldLoads(asBYTE baseOrigin, int typeId, int offset);
@@ -168,12 +172,14 @@ protected:
 	void              RecordRead(asBYTE origin);
 	void              RecordWrite(asBYTE origin);
 
-	// Releasing `v`, a reference to an object of static type `type` (spec 2.4)
+	// Releasing `v`, a reference to an object of static type `type`
 	void              ReleaseValue(const asSAbstractValue &v, asCTypeInfo *type);
 	// A release that may be the last one
 	void              DestroyUnbalanced(asCTypeInfo *type);
 	// A handle assignment into `dest`: releases the old value, AddRefs the new one
 	bool              StoreHandle(State &s, const asSAbstractValue &dest, const asSAbstractValue &value, asCTypeInfo *type);
+	// What an application callee may touch through its arguments, which the caller charges
+	bool              ChargeArguments(State &s, asCScriptFunction *callee, asUINT firstArg);
 	// What the VM releases or destroys of a system function's arguments after it returns
 	bool              CleanNativeArgs(State &s, asCScriptFunction *callee, asUINT firstArg);
 
@@ -182,6 +188,7 @@ protected:
 	asCScriptEngine            *engine;
 	asCModule                  *module;
 	const asSMemoryAccessTable *table;
+	asCArray<asUINT>           *calleeLog;
 
 	// Per scan
 	asCScriptFunction          *func;

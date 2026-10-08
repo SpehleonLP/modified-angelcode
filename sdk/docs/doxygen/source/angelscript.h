@@ -655,7 +655,7 @@ enum asEFuncType
 //! The scopes form a ladder. Each scope contains every scope below it. See \ref doc_adv_memory_access.
 enum asEMemoryAccess : asBYTE
 {
-	//! \brief Arguments and locals only.
+	//! \brief Local variables and the objects passed as arguments. For an application function the caller counts what is reached through the arguments.
 	asMA_NONE         = 0,
 	//! \brief State that may change, but never while the VM runs. Can be declared for reads on application functions only.
 	asMA_WORLD_STABLE = 1,
@@ -4163,10 +4163,13 @@ public:
 	//! \param[in] read The widest scope that the function reads.
 	//! \param[in] write The widest scope that the function writes.
 	//! \return A negative value on error.
-	//! \retval asNOT_SUPPORTED The function is not an application function. Script functions get their scopes from the analysis.
+	//! \retval asNOT_SUPPORTED The function is not an application function, or is a registered template function. Script functions get their scopes from the analysis.
 	//! \retval asINVALID_ARG A scope is above \ref asMA_PROGRAM, the write scope is \ref asMA_WORLD_STABLE, or the function has no object and a scope is \ref asMA_THIS or \ref asMA_OWNED.
 	//!
-	//! Call this after registering the function and before building any script. See \ref doc_adv_memory_access.
+	//! Call this after registering the function and before building any script. The scopes cover what the function
+	//! reaches beyond the objects passed as arguments, which the caller counts itself. The release behaviour of a
+	//! reference type and the destructor of a value type declare what destroying the object can do, including
+	//! releasing everything the object holds. See \ref doc_adv_memory_access.
 	virtual int              SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write) = 0;
 	//! \brief Returns the memory that the function reads and writes.
 	//! \param[out] read Receives the widest scope that the function reads. Can be null.

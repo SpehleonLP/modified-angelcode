@@ -1590,7 +1590,9 @@ int asCScriptFunction::SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess wri
 	{
 		return asINVALID_ARG;
 	}
-	if( objectType == 0 &&
+	// A template callback belongs to its type but is called without an object
+	bool hasObject = objectType != 0 && objectType->beh.templateCallback != id;
+	if( !hasObject &&
 		(read == asMA_THIS || read == asMA_OWNED || write == asMA_THIS || write == asMA_OWNED) )
 	{
 		return asINVALID_ARG;

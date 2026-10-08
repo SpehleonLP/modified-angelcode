@@ -1793,7 +1793,7 @@ int asCModule::CompileFunction(const char* sectionName, const char* code, int li
 
 	if (r >= 0)
 	{
-		if (m_scriptFunctions.IndexOf(func) >= 0)
+		if( m_scriptFunctions.IndexOf(func) >= 0 )
 		{
 			ComputeTransitiveFunctionMetadata();
 		}
@@ -1948,6 +1948,32 @@ bool asCModule::GetDispatchTargets(asCScriptFunction *called, asCArray<asCScript
 	return true;
 }
 
+// One round over `order`: rescans every function not yet pinned, and reports
+// whether any result changed. `changedNow` records which ones did.
+static bool ScanMemoryAccessRound(asCMemoryAccessScanner &scanner, const asCArray<asCScriptFunction*> &funcs, const asCArray<asUINT> &order, asSMemoryAccessTable &table, const asCArray<bool> &pinned, asCArray<bool> &changedNow)
+{
+	bool changed = false;
+	for( asUINT n = 0; n < order.GetLength(); n++ )
+	{
+		asUINT i = order[n];
+		changedNow[i] = false;
+		if( pinned[i] )
+		{
+			continue;
+		}
+		asSMemoryScanResult res = scanner.Scan(funcs[i]);
+		asBYTE packed = asPackMemoryAccess(res.read, res.write);
+		if( packed != table.access[i] || res.dropsStoredHandle != table.drops[i] )
+		{
+			table.access[i] = packed;
+			table.drops[i] = res.dropsStoredHandle;
+			changedNow[i] = true;
+			changed = true;
+		}
+	}
+	return changed;
+}
+
 // Called after Build() completes, so all class types and function bodies are
 // finalized. Idempotent: a pure function of current module state, re-runnable
 // at any time, and it writes a function's byte only when the value changes, so
@@ -1959,57 +1985,152 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	// Build id -> index map over m_scriptFunctions only. Init funcs are never
 	// callees (no bytecode CALL targets them), so they don't need to be in this map.
 	asCMap<int, asUINT> funcIdToIndex;
-	for (asUINT i = 0; i < funcCount; i++)
+	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		asCScriptFunction *func = m_scriptFunctions[i];
-		if (func && func->scriptData)
+		if( func && func->scriptData )
 		{
 			funcIdToIndex.Insert(func->id, i);
 		}
 	}
 
-	// Memory access: the least fixed point from {None, None}. The loop ends
-	// because a scan is monotone in its callees' scopes and in the destructors
-	// it consults. The contribution rule alone is not monotone across
-	// WorldStable -> This; reads go through the WorldStable floor of
-	// asMemoryAccessReadContribution, and a write scope is never WorldStable,
-	// so the step is never taken. Round-robin rather than a worklist, because
-	// a function also depends on destructors it never calls directly.
+	// Memory access: the least fixed point from {None, None}. A scan is
+	// monotone in its callees' scopes and in the destructors it consults:
+	// reads are floored at WorldStable, a write scope is never WorldStable,
+	// and a returned reference's origin maps WorldStable to None. So scopes
+	// only rise, through eight values, and the loop ends. Round-robin rather
+	// than a worklist, because a function also depends on destructors it
+	// never calls directly.
 	asSMemoryAccessTable table;
 	table.funcIdToIndex = &funcIdToIndex;
 	table.access.SetLength(funcCount);
 	table.drops.SetLength(funcCount);
-	for (asUINT i = 0; i < funcCount; i++)
+	asCArray<bool> pinned, changedNow;
+	pinned.SetLength(funcCount);
+	changedNow.SetLength(funcCount);
+	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		table.access[i] = asPackMemoryAccess(asMA_NONE, asMA_NONE);
 		table.drops[i] = false;
+		pinned[i] = false;
+		changedNow[i] = false;
 	}
 	asCMemoryAccessScanner scanner(m_engine, this, &table);
-	bool changed = true;
-	while (changed)
+
+	// The first round, in declaration order, also records each function's
+	// direct script callees: the callees of function i are
+	// callees[calleeStart[i]] up to callees[calleeStart[i+1]]
+	asCArray<asUINT> order, callees, calleeStart, log;
+	calleeStart.SetLength(funcCount + 1);
+	calleeStart[0] = 0;
+	for( asUINT i = 0; i < funcCount; i++ )
 	{
-		changed = false;
-		for (asUINT i = 0; i < funcCount; i++)
+		if( m_scriptFunctions[i] && m_scriptFunctions[i]->scriptData )
 		{
-			asCScriptFunction *func = m_scriptFunctions[i];
-			if (!func || !func->scriptData)
-			{
-				continue;
-			}
+			order.PushLast(i);
+		}
+	}
+	bool changed = false;
+	for( asUINT i = 0; i < funcCount; i++ )
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if( func && func->scriptData )
+		{
+			log.SetLength(0);
+			scanner.SetCalleeLog(&log);
 			asSMemoryScanResult res = scanner.Scan(func);
+			scanner.SetCalleeLog(0);
 			asBYTE packed = asPackMemoryAccess(res.read, res.write);
-			if (packed != table.access[i] || res.dropsStoredHandle != table.drops[i])
+			if( packed != table.access[i] || res.dropsStoredHandle != table.drops[i] )
 			{
 				table.access[i] = packed;
 				table.drops[i] = res.dropsStoredHandle;
+				changedNow[i] = true;
 				changed = true;
 			}
+			for( asUINT n = 0; n < log.GetLength(); n++ )
+			{
+				callees.PushLast(log[n]);
+			}
+		}
+		calleeStart[i + 1] = callees.GetLength();
+	}
+
+	// Later rounds visit callees before their callers, in a depth-first
+	// post-order over the recorded calls, so that a call chain settles in a
+	// few rounds whatever order its functions are declared in
+	if( changed )
+	{
+		asCArray<asUINT> postOrder, path, next;
+		asCArray<bool> visited;
+		visited.SetLength(funcCount);
+		for( asUINT i = 0; i < funcCount; i++ )
+		{
+			visited[i] = false;
+		}
+		for( asUINT n = 0; n < order.GetLength(); n++ )
+		{
+			if( visited[order[n]] )
+			{
+				continue;
+			}
+			visited[order[n]] = true;
+			path.PushLast(order[n]);
+			next.PushLast(calleeStart[order[n]]);
+			while( path.GetLength() )
+			{
+				asUINT at = path[path.GetLength() - 1];
+				asUINT &edge = next[next.GetLength() - 1];
+				if( edge < calleeStart[at + 1] )
+				{
+					asUINT callee = callees[edge++];
+					if( !visited[callee] )
+					{
+						visited[callee] = true;
+						path.PushLast(callee);
+						next.PushLast(calleeStart[callee]);
+					}
+				}
+				else
+				{
+					postOrder.PushLast(at);
+					path.PopLast();
+					next.PopLast();
+				}
+			}
+		}
+		order = postOrder;
+	}
+
+	// Fail closed if the scopes keep changing past what a monotone scan can
+	// do: whatever still changes is pinned at {Program, Program}, dropping
+	// stored handles, and the rounds go on so that its callers see the pinned
+	// result. Each time this happens at least one more function is pinned, so
+	// the loop still ends.
+	const asUINT maxRounds = 16 * 8;
+	asUINT rounds = 1;
+	while( changed )
+	{
+		changed = ScanMemoryAccessRound(scanner, m_scriptFunctions, order, table, pinned, changedNow);
+		rounds++;
+		if( changed && rounds >= maxRounds )
+		{
+			for( asUINT i = 0; i < funcCount; i++ )
+			{
+				if( changedNow[i] )
+				{
+					pinned[i] = true;
+					table.access[i] = asPackMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+					table.drops[i] = true;
+				}
+			}
+			rounds = 0;
 		}
 	}
-	for (asUINT i = 0; i < funcCount; i++)
+	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		asCScriptFunction *func = m_scriptFunctions[i];
-		if (func && func->scriptData && func->memoryAccess != table.access[i])
+		if( func && func->scriptData && func->memoryAccess != table.access[i] )
 		{
 			func->memoryAccess = table.access[i];
 		}
@@ -2017,35 +2138,35 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 
 	// A virtual or interface method has no body. A host asking about it gets
 	// the join over everything a call through it can reach.
-	for (asUINT i = 0; i < funcCount; i++)
+	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		asCScriptFunction *func = m_scriptFunctions[i];
-		if (!func || (func->funcType != asFUNC_VIRTUAL && func->funcType != asFUNC_INTERFACE))
+		if( !func || (func->funcType != asFUNC_VIRTUAL && func->funcType != asFUNC_INTERFACE) )
 		{
 			continue;
 		}
 		asEMemoryAccess r = asMA_PROGRAM, w = asMA_PROGRAM;
 		asCArray<asCScriptFunction*> targets;
-		if (GetDispatchTargets(func, targets))
+		if( GetDispatchTargets(func, targets) )
 		{
 			r = w = asMA_NONE;
-			for (asUINT n = 0; n < targets.GetLength(); n++)
+			for( asUINT n = 0; n < targets.GetLength(); n++ )
 			{
 				asEMemoryAccess tr, tw;
 				bool td;
 				scanner.AccessOf(targets[n], tr, tw, td);
-				if (tr > r)
+				if( tr > r )
 				{
 					r = tr;
 				}
-				if (tw > w)
+				if( tw > w )
 				{
 					w = tw;
 				}
 			}
 		}
 		asBYTE packed = asPackMemoryAccess(r, w);
-		if (func->memoryAccess != packed)
+		if( func->memoryAccess != packed )
 		{
 			func->memoryAccess = packed;
 		}
@@ -2054,17 +2175,17 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	// Global-property init funcs are pure sources: nothing calls them, so one
 	// scan against the settled table is final.
 	asCSymbolTableIterator<asCGlobalProperty> globIt = m_scriptGlobals.List();
-	while (globIt)
+	while( globIt )
 	{
 		asCScriptFunction *initFunc = (*globIt)->GetInitFunc();
 		globIt++;
-		if (!initFunc)
+		if( !initFunc )
 		{
 			continue;
 		}
 		asSMemoryScanResult res = scanner.Scan(initFunc);
 		asBYTE packed = asPackMemoryAccess(res.read, res.write);
-		if (initFunc->memoryAccess != packed)
+		if( initFunc->memoryAccess != packed )
 		{
 			initFunc->memoryAccess = packed;
 		}
@@ -2078,7 +2199,7 @@ void asCModule::ComputeMemoryAccessOfDetachedFunction(asCScriptFunction *func)
 	asCMemoryAccessScanner scanner(m_engine, this, 0);
 	asSMemoryScanResult res = scanner.Scan(func);
 	asBYTE packed = asPackMemoryAccess(res.read, res.write);
-	if (func->memoryAccess != packed)
+	if( func->memoryAccess != packed )
 	{
 		func->memoryAccess = packed;
 	}

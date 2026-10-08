@@ -157,8 +157,14 @@ inline asBYTE asSanitizeMemoryAccess(asBYTE packed)
 {
 	asBYTE read  = asBYTE((packed >> 4) & 15);
 	asBYTE write = asBYTE(packed & 15);
-	if( read  & 8 ) read  = asMA_UNSET;
-	if( write & 8 ) write = asMA_UNSET;
+	if( read & 8 )
+	{
+		read = asMA_UNSET;
+	}
+	if( write & 8 )
+	{
+		write = asMA_UNSET;
+	}
 	return asBYTE((read << 4) | write);
 }
 

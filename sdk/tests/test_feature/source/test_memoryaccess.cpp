@@ -97,7 +97,20 @@ static bool TestTemplateInheritance()
 	engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
 
 	if( engine->RegisterObjectType("tmpl<class T>", 0, asOBJ_REF | asOBJ_TEMPLATE) < 0 ) TEST_FAILED;
-	if( engine->RegisterObjectBehaviour("tmpl<T>", asBEHAVE_TEMPLATE_CALLBACK, "bool f(int&in, bool&out)", asFUNCTION(TmplCallbackGeneric), asCALL_GENERIC) < 0 ) TEST_FAILED;
+	int callbackId = engine->RegisterObjectBehaviour("tmpl<T>", asBEHAVE_TEMPLATE_CALLBACK, "bool f(int&in, bool&out)", asFUNCTION(TmplCallbackGeneric), asCALL_GENERIC);
+	if( callbackId < 0 )
+	{
+		TEST_FAILED;
+	}
+	// The template callback belongs to the type, but is called without an object
+	if( callbackId >= 0 && engine->GetFunctionById(callbackId)->SetMemoryAccess(asMA_THIS, asMA_NONE) != asINVALID_ARG )
+	{
+		TEST_FAILED;
+	}
+	if( callbackId >= 0 && engine->GetFunctionById(callbackId)->SetMemoryAccess(asMA_NONE, asMA_NONE) < 0 )
+	{
+		TEST_FAILED;
+	}
 	int factoryId = engine->RegisterObjectBehaviour("tmpl<T>", asBEHAVE_FACTORY, "tmpl<T>@ f(int&in)", asFUNCTION(TmplFactoryGeneric), asCALL_GENERIC);
 	if( factoryId < 0 ) TEST_FAILED;
 	if( engine->RegisterObjectBehaviour("tmpl<T>", asBEHAVE_ADDREF, "void f()", asFUNCTION(TmplNoopGeneric), asCALL_GENERIC) < 0 ) TEST_FAILED;
@@ -203,7 +216,7 @@ static bool TestFrameLocal()
 
 // Members are reached through `this`, an owned member object is Owned, anything
 // reached through a handle is Program, and each parameter kind starts from its
-// own scope (spec 2.1)
+// own scope
 static bool TestThisAndFields()
 {
 	bool fail = false;
@@ -268,7 +281,7 @@ static bool TestThisAndFields()
 		}
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void outParam(int&out)"), asMA_NONE, asMA_NONE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void inoutParam(In&inout)"), asMA_NONE, asMA_PROGRAM);
-		// The compiler passes a const &in object without copying it (spec 2.1)
+		// The compiler passes a const &in object without copying it
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int constIn(const In&in)"), asMA_PROGRAM, asMA_NONE);
 		// A reference type that is already a temporary is passed without a copy,
 		// and the temporary may be a handle to a shared object
@@ -639,8 +652,9 @@ static void RegisterTestNatives(asIScriptEngine *engine)
 	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
 	r = engine->RegisterObjectMethod("Buf", "int &opIndex(int)", asMETHOD(CBuf, At), asCALL_THISCALL); assert( r >= 0 );
 	engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_THIS);
+	// Reads the application's global that holds the shared object
 	r = engine->RegisterGlobalFunction("Buf@ sharedBuf()", asFUNCTION(SharedBuf), asCALL_CDECL); assert( r >= 0 );
-	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_ENGINE, asMA_NONE);
 	// Hands out the shared object through an argument
 	r = engine->RegisterGlobalFunction("void pick(Buf@ &out)", asFUNCTION(Pick), asCALL_CDECL); assert( r >= 0 );
 	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
@@ -679,7 +693,8 @@ static bool TestCalls()
 		EXPECT_ACCESS(mod->GetFunctionByDecl("float callPure(float)"), asMA_NONE, asMA_NONE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void callUndeclared()"), asMA_UNSET, asMA_UNSET);
 		// A factory returns a fresh object, so This on it is None. The read keeps
-		// the WorldStable floor of opIndex's This read (spec 2.2).
+		// the WorldStable floor of opIndex's This read: every scope above
+		// WorldStable contains it.
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void localBuf()"), asMA_WORLD_STABLE, asMA_NONE);
 		// Thiscall1 on a member object: its This effects land on Owned
 		EXPECT_ACCESS(MethodOf(mod, "HasBuf", "void set()"), asMA_OWNED, asMA_OWNED);
@@ -691,7 +706,7 @@ static bool TestCalls()
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void slotClear()"), asMA_PROGRAM, asMA_PROGRAM);
 		EXPECT_ACCESS(MethodOf(mod, "M", "void bump()"), asMA_MODULE, asMA_MODULE);
 		EXPECT_ACCESS(MethodOf(mod, "M", "void viaThis()"), asMA_MODULE, asMA_MODULE);
-		// Spec 2.2: a Module method called through a handle touches a Program object
+		// A Module method called through a handle touches a Program object
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaHandle(M@)"), asMA_PROGRAM, asMA_PROGRAM);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void callCb(CB@)"), asMA_PROGRAM, asMA_PROGRAM);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void a(int)"), asMA_NONE, asMA_MODULE);
@@ -782,10 +797,10 @@ static bool TestCallPins()
 	else
 	{
 		EXPECT_ACCESS(MethodOf(mod, "W", "void setX()"), asMA_NONE, asMA_THIS);
-		// Spec 2.2: setX's This lands on the module global's object. The compiler
+		// setX's This lands on the module global's object. The compiler
 		// keeps the object alive in a temporary (RefCpyV ... FREE).
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void callOnGlobal()"), asMA_MODULE, asMA_MODULE);
-		// Spec 2.2: the callee's This lands on an owned member's object (RDSPtr reads this)
+		// The callee's This lands on an owned member's object (RDSPtr reads this)
 		EXPECT_ACCESS(MethodOf(mod, "HasW", "void go()"), asMA_THIS, asMA_OWNED);
 		// ... on a module global's object (PshGPtr reads the global's storage)
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void setGv()"), asMA_MODULE, asMA_MODULE);
@@ -827,7 +842,7 @@ static bool TestCallPins()
 }
 
 // Releases count only when they may be the last one, and only for what
-// destruction does outside the dying object (spec 2.4)
+// destruction does outside the dying object
 static bool TestDestruction()
 {
 	bool fail = false;
@@ -927,6 +942,77 @@ static bool TestDestruction()
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void tmplOfD()"), asMA_MODULE, asMA_MODULE);
 		// A primitive subtype holds nothing to destroy
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void tmplOfInt()"), asMA_NONE, asMA_NONE);
+		EXPECT_NO_WORLD_STABLE_WRITE(mod);
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+class CObj
+{
+public:
+	CObj() : refCount(1), v(0) {}
+	void AddRef() { refCount++; }
+	void Release() { if( --refCount == 0 ) { delete this; } }
+	int refCount;
+	int v;
+};
+static CObj *ObjFactory() { return new CObj(); }
+static void Touch(CObj &o) { o.v++; }
+static int Peek(const CObj &o) { return o.v; }
+static const int &CfgRef() { return g_config; }
+
+// An application function is opaque, so the caller charges what it may touch
+// through its arguments at the scope those arguments have. A declaration of
+// {None, None} covers only what the function reaches beyond them.
+static bool TestNativeArguments()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	int r;
+	r = engine->RegisterObjectType("Obj", 0, asOBJ_REF); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("Obj", asBEHAVE_FACTORY, "Obj@ f()", asFUNCTION(ObjFactory), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterObjectBehaviour("Obj", asBEHAVE_ADDREF, "void f()", asMETHOD(CObj, AddRef), asCALL_THISCALL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	// Holds nothing, so destroying an Obj touches nothing outside it
+	r = engine->RegisterObjectBehaviour("Obj", asBEHAVE_RELEASE, "void f()", asMETHOD(CObj, Release), asCALL_THISCALL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterObjectProperty("Obj", "int v", asOFFSET(CObj, v)); assert( r >= 0 );
+	// Writes its argument and nothing else
+	r = engine->RegisterGlobalFunction("void touch(Obj &inout)", asFUNCTION(Touch), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	// Reads its argument and nothing else
+	r = engine->RegisterGlobalFunction("int peek(const Obj &in)", asFUNCTION(Peek), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	// Returns a reference into configuration the host changes only while the VM is stopped
+	r = engine->RegisterGlobalFunction("const int &cfgRef()", asFUNCTION(CfgRef), asCALL_CDECL); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_WORLD_STABLE, asMA_NONE);
+	asIScriptModule *mod = BuildModule(engine, "nativeargs",
+		"Obj g; \n"
+		"Obj@ gh; \n"
+		"void viaInout() { touch(g); } \n"
+		"void viaInoutH() { touch(gh); } \n"
+		"int viaConstIn() { return peek(g); } \n"
+		"void viaLocal() { Obj o; touch(o); } \n"
+		"int readCfg() { return cfgRef(); } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		// The module global's object is written through the reference
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaInout()"), asMA_MODULE, asMA_MODULE);
+		// The object the global handle refers to may be anywhere
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaInoutH()"), asMA_PROGRAM, asMA_PROGRAM);
+		// A const parameter is only read
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int viaConstIn()"), asMA_MODULE, asMA_NONE);
+		// A local object is the caller's own
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void viaLocal()"), asMA_NONE, asMA_NONE);
+		// Reading through a reference into world-stable state reads nothing more
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int readCfg()"), asMA_WORLD_STABLE, asMA_NONE);
 		EXPECT_NO_WORLD_STABLE_WRITE(mod);
 	}
 	engine->ShutDownAndRelease();
@@ -1085,6 +1171,44 @@ static bool TestSaveLoadAndRerun()
 	return fail;
 }
 
+// The saved stream carries each function's scopes. A build with the compiler
+// recomputes them on load, so only the stream itself shows what was written.
+static bool TestSaveWritesScopes()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	int id = engine->RegisterGlobalFunction("void nat()", asFUNCTION(NativeNoop), asCALL_CDECL); assert( id >= 0 );
+	asIScriptFunction *nat = engine->GetFunctionById(id);
+	nat->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	const char *code = "void f() { nat(); } \n";
+	CBytecodeStream first(__FILE__"3");
+	asIScriptModule *mod = BuildModule(engine, "written", code);
+	if( mod == 0 || mod->SaveByteCode(&first) < 0 )
+	{
+		TEST_FAILED;
+	}
+	// The same source against a different declaration differs only in f's scopes
+	nat->SetMemoryAccess(asMA_ENGINE, asMA_ENGINE);
+	CBytecodeStream second(__FILE__"4");
+	mod = BuildModule(engine, "written", code);
+	if( mod == 0 || mod->SaveByteCode(&second) < 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void f()"), asMA_ENGINE, asMA_ENGINE);
+	}
+	if( first.buffer.size() != second.buffer.size() || first.buffer == second.buffer )
+	{
+		PRINTF("the saved bytecode does not carry the scopes\n");
+		TEST_FAILED;
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
 bool Test()
 {
 	bool fail = false;
@@ -1137,6 +1261,14 @@ bool Test()
 		fail = true;
 	}
 	if( TestSaveLoadAndRerun() )
+	{
+		fail = true;
+	}
+	if( TestNativeArguments() )
+	{
+		fail = true;
+	}
+	if( TestSaveWritesScopes() )
 	{
 		fail = true;
 	}

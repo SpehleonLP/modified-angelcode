@@ -96,8 +96,9 @@ static bool SameValue(const asSAbstractValue &a, const asSAbstractValue &b)
 
 // Not monotone in s on its own: WorldStable maps to itself, while This on an
 // object of lower origin maps below it. Reads take the floor in
-// asMemoryAccessReadContribution, and write scopes are never WorldStable, so
-// neither use ever takes that step.
+// asMemoryAccessReadContribution, writes are never WorldStable, and the origin
+// of a returned reference maps WorldStable to None (ReturnedReferenceOrigin),
+// so no use ever takes that step.
 asEMemoryAccess asMemoryAccessContribution(asEMemoryAccess s, asBYTE objectOrigin)
 {
 	if( s <= asMA_WORLD_STABLE )
@@ -117,11 +118,25 @@ asEMemoryAccess asMemoryAccessContribution(asEMemoryAccess s, asBYTE objectOrigi
 
 // Every scope above WorldStable contains it, so a callee that touches only a
 // local object may still read world-stable state. The floor keeps the
-// object's origin from hiding that, and it also makes reads monotone in s
-// (spec 2.2).
+// object's origin from hiding that, and it also makes reads monotone in s,
+// which the fixed point needs to end.
 asEMemoryAccess asMemoryAccessReadContribution(asEMemoryAccess s, asBYTE objectOrigin)
 {
 	return Join(asMemoryAccessContribution(s, objectOrigin), s < asMA_WORLD_STABLE ? s : asMA_WORLD_STABLE);
+}
+
+// The part of a returned reference's origin that comes from what the callee
+// read. A reference into world-stable state counts as None, like This on a
+// local object: that state never changes while the VM runs, and a reference
+// into it is const by contract. This keeps the origin monotone in s; the call
+// itself still records the WorldStable read.
+static asBYTE ReturnedReferenceOrigin(asEMemoryAccess s, asBYTE objectOrigin)
+{
+	if( s <= asMA_WORLD_STABLE )
+	{
+		return asMA_NONE;
+	}
+	return asMemoryAccessContribution(s, objectOrigin);
 }
 
 asEMemoryAccess asMemoryAccessOfDestruction(asEMemoryAccess s)
@@ -130,9 +145,14 @@ asEMemoryAccess asMemoryAccessOfDestruction(asEMemoryAccess s)
 }
 
 asCMemoryAccessScanner::asCMemoryAccessScanner(asCScriptEngine *in_engine, asCModule *in_module, const asSMemoryAccessTable *in_table)
-	: engine(in_engine), module(in_module), table(in_table), func(0), bc(0), bcLen(0), slotBase(0),
+	: engine(in_engine), module(in_module), table(in_table), calleeLog(0), func(0), bc(0), bcLen(0), slotBase(0),
 	  read(asMA_NONE), write(asMA_NONE), drops(false)
 {
+}
+
+void asCMemoryAccessScanner::SetCalleeLog(asCArray<asUINT> *log)
+{
+	calleeLog = log;
 }
 
 void asCMemoryAccessScanner::AccessOf(asCScriptFunction *f, asEMemoryAccess &r, asEMemoryAccess &w, bool &d) const
@@ -157,7 +177,7 @@ void asCMemoryAccessScanner::AccessOf(asCScriptFunction *f, asEMemoryAccess &r, 
 	}
 	r = asMemoryAccessRead(f->memoryAccess);
 	w = asMemoryAccessWrite(f->memoryAccess);
-	// Only this pass tracks the flag; any other callee that writes may drop a handle (spec 2.4)
+	// Only this pass tracks the flag; any other callee that writes may drop a stored handle
 	d = w > asMA_WORLD_STABLE;
 }
 
@@ -311,7 +331,7 @@ void asCMemoryAccessScanner::DestroyUnbalanced(asCTypeInfo *type)
 	RecordRead(r);
 	RecordWrite(w);
 	// A destruction that clears a stored handle can make an earlier balanced
-	// release the last one (spec 2.4)
+	// release the last one
 	if( d )
 	{
 		drops = true;
@@ -669,6 +689,18 @@ bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT 
 	{
 		return false;
 	}
+	if( calleeLog && table && kind == asCALLKIND_DIRECT )
+	{
+		asSMapNode<int, asUINT> *cursor = 0;
+		if( table->funcIdToIndex->MoveTo(&cursor, callee->id) )
+		{
+			asUINT i = table->funcIdToIndex->GetValue(cursor);
+			if( calleeLog->IndexOf(i) < 0 )
+			{
+				calleeLog->PushLast(i);
+			}
+		}
+	}
 	asUINT thisSize = callee->objectType ? AS_PTR_SIZE : 0;
 	asUINT retSize  = callee->DoesReturnOnStack() ? AS_PTR_SIZE : 0;
 	asUINT total    = thisSize + retSize + asUINT(callee->GetSpaceNeededForArguments());
@@ -697,17 +729,15 @@ bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT 
 	{
 		drops = true;
 	}
+	if( !ChargeArguments(s, callee, thisSize + retSize) )
+	{
+		return false;
+	}
 
 	// A returned reference points into memory the callee read, or into the
-	// object or an argument it was given (spec 2.5). A script callee counts
-	// the reference it returns as read (asBC_RET), because taking an address
-	// reads nothing.
-	asBYTE refOrigin = asMemoryAccessContribution(r, objectOrigin);
-	if( refOrigin == asMA_WORLD_STABLE )
-	{
-		// Nothing may write through it
-		refOrigin = asMA_PROGRAM;
-	}
+	// object or an argument it was given. A script callee counts the reference
+	// it returns as read (asBC_RET), because taking an address reads nothing.
+	asBYTE refOrigin = ReturnedReferenceOrigin(r, objectOrigin);
 	// The reference may point into a frame variable the caller passed, at an
 	// offset the scanner cannot know
 	bool refIntoFrame = false;
@@ -759,8 +789,9 @@ bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT 
 		return false;
 	}
 
-	// Where the result lands (opcode-semantics.md, section C). Any call may
-	// leave the value register changed.
+	// A returned reference lands in the value register, and a returned handle
+	// or object in the object register. Any call may leave the value register
+	// changed.
 	s.valueReg = Unknown();
 	const asCDataType &rt = callee->returnType;
 	if( rt.IsReference() )
@@ -779,7 +810,7 @@ bool asCMemoryAccessScanner::DoCall(State &s, asCScriptFunction *callee, asUINT 
 		}
 		else
 		{
-			// A returned handle may be held anywhere (spec 2.5)
+			// A returned handle may be held anywhere
 			s.objectReg = Value(asMA_PROGRAM, asMA_PROGRAM, asRH_OWNED);
 		}
 	}
@@ -941,7 +972,62 @@ static bool IsPlainValueType(const asCDataType &dt)
 	return ti && (ti->flags & asOBJ_VALUE) && !(ti->flags & asOBJ_ASHANDLE);
 }
 
-// What a parameter slot holds on entry (spec 2.1)
+// An application function is opaque, so the caller charges what it may touch
+// through its arguments: the memory a reference points into, and the object a
+// handle or a reference-type value refers to. Its declared scopes cover only
+// what it reaches beyond those. A script callee's parameters are analysed
+// inside the callee instead. An &out argument is a caller temporary, and a
+// value type passed by value is a private copy.
+bool asCMemoryAccessScanner::ChargeArguments(State &s, asCScriptFunction *callee, asUINT k)
+{
+	// A template instance's factory stub has no module, and carries the
+	// declared scopes of the application factory it forwards to
+	if( callee->funcType != asFUNC_SYSTEM && !(callee->funcType == asFUNC_SCRIPT && callee->module == 0) )
+	{
+		return true;
+	}
+	for( asUINT n = 0; n < callee->parameterTypes.GetLength(); n++ )
+	{
+		const asCDataType &dt = callee->parameterTypes[n];
+		asETypeModifiers inOut = n < callee->inOutFlags.GetLength() ? callee->inOutFlags[n] : asTM_NONE;
+		bool charge;
+		if( dt.IsReference() )
+		{
+			charge = inOut != asTM_OUTREF;
+		}
+		else
+		{
+			charge = dt.IsObjectHandle() || (dt.IsObject() && !IsPlainValueType(dt));
+		}
+		if( charge )
+		{
+			asSAbstractValue arg;
+			if( !PtrAt(s, k, arg) )
+			{
+				return false;
+			}
+			RecordRead(arg.origin);
+			if( !dt.IsObjectConst() )
+			{
+				RecordWrite(arg.origin);
+			}
+			// Through a reference to a handle, or to a value of unknown type, the
+			// function also reaches the object the handle refers to
+			if( dt.IsReference() && (dt.IsObjectHandle() || dt.GetTokenType() == ttQuestion) )
+			{
+				RecordRead(arg.loads);
+				if( !dt.IsObjectConst() )
+				{
+					RecordWrite(arg.loads);
+				}
+			}
+		}
+		k += dt.GetSizeOnStackDWords();
+	}
+	return true;
+}
+
+// What a parameter slot holds on entry
 static asSAbstractValue ParamValue(const asCDataType &dt, asETypeModifiers inOut)
 {
 	if( dt.GetTokenType() == ttQuestion )
@@ -1725,7 +1811,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		}
 		break;
 
-	// Releases (spec 2.4)
+	// Releases: only one that may be the last can destroy
 	case asBC_FREE:
 	{
 		asSAbstractValue *slot = Var(s, asBC_SWORDARG0(instr));
@@ -1800,7 +1886,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		break;
 	}
 
-	// Calls (spec 2.2)
+	// Calls: each adds its callee's scopes, rebased onto the object it is made on
 	case asBC_CALL: case asBC_CALLSYS:
 		if( !DoCall(s, FunctionById(asBC_INTARG(instr)), asCALLKIND_DIRECT) )
 		{
@@ -1881,7 +1967,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 			{
 				drops = true;
 			}
-			if( !CleanNativeArgs(s, ctor, 0) )
+			if( !ChargeArguments(s, ctor, 0) || !CleanNativeArgs(s, ctor, 0) )
 			{
 				return false;
 			}
