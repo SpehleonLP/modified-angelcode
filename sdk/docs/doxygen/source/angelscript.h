@@ -649,6 +649,30 @@ enum asEFuncType
 	asFUNC_TEMPLATE  = 7
 };
 
+// Memory access scopes
+//! \brief The scope of memory that a function may read or write.
+//!
+//! The scopes form a ladder. Each scope contains every scope below it. See \ref doc_adv_memory_access.
+enum asEMemoryAccess : asBYTE
+{
+	//! \brief Arguments and locals only.
+	asMA_NONE         = 0,
+	//! \brief State that may change, but never while the VM runs. Can be declared for reads on application functions only.
+	asMA_WORLD_STABLE = 1,
+	//! \brief The object the method is called on.
+	asMA_THIS         = 2,
+	//! \brief Objects reached from the object through members that are not handles.
+	asMA_OWNED        = 3,
+	//! \brief The global variables of the function's module.
+	asMA_MODULE       = 4,
+	//! \brief The registered global properties and the other state of the engine.
+	asMA_ENGINE       = 5,
+	//! \brief Anything, including everything reached through a handle.
+	asMA_PROGRAM      = 6,
+	//! \brief An application function that has not been declared. Treat as \ref asMA_PROGRAM.
+	asMA_UNSET        = 7
+};
+
 // Is the target a 64bit system?
 #if defined(__LP64__) || defined(__amd64__) || defined(__x86_64__) || defined(_M_X64) || defined(__aarch64__) || defined(_M_ARM64)
 	#ifndef AS_64BIT_PTR
@@ -4135,6 +4159,23 @@ public:
 	//! \brief Returns the access mast of the function.
 	//! \return The access mask of the function.
 	virtual asDWORD          GetAccessMask() const = 0;
+	//! \brief Declares the memory that an application function reads and writes.
+	//! \param[in] read The widest scope that the function reads.
+	//! \param[in] write The widest scope that the function writes.
+	//! \return A negative value on error.
+	//! \retval asNOT_SUPPORTED The function is not an application function. Script functions get their scopes from the analysis.
+	//! \retval asINVALID_ARG A scope is above \ref asMA_PROGRAM, the write scope is \ref asMA_WORLD_STABLE, or the function has no object and a scope is \ref asMA_THIS or \ref asMA_OWNED.
+	//!
+	//! Call this after registering the function and before building any script. See \ref doc_adv_memory_access.
+	virtual int              SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write) = 0;
+	//! \brief Returns the memory that the function reads and writes.
+	//! \param[out] read Receives the widest scope that the function reads. Can be null.
+	//! \param[out] write Receives the widest scope that the function writes. Can be null.
+	//!
+	//! For script functions the scopes are inferred when the module is built or loaded. An application
+	//! function that has not been declared reports \ref asMA_UNSET, which must be treated as \ref asMA_PROGRAM.
+	//! See \ref doc_adv_memory_access.
+	virtual void             GetMemoryAccess(asEMemoryAccess *read, asEMemoryAccess *write) const = 0;
 	//! \brief Returns the auxiliary object registered with the function.
 	//! \return The auxiliary object registered with the function.
 	virtual void            *GetAuxiliary() const = 0;

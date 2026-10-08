@@ -91,6 +91,7 @@ The official site for the library is <a href="http://www.angelcode.com/angelscri
  - \subpage doc_gc
  - \subpage doc_adv_multithread
  - \subpage doc_adv_concurrent
+ - \subpage doc_adv_memory_access
  - \subpage doc_adv_coroutine
  - \subpage doc_adv_import
  - \subpage doc_adv_dynamic_build
