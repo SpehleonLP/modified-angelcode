@@ -388,6 +388,7 @@
 #define TXT_INVALID_CALLING_CONVENTION    "Invalid calling convention"
 #define TXT_UNBOUND_FUNCTION              "Unbound function called"
 #define TXT_OUT_OF_BOUNDS                 "Out of range"
+#define TXT_EXPECTED_METHOD               "Expected a method declaration"
 #define TXT_EXCEPTION_CAUGHT              "Caught an exception from the application"
 #define TXT_MISMATCH_IN_VALUE_ASSIGN      "Mismatching types in value assignment"
 #define TXT_TOO_MANY_NESTED_CALLS         "Too many nested calls"

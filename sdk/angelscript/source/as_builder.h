@@ -158,6 +158,7 @@ public:
 	int Build();
 
 	int CompileFunction(const char *sectionName, const char *code, int lineOffset, asDWORD compileFlags, asCScriptFunction **outFunc);
+	int CompileMethod(asCObjectType *objType, const char *sectionName, const char *code, int lineOffset, asCScriptFunction **outFunc);
 	int CompileGlobalVar(const char *sectionName, const char *code, int lineOffset);
 #endif
 
@@ -247,6 +248,7 @@ protected:
 	void               RegisterNamespaceVisibility(asCScriptNode *node, asCScriptCode *script, asSNameSpace *ns);
 	void               RegisterNonTypesFromScript(asCScriptNode *node, asCScriptCode *script, asSNameSpace *ns);
 	void               CompileFunctions();
+	int                CompileSingleFunction(const char *sectionName, const char *code, int lineOffset, asDWORD compileFlags, asCObjectType *objType, asCScriptFunction **outFunc);
 	void               CompileGlobalVariables();
 	int                GetEnumValueFromType(asCEnumType *type, const char *name, asCDataType &outDt, asDWORD &outValue);
 	int                GetEnumValue(const char *name, asCDataType &outDt, asDWORD &outValue, asSNameSpace *ns);

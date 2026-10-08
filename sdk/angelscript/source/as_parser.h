@@ -60,6 +60,7 @@ public:
 
 #ifndef AS_NO_COMPILER
 	int ParseScript(asCScriptCode *script);
+	int ParseMethod(asCScriptCode *script);
 
 	// Called from compiler
 	int ParseStatementBlock(asCScriptCode *script, asCScriptNode *block);
