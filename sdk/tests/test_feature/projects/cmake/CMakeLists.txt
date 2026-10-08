@@ -25,6 +25,7 @@ add_executable(
         ../../source/test_addon_stdstring.cpp
         ../../source/test_addon_weakref.cpp
         ../../source/test_any.cpp
+        ../../source/test_appcontext.cpp
         ../../source/test_argref.cpp
         ../../source/test_array.cpp
         ../../source/test_arrayhandle.cpp

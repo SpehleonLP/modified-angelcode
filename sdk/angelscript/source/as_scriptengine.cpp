@@ -5354,6 +5354,31 @@ int asCScriptEngine::RefCastObject(void *obj, asITypeInfo *fromType, asITypeInfo
 	return asSUCCESS;
 }
 
+#ifndef AS_NO_EXCEPTIONS
+// internal
+// Called from within a catch(...) block. The context may be one the
+// application implemented and made active with asPushActiveContext, so only
+// the asIScriptContext interface is used.
+void asCScriptEngine::HandleAppException(asIScriptContext *ctx)
+{
+	if( ctx == 0 )
+		return;
+
+	// Allow the application to translate the application exception to a proper exception string
+	if( translateExceptionCallback )
+	{
+		if( translateExceptionCallbackFunc.callConv < ICC_THISCALL )
+			CallGlobalFunction(ctx, translateExceptionCallbackObj, &translateExceptionCallbackFunc, 0);
+		else
+			CallObjectMethod(translateExceptionCallbackObj, ctx, &translateExceptionCallbackFunc, 0);
+	}
+
+	// Make sure an exception is set even if the application decides not to do any specific translation
+	if( ctx->GetState() != asEXECUTION_EXCEPTION )
+		ctx->SetException(TXT_EXCEPTION_CAUGHT);
+}
+#endif
+
 // interface
 void *asCScriptEngine::CreateScriptObject(const asITypeInfo *type)
 {
@@ -5393,9 +5418,7 @@ void *asCScriptEngine::CreateScriptObject(const asITypeInfo *type)
 		}
 		catch (...)
 		{
-			asCContext *ctx = reinterpret_cast<asCContext*>(asGetActiveContext());
-			if (ctx)
-				ctx->HandleAppException();
+			HandleAppException(asGetActiveContext());
 		}
 #endif
 	}
@@ -5411,9 +5434,7 @@ void *asCScriptEngine::CreateScriptObject(const asITypeInfo *type)
 		}
 		catch(...)
 		{
-			asCContext *ctx = reinterpret_cast<asCContext*>(asGetActiveContext());
-			if( ctx )
-				ctx->HandleAppException();
+			HandleAppException(asGetActiveContext());
 		}
 #endif
 	}
@@ -5451,9 +5472,7 @@ void *asCScriptEngine::CreateScriptObject(const asITypeInfo *type)
 				}
 				catch (...)
 				{
-					asCContext *ctx = reinterpret_cast<asCContext*>(asGetActiveContext());
-					if (ctx)
-						ctx->HandleAppException();
+					HandleAppException(asGetActiveContext());
 
 					// Free the memory
 					CallFree(ptr);
@@ -5600,9 +5619,7 @@ void *asCScriptEngine::CreateScriptObjectCopy(void *origObj, const asITypeInfo *
 		}
 		catch (...)
 		{
-			asCContext *ctx = reinterpret_cast<asCContext*>(asGetActiveContext());
-			if (ctx)
-				ctx->HandleAppException();
+			HandleAppException(asGetActiveContext());
 		}
 #endif
 	}
@@ -5619,9 +5636,7 @@ void *asCScriptEngine::CreateScriptObjectCopy(void *origObj, const asITypeInfo *
 		}
 		catch(...)
 		{
-			asCContext *ctx = reinterpret_cast<asCContext*>(asGetActiveContext());
-			if( ctx )
-				ctx->HandleAppException();
+			HandleAppException(asGetActiveContext());
 
 			// Free the memory
 			CallFree(newObj);

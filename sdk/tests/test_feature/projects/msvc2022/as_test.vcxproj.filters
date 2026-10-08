@@ -110,6 +110,9 @@
     <ClCompile Include="..\..\source\test_any.cpp">
       <Filter>tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\source\test_appcontext.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\source\test_argref.cpp">
       <Filter>tests</Filter>
     </ClCompile>

@@ -30,6 +30,7 @@ SRCNAMES = \
   test_addon_weakref.cpp \
   test_addon_stdstring.cpp \
   test_any.cpp \
+  test_appcontext.cpp \
   test_argref.cpp \
   test_array.cpp \
   test_arrayhandle.cpp \
