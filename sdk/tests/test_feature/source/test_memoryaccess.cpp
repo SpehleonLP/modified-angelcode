@@ -214,6 +214,15 @@ static bool TestThisAndFields()
 	bool fail = false;
 	COutStream out;
 	asIScriptEngine *engine = CreateEngine(out);
+	// A value type no handle can refer to, so a copy of it is private
+	if( engine->RegisterObjectType("vec", sizeof(int), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_PRIMITIVE) < 0 )
+	{
+		TEST_FAILED;
+	}
+	if( engine->RegisterObjectProperty("vec", "int x", 0) < 0 )
+	{
+		TEST_FAILED;
+	}
 	asIScriptModule *mod = BuildModule(engine, "fields",
 		"class In { int v; } \n"
 		"class C \n"
@@ -221,7 +230,6 @@ static bool TestThisAndFields()
 		"  int x; \n"
 		"  In inner; \n"
 		"  In@ h; \n"
-		"  int get() { return x; } \n"
 		"  int getX() { return x; } \n"
 		"  void setX() { x = 1; } \n"
 		"  void setInner() { inner.v = 1; } \n"
@@ -234,7 +242,8 @@ static bool TestThisAndFields()
 		"void outParam(int &out o) { o = 1; } \n"
 		"void inoutParam(In &inout o) { o.v = 1; } \n"
 		"int constIn(const In &in o) { return o.v; } \n"
-		"int byValueIn(In &in o) { return o.v; } \n");
+		"int byValueIn(In &in o) { return o.v; } \n"
+		"int vecIn(vec &in o) { return o.x; } \n");
 	if( mod == 0 )
 	{
 		TEST_FAILED;
@@ -248,7 +257,6 @@ static bool TestThisAndFields()
 		}
 		else
 		{
-			EXPECT_ACCESS(c->GetMethodByDecl("int get()"), asMA_THIS, asMA_NONE);
 			EXPECT_ACCESS(c->GetMethodByDecl("int getX()"), asMA_THIS, asMA_NONE);
 			EXPECT_ACCESS(c->GetMethodByDecl("void setX()"), asMA_NONE, asMA_THIS);
 			// Loading the member pointer reads `this`; the member object is Owned
@@ -257,8 +265,8 @@ static bool TestThisAndFields()
 			// Anything reached through a handle is Program
 			EXPECT_ACCESS(c->GetMethodByDecl("void setH()"), asMA_THIS, asMA_PROGRAM);
 			// The two paths select different frame slots, so the write may have
-			// changed any slot, `this` included, and the member write is Program
-			EXPECT_ACCESS(c->GetMethodByDecl("void tern(bool)"), asMA_NONE, asMA_PROGRAM);
+			// changed any slot but `this`, which the compiler never assigns
+			EXPECT_ACCESS(c->GetMethodByDecl("void tern(bool)"), asMA_NONE, asMA_THIS);
 			// Parameters off offset 0 reach their fields through LoadRObjR
 			EXPECT_ACCESS(c->GetMethodByDecl("int readRef(int, const In&in)"), asMA_PROGRAM, asMA_NONE);
 			EXPECT_ACCESS(c->GetMethodByDecl("void writeOut(int, In&out)"), asMA_NONE, asMA_NONE);
@@ -267,8 +275,11 @@ static bool TestThisAndFields()
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void inoutParam(In&inout)"), asMA_NONE, asMA_PROGRAM);
 		// The compiler passes a const &in object without copying it (spec 2.1)
 		EXPECT_ACCESS(mod->GetFunctionByDecl("int constIn(const In&in)"), asMA_PROGRAM, asMA_NONE);
-		// A non-const &in is the caller's copy
-		EXPECT_ACCESS(mod->GetFunctionByDecl("int byValueIn(In&in)"), asMA_NONE, asMA_NONE);
+		// A reference type that is already a temporary is passed without a copy,
+		// and the temporary may be a handle to a shared object
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int byValueIn(In&in)"), asMA_PROGRAM, asMA_NONE);
+		// A non-const &in value type is the caller's copy or its own temporary
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int vecIn(vec&in)"), asMA_NONE, asMA_NONE);
 	}
 	engine->ShutDownAndRelease();
 	return fail;
@@ -337,6 +348,21 @@ static bool TestDispatch()
 	{
 		EXPECT_ACCESS(MethodOf(mod, "I", "int k(int)"), asMA_PROGRAM, asMA_PROGRAM);
 		EXPECT_ACCESS(MethodOf(mod, "P", "int k(int)"), asMA_NONE, asMA_NONE);
+	}
+
+	// A member read in an override lifts the class entry to This, above B2's None
+	mod = BuildModule(engine, "overrides2",
+		"class B2 { int f(int a) { return a; } } \n"
+		"class D2 : B2 { int z; int f(int a) override { return z; } } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		// D2's override is reached only through this entry: a host looking up
+		// "int f(int)" on D2 gets B2's virtual entry too
+		EXPECT_ACCESS(MethodOf(mod, "B2", "int f(int)"), asMA_THIS, asMA_NONE);
 	}
 
 	// A member read in one implementation lifts the entry to This, above P's None

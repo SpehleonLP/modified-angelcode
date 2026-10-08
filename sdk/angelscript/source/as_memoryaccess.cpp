@@ -272,18 +272,31 @@ void asCMemoryAccessScanner::ForgetSlot(State &s, const asSAbstractValue &addr, 
 	}
 	if( addr.slot == asANY_SLOT )
 	{
-		// Which slot is unknown, so any of them may have changed
+		// Which slot is unknown, so any of them may have changed, except `this`:
+		// the compiler never assigns it, which CatchState relies on as well
+		asSAbstractValue self;
+		asSAbstractValue *selfCell = func->objectType ? Var(s, 0) : 0;
+		if( selfCell )
+		{
+			self = *selfCell;
+		}
 		for( asUINT n = 0; n < s.vars.GetLength(); n++ )
 		{
 			s.vars[n] = Unknown();
 		}
+		if( selfCell )
+		{
+			SetVarCells(s, 0, self, AS_PTR_SIZE);
+		}
 		return;
 	}
 	// A slot the write covers only partly is out of the frame's range, which
-	// the bytecode never produces; the cells that are in range still change
-	for( asUINT n = 0; n < dwords; n++ )
+	// the bytecode never produces; the cells that are in range still change.
+	// The cell above is cleared too: a write into the high cell of a pointer
+	// must not leave the pointer's base cell holding its old value.
+	for( int n = -1; n < int(dwords); n++ )
 	{
-		asSAbstractValue *c = Var(s, addr.slot - int(n));
+		asSAbstractValue *c = Var(s, addr.slot - n);
 		if( c )
 		{
 			*c = Unknown();
@@ -407,6 +420,13 @@ bool asCMemoryAccessScanner::Merge(State &into, const State &from, bool &mismatc
 	return changed;
 }
 
+// A value type no handle can refer to, so a copy of it is private
+static bool IsPlainValueType(const asCDataType &dt)
+{
+	asCTypeInfo *ti = dt.GetTypeInfo();
+	return ti && (ti->flags & asOBJ_VALUE) && !(ti->flags & asOBJ_ASHANDLE);
+}
+
 // What a parameter slot holds on entry (spec 2.1)
 static asSAbstractValue ParamValue(const asCDataType &dt, asETypeModifiers inOut)
 {
@@ -426,8 +446,11 @@ static asSAbstractValue ParamValue(const asCDataType &dt, asETypeModifiers inOut
 			return Value(asMA_PROGRAM, asMA_PROGRAM, asRH_NONE);
 		}
 		// &in: a primitive is copied or is the caller's own frame variable, and a
-		// non-const object is copied, but a const object is passed as it is
-		if( dt.IsPrimitive() || !dt.IsReadOnly() )
+		// non-const value type is copied or is the caller's own temporary. A
+		// reference type that is already a temporary is passed without a copy
+		// (PrepareArgument), and that temporary may be a handle to a shared
+		// object, so it reaches anything; so does any const object.
+		if( dt.IsPrimitive() || (!dt.IsReadOnly() && IsPlainValueType(dt)) )
 		{
 			return Value(asMA_NONE, asMA_PROGRAM, asRH_NONE);
 		}
@@ -440,8 +463,14 @@ static asSAbstractValue ParamValue(const asCDataType &dt, asETypeModifiers inOut
 	}
 	if( dt.IsObject() )
 	{
-		// By value: a copy the callee owns
-		return Value(asMA_NONE, asMA_PROGRAM, asRH_OWNED);
+		// By value the callee owns its argument, but a reference type that is
+		// already a temporary is passed without a copy (PrepareTemporaryVariable),
+		// so the object may be shared; only a value type is a private copy
+		if( IsPlainValueType(dt) )
+		{
+			return Value(asMA_NONE, asMA_PROGRAM, asRH_OWNED);
+		}
+		return Value(asMA_PROGRAM, asMA_PROGRAM, asRH_OWNED);
 	}
 	return Unknown();
 }
