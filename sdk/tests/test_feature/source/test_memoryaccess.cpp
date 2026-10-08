@@ -595,7 +595,7 @@ static bool CheckModuleWrites(asIScriptModule *mod, int line)
 	return bad;
 }
 
-#define EXPECT_NO_WORLD_STABLE_WRITE(mod) if( CheckModuleWrites((mod), __LINE__) ) TEST_FAILED
+#define EXPECT_NO_WORLD_STABLE_WRITE(mod) do { if( CheckModuleWrites((mod), __LINE__) ) { TEST_FAILED; } } while(0)
 
 class CBuf
 {
@@ -666,7 +666,7 @@ static bool TestCalls()
 		"void callCb(CB@ cb) { cb(); } \n"
 		"void a(int n) { if( n > 0 ) b(n - 1); } \n"
 		"void b(int n) { g = n; a(n); } \n"
-		"void tc() { try { g = 1; } catch { counter = 2; } } \n"
+		"void tc() { try { pureFnInt(1); } catch { counter = 2; } } \n"
 		"shared class S { void f() {} void h() { f(); } } \n");
 	if( mod == 0 )
 	{
@@ -697,7 +697,8 @@ static bool TestCalls()
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void callCb(CB@)"), asMA_PROGRAM, asMA_PROGRAM);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void a(int)"), asMA_NONE, asMA_MODULE);
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void b(int)"), asMA_NONE, asMA_MODULE);
-		// The catch block starts from a fresh state, and its write still counts
+		// The try body is {None, None}; only the catch block, reached solely through
+		// tryCatchInfo, writes a module global, and that write still counts
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void tc()"), asMA_NONE, asMA_MODULE);
 		// A shared class may gain overrides later
 		EXPECT_ACCESS(MethodOf(mod, "S", "void h()"), asMA_PROGRAM, asMA_PROGRAM);
