@@ -168,8 +168,10 @@ void RegisterScriptFunction(asCScriptEngine *engine)
 	engine->scriptFunctions[r]->returnType = asCDataType::CreateType(&engine->functionBehaviours, false);
 	engine->scriptFunctions[r]->returnType.MakeHandle(true);
 
-	// The delegate factory allocates a fresh delegate and AddRefs the function and the
-	// object it binds, which touch only their atomic reference counts
+	// The delegate factory allocates a fresh delegate and adds it to the garbage
+	// collector, which is outside this analysis. The analysis never consults AddRef,
+	// so the bound object's AddRef behaviour is assumed to touch only its reference
+	// count: that is a documented host contract.
 	engine->scriptFunctions[r]->SetMemoryAccess(asMA_NONE, asMA_NONE);
 
 	asCObjectType &ot = engine->functionBehaviours;
