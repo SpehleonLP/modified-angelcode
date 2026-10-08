@@ -89,6 +89,30 @@ this maps to). Grouped by theme, citing the primary files:
   provably-infinite loop now produces an "Unreachable code" warning where it
   previously produced none. Confirmed present in vanilla upstream 2.38.0
   (`next-version` branch, same `CompileStatement`) — worth reporting upstream.
+- **Application-implemented active contexts**, offered upstream on branch
+  `app-context-and-compile-method`:
+  - `asPushActiveContext(ctx)` / `asPopActiveContext(ctx)` let an application
+    make its own `asIScriptContext` implementation the active context. A
+    registered function the application then calls directly can use
+    `asGetActiveContext()`, for example to `SetException`. Pop returns
+    `asERROR` unless `ctx` is the top one.
+  - The engine's `catch(...)` sites no longer `reinterpret_cast` the active
+    context to `asCContext`, which was type confusion for such a context. They
+    call `asCScriptEngine::HandleAppException(asIScriptContext*)`, which uses
+    only the interface (translate callback, `GetState`, `SetException`). The
+    VM context delegates to it as well.
+- **Anonymous methods**, on the same upstream branch.
+  `asIScriptModule::CompileMethod(type, section, code, lineOffset, &func)`
+  compiles one method against a script class this module declares. The
+  method sees `this` and the module scope, but it is not added to the class's
+  methods or virtual table, nor to the module. It is final, and the caller
+  owns the reference, as with `CompileFunction`. The code parses in
+  class-body position (`asCParser::ParseMethod`), so `const` and the class
+  decorators work. Refused cases:
+  - constructors and destructors return `asNOT_SUPPORTED`, because they need
+    the member initializers;
+  - interfaces, registered types and other modules' types return
+    `asINVALID_TYPE`.
 - Callback signature changes: `SetTranslateAppExceptionCallback`,
   `asIScriptContext::SetExceptionCallback`/`SetLineCallback` take `asSFuncPtr`
   by value instead of `const asSFuncPtr&`.
@@ -512,27 +536,26 @@ This repo is a standalone CMake project (the vanilla `sdk/angelscript/projects/c
 subproject plus a `tests/` gtest suite; system GTest 1.14+ required):
 
 ```bash
-cmake -B <build-dir> -S /mnt/Passport/Libraries/svn/angelscript-code -DCMAKE_BUILD_TYPE=Debug
-cmake --build <build-dir> -j8
-ctest --test-dir <build-dir> --output-on-failure
+cmake -B <build-dir> -S <this repo> -G Ninja -DCMAKE_BUILD_TYPE=Debug -DAS_SANITIZE=ON
+cmake --build <build-dir>
+<build-dir>/tests/as_tests
 ```
 
-`<build-dir>` must live on a native (ext4) filesystem, not under `/mnt/Passport`
-itself — that drive is NTFS via `ntfs-3g`/fuseblk, which cannot carry the
-executable bit, so a build directory placed on it produces object/binary files
-that fail to run (`ctest`/`gtest_discover_tests` sees "Permission denied").
-This is the same constraint the engine's `scripts/wt-build.sh` works around by
-building to `/home/anyuser/Developer/Build/...`; do the same here, e.g.
-`/home/anyuser/Developer/Build/angelscript-fork`.
+`AS_SANITIZE` builds with ASan and UBSan. UBSan's `vptr` findings abort, because
+`AppContext.AppExceptionCaughtByEngineIsReportedToIt` pins a type confusion that
+only that check sees reliably. Other UBSan findings only print: the bytecode
+stores pointers at dword alignment by design, and `as_restore.cpp` passes null
+to `memcpy` with a zero size.
 
-All 98 tests should pass. 95 of them live in `tests/test_as_halting.cpp`,
+All 112 tests should pass. 95 of them live in `tests/test_as_halting.cpp`,
 across three fixtures that differ only in engine properties: `AsHalting`
 enables `asEP_ALLOW_UNSAFE_REFERENCES` (one test needs `int &inout` on a script
 function); `AsHaltingConstGlobalFuncdef` leaves it at its default of off,
 which is the precondition for const-global funcdef resolution to fire at all
 (see that section above); and `AsHaltingNoOptimizer` turns
 `asEP_OPTIMIZE_BYTECODE` off. This is the suite every later halting-analysis
-change adds to.
+change adds to. `tests/test_as_app_context.cpp` and
+`tests/test_as_compile_method.cpp` cover the two upstream-bound features.
 
 ### The obviousness audit
 

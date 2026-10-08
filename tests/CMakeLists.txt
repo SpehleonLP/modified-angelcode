@@ -1,6 +1,6 @@
 find_package(GTest REQUIRED)
 
-add_executable(as_tests test_as_halting.cpp test_as_halting_obvious.cpp)
+add_executable(as_tests test_as_halting.cpp test_as_halting_obvious.cpp test_as_app_context.cpp test_as_compile_method.cpp)
 target_link_libraries(as_tests PRIVATE angelscript GTest::gtest GTest::gtest_main Threads::Threads)
 target_include_directories(as_tests PRIVATE
 	${CMAKE_SOURCE_DIR}/sdk/angelscript/include
