@@ -1718,6 +1718,13 @@ int asCModule::CompileGlobalVar(const char *sectionName, const char *code, int l
 	asCString str = code;
 	r = varBuilder.CompileGlobalVar(sectionName, str.AddressOf(), lineOffset);
 
+	// The new global's init function lives on its property, which the pass
+	// scans; computing before InitGlobalProp means it never runs with Unset
+	if( r >= 0 )
+	{
+		ComputeTransitiveFunctionMetadata();
+	}
+
 	m_engine->BuildCompleted();
 
 	// Initialize the variable
@@ -1895,7 +1902,9 @@ bool asCModule::GetDispatchTargets(asCScriptFunction *called, asCArray<asCScript
 	for( asUINT c = 0; c < m_classTypes.GetLength(); c++ )
 	{
 		asCObjectType *classType = m_classTypes[c];
-		if( classType == 0 )
+		// An interface has no bodies, and a derived one lists its bases in
+		// `interfaces` without the vtable offsets a class has
+		if( classType == 0 || classType->IsInterface() )
 		{
 			continue;
 		}
@@ -1905,6 +1914,10 @@ bool asCModule::GetDispatchTargets(asCScriptFunction *called, asCArray<asCScript
 			{
 				if( classType->interfaces[k] == baseType )
 				{
+					if( k >= classType->interfaceVFTOffsets.GetLength() )
+					{
+						return false;
+					}
 					asUINT at = classType->interfaceVFTOffsets[k] + asUINT(vfIdx);
 					if( at >= classType->virtualFunctionTable.GetLength() )
 					{
@@ -1955,10 +1968,13 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		}
 	}
 
-	// Memory access: the least fixed point from {None, None}. A scan is
-	// monotone in its callees' scopes and in the destructors it consults, so
-	// results only rise and the loop ends. Round-robin rather than a worklist,
-	// because a function also depends on destructors it never calls directly.
+	// Memory access: the least fixed point from {None, None}. The loop ends
+	// because a scan is monotone in its callees' scopes and in the destructors
+	// it consults. The contribution rule alone is not monotone across
+	// WorldStable -> This; reads go through the WorldStable floor of
+	// asMemoryAccessReadContribution, and a write scope is never WorldStable,
+	// so the step is never taken. Round-robin rather than a worklist, because
+	// a function also depends on destructors it never calls directly.
 	asSMemoryAccessTable table;
 	table.funcIdToIndex = &funcIdToIndex;
 	table.access.SetLength(funcCount);

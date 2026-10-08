@@ -223,7 +223,170 @@ static bool TestFailsClosed()
 	else
 	{
 		asITypeInfo *c = mod->GetTypeInfoByName("C");
-		EXPECT_ACCESS(c->GetMethodByDecl("int get()"), asMA_PROGRAM, asMA_PROGRAM);
+		if( c == 0 )
+		{
+			TEST_FAILED;
+		}
+		else
+		{
+			EXPECT_ACCESS(c->GetMethodByDecl("int get()"), asMA_PROGRAM, asMA_PROGRAM);
+		}
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+// The method as a host sees it, or 0 (which CheckAccess reports) when the type is missing
+static asIScriptFunction *MethodOf(asIScriptModule *mod, const char *typeName, const char *decl)
+{
+	asITypeInfo *type = mod ? mod->GetTypeInfoByName(typeName) : 0;
+	if( type == 0 )
+	{
+		PRINTF("type '%s' not found\n", typeName);
+		return 0;
+	}
+	return type->GetMethodByDecl(decl);
+}
+
+// A virtual or interface entry is the join over every body a call through it can reach
+static bool TestDispatch()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+
+	// D's override reads a member, which no task so far models, so the join reaches Program;
+	// E has a single frame-local body, which shows the narrowing path is live
+	asIScriptModule *mod = BuildModule(engine, "overrides",
+		"class B { int f(int a) { return a + 1; } } \n"
+		"class D : B { int x; int f(int a) override { return x; } } \n"
+		"class E { int g(int a) { return a; } } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(MethodOf(mod, "E", "int g(int)"), asMA_NONE, asMA_NONE);
+		EXPECT_ACCESS(MethodOf(mod, "B", "int f(int)"), asMA_PROGRAM, asMA_PROGRAM);
+	}
+
+	// A module built later can add implementations of a shared type
+	mod = BuildModule(engine, "shared",
+		"shared class S { int h(int a) { return a; } } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(MethodOf(mod, "S", "int h(int)"), asMA_PROGRAM, asMA_PROGRAM);	}
+
+	mod = BuildModule(engine, "interface",
+		"interface I { int k(int a); } \n"
+		"class P : I { int k(int a) { return a; } } \n"
+		"class Q : I { int y; int k(int a) { return y; } } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(MethodOf(mod, "I", "int k(int)"), asMA_PROGRAM, asMA_PROGRAM);
+		EXPECT_ACCESS(MethodOf(mod, "P", "int k(int)"), asMA_NONE, asMA_NONE);
+	}
+
+	// Without Q every implementation is frame-local
+	mod = BuildModule(engine, "interface2",
+		"interface I { int k(int a); } \n"
+		"class P : I { int k(int a) { return a; } } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(MethodOf(mod, "I", "int k(int)"), asMA_NONE, asMA_NONE);
+	}
+
+	// A derived interface is a module type that lists its base among its
+	// interfaces but has no bodies and no vtable offsets of its own
+	mod = BuildModule(engine, "interface3",
+		"interface I1 { int k(int a); } \n"
+		"interface I2 : I1 {} \n"
+		"class R : I2 { int k(int a) { return a; } } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(MethodOf(mod, "I1", "int k(int)"), asMA_NONE, asMA_NONE);
+	}
+
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+// The public API does not expose a global's init function, so catch it while it runs
+static void CaptureRunningFunction(asIScriptContext *ctx, void *param)
+{
+	asIScriptFunction **captured = (asIScriptFunction**)param;
+	if( *captured == 0 && ctx->GetCallstackSize() > 0 )
+	{
+		*captured = ctx->GetFunction(0);
+		if( *captured )
+		{
+			(*captured)->AddRef();
+		}
+	}
+}
+
+static asIScriptContext *RequestCapturingContext(asIScriptEngine *engine, void *param)
+{
+	asIScriptContext *ctx = engine->CreateContext();
+	ctx->SetLineCallback(asFUNCTION(CaptureRunningFunction), param, asCALL_CDECL);
+	return ctx;
+}
+
+static void ReturnCapturingContext(asIScriptEngine *, asIScriptContext *ctx, void *)
+{
+	ctx->Release();
+}
+
+// CompileGlobalVar adds an init function after the build, which must get computed scopes too
+static bool TestCompileGlobalVar()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	asIScriptModule *mod = BuildModule(engine, "globals", "void f() {} \n");
+	asIScriptFunction *initFunc = 0;
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		engine->SetContextCallbacks(RequestCapturingContext, ReturnCapturingContext, &initFunc);
+		if( mod->CompileGlobalVar("g2", "int g2 = 5;", 0) < 0 )
+		{
+			TEST_FAILED;
+		}
+		engine->SetContextCallbacks(0, 0, 0);
+		if( initFunc == 0 )
+		{
+			PRINTF("the init function of g2 did not run\n");
+			TEST_FAILED;
+		}
+		else
+		{
+			// The body is SUSPEND; SetG4 g2, 5; RET. Writing g2 makes the final
+			// scope {None, Module}; until the global opcodes are modelled SetG4
+			// fails closed. Either way it is computed, never Unset.
+			EXPECT_ACCESS(initFunc, asMA_PROGRAM, asMA_PROGRAM);
+			initFunc->Release();
+		}
 	}
 	engine->ShutDownAndRelease();
 	return fail;
@@ -232,11 +395,34 @@ static bool TestFailsClosed()
 bool Test()
 {
 	bool fail = false;
-	if( TestApi() ) fail = true;
-	if( TestTemplateInheritance() ) fail = true;
-	if( TestEngineBuiltins() ) fail = true;
-	if( TestFrameLocal() ) fail = true;
-	if( TestFailsClosed() ) fail = true;
+	if( TestApi() )
+	{
+		fail = true;
+	}
+	if( TestTemplateInheritance() )
+	{
+		fail = true;
+	}
+	if( TestEngineBuiltins() )
+	{
+		fail = true;
+	}
+	if( TestFrameLocal() )
+	{
+		fail = true;
+	}
+	if( TestFailsClosed() )
+	{
+		fail = true;
+	}
+	if( TestDispatch() )
+	{
+		fail = true;
+	}
+	if( TestCompileGlobalVar() )
+	{
+		fail = true;
+	}
 	return fail;
 }
 

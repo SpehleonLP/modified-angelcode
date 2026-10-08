@@ -1,3 +1,35 @@
+/*
+   AngelCode Scripting Library
+   Copyright (c) 2003-2025 Andreas Jonsson
+
+   This software is provided 'as-is', without any express or implied
+   warranty. In no event will the authors be held liable for any
+   damages arising from the use of this software.
+
+   Permission is granted to anyone to use this software for any
+   purpose, including commercial applications, and to alter it and
+   redistribute it freely, subject to the following restrictions:
+
+   1. The origin of this software must not be misrepresented; you
+      must not claim that you wrote the original software. If you use
+      this software in a product, an acknowledgment in the product
+      documentation would be appreciated but is not required.
+
+   2. Altered source versions must be plainly marked as such, and
+      must not be misrepresented as being the original software.
+
+   3. This notice may not be removed or altered from any source
+      distribution.
+
+   The original version of this library can be located at:
+   http://www.angelcode.com/angelscript/
+
+   Andreas Jonsson
+   andreas@angelcode.com
+*/
+
+
+
 //
 // as_memoryaccess.cpp
 //
@@ -61,6 +93,10 @@ static bool SameValue(const asSAbstractValue &a, const asSAbstractValue &b)
 	return a.origin == b.origin && a.loads == b.loads && a.hold == b.hold && a.slot == b.slot && a.varRef == b.varRef;
 }
 
+// Not monotone in s on its own: WorldStable maps to itself, while This on an
+// object of lower origin maps below it. Reads take the floor in
+// asMemoryAccessReadContribution, and write scopes are never WorldStable, so
+// neither use ever takes that step.
 asEMemoryAccess asMemoryAccessContribution(asEMemoryAccess s, asBYTE objectOrigin)
 {
 	if( s <= asMA_WORLD_STABLE )
@@ -76,6 +112,15 @@ asEMemoryAccess asMemoryAccessContribution(asEMemoryAccess s, asBYTE objectOrigi
 		r = Join(r, s);
 	}
 	return r;
+}
+
+// Every scope above WorldStable contains it, so a callee that touches only a
+// local object may still read world-stable state. The floor keeps the
+// object's origin from hiding that, and it also makes reads monotone in s
+// (spec 2.2).
+asEMemoryAccess asMemoryAccessReadContribution(asEMemoryAccess s, asBYTE objectOrigin)
+{
+	return Join(asMemoryAccessContribution(s, objectOrigin), s < asMA_WORLD_STABLE ? s : asMA_WORLD_STABLE);
 }
 
 asEMemoryAccess asMemoryAccessOfDestruction(asEMemoryAccess s)
@@ -574,7 +619,7 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 	// No effect on memory
 	case asBC_JitEntry: case asBC_CHKREF: case asBC_ChkNullS: case asBC_ChkNullV:
 		break;
-	// The line callback is host code outside the analysis, like the GC (spec 2.2)
+	// The line callback is host code outside the analysis, like the GC
 	case asBC_SUSPEND:
 		break;
 
