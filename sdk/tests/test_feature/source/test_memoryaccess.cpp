@@ -847,6 +847,16 @@ static bool TestDestruction()
 	// The VM releases an auto handle argument after the native returns
 	r = engine->RegisterGlobalFunction("void sinkRel(Rel@+)", asFUNCTION(SinkRel), asCALL_CDECL); assert( r >= 0 );
 	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	// A template whose declared Release is shared by every instance, so it
+	// cannot say what destroying the elements of one instance runs
+	r = engine->RegisterObjectType("tmpl<class T>", 0, asOBJ_REF | asOBJ_TEMPLATE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("tmpl<T>", asBEHAVE_TEMPLATE_CALLBACK, "bool f(int&in, bool&out)", asFUNCTION(TmplCallbackGeneric), asCALL_GENERIC); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("tmpl<T>", asBEHAVE_FACTORY, "tmpl<T>@ f(int&in)", asFUNCTION(TmplFactoryGeneric), asCALL_GENERIC); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterObjectBehaviour("tmpl<T>", asBEHAVE_ADDREF, "void f()", asFUNCTION(TmplNoopGeneric), asCALL_GENERIC); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	r = engine->RegisterObjectBehaviour("tmpl<T>", asBEHAVE_RELEASE, "void f()", asFUNCTION(TmplNoopGeneric), asCALL_GENERIC); assert( r >= 0 );
+	engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE);
 	asIScriptModule *mod = BuildModule(engine, "destruction",
 		"int counter; \n"
 		"class D { ~D() { counter++; } } \n"
@@ -876,7 +886,9 @@ static bool TestDestruction()
 		"class C3 : I3 { ~C3() { counter++; } } \n"
 		"void takeI(I3@ i) { } \n"
 		"class Z { Q@ h; ~Z() { @h = null; } } \n"
-		"void passRel() { sinkRel(Rel()); } \n");
+		"void passRel() { sinkRel(Rel()); } \n"
+		"void tmplOfD() { tmpl<D@> t; } \n"
+		"void tmplOfInt() { tmpl<int> t; } \n");
 	if( mod == 0 )
 	{
 		TEST_FAILED;
@@ -910,6 +922,11 @@ static bool TestDestruction()
 		// The fresh Rel moves into the native's argument (GETOBJ), and the VM
 		// releases it after the call, which may run Rel's Release to destruction
 		EXPECT_ACCESS(mod->GetFunctionByDecl("void passRel()"), asMA_ENGINE, asMA_ENGINE);
+		// Destroying a tmpl<D@> may release the last reference to a D, whatever
+		// the shared declaration of tmpl's Release says
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void tmplOfD()"), asMA_MODULE, asMA_MODULE);
+		// A primitive subtype holds nothing to destroy
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void tmplOfInt()"), asMA_NONE, asMA_NONE);
 		EXPECT_NO_WORLD_STABLE_WRITE(mod);
 	}
 	engine->ShutDownAndRelease();

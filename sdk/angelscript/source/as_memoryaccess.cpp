@@ -291,6 +291,16 @@ void asCMemoryAccessScanner::DestructionWalk(asCTypeInfo *type, asEMemoryAccess 
 	{
 		JoinDestruction(this, FunctionById(id), r, w, d);
 	}
+	// Every instance of a template shares that declaration, so it cannot cover
+	// what destroying the objects one instance holds runs: array<D@> runs ~D
+	for( asUINT n = 0; n < ot->templateSubTypes.GetLength(); n++ )
+	{
+		const asCDataType &dt = ot->templateSubTypes[n];
+		if( dt.IsObject() || dt.IsObjectHandle() )
+		{
+			DestructionWalk(dt.GetTypeInfo(), r, w, d, visited);
+		}
+	}
 }
 
 void asCMemoryAccessScanner::DestroyUnbalanced(asCTypeInfo *type)
@@ -347,6 +357,10 @@ bool asCMemoryAccessScanner::StoreHandle(State &s, const asSAbstractValue &dest,
 	}
 	if( dest.slot != asNO_SLOT )
 	{
+		// A REFCPY into offset 0 of an inline value-type local (FieldOf) lands on
+		// that local's base cell and overwrites it. That is sound only because
+		// destruction is counted per type, at the position after the constructor;
+		// tracking destruction per instance must revisit this.
 		asSAbstractValue *slot = Var(s, dest.slot);
 		if( slot == 0 )
 		{
@@ -1160,7 +1174,9 @@ asSMemoryScanResult asCMemoryAccessScanner::Scan(asCScriptFunction *f)
 	// asCContext::CleanStackFrame then releases every object variable, the
 	// parameters included, as it holds it there. `this` is not a variable. The
 	// state after a call covers what the callee may have written before it
-	// raised, and the arguments pending in a call were counted at GETOBJ.
+	// raised, and the arguments pending in a call were counted at GETOBJ. A
+	// value still in the object register when a native aborts is counted
+	// through the next STOREOBJ position, where the stored variable is OWNED.
 	for( asUINT pos = 0; ok && pos < bcLen; pos++ )
 	{
 		if( !states[pos].reached )
