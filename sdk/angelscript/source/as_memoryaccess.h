@@ -144,6 +144,10 @@ protected:
 	// A write through `addr` may change the frame slot it points to
 	void              ForgetSlot(State &s, const asSAbstractValue &addr, asUINT dwords);
 	asBYTE            FieldLoads(asBYTE baseOrigin, int typeId, int offset);
+	// The scope of the storage a global's address operand names
+	asBYTE            GlobalOrigin(void *address);
+	// The origin of the pointer stored in that global
+	asBYTE            GlobalLoads(void *address);
 	// The pointer occupying AS_PTR_SIZE cells k dwords from the top
 	bool              PtrAt(State &s, asUINT dwordsFromTop, asSAbstractValue &v);
 	// The address `offset` bytes into what `base` points to

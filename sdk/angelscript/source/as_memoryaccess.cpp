@@ -335,6 +335,38 @@ asBYTE asCMemoryAccessScanner::FieldLoads(asBYTE baseOrigin, int typeId, int off
 	return asMA_PROGRAM;
 }
 
+// Every address operand of a global opcode is a global property's storage, which
+// the engine maps back to the property, except the string constants PGA also
+// takes (asCCompiler::CompileExpressionValue): those the string factory owns
+// and the script can only read, so they reach nothing mutable.
+asBYTE asCMemoryAccessScanner::GlobalOrigin(void *address)
+{
+	asSMapNode<void*, asCGlobalProperty*> *cursor = 0;
+	if( !engine->varAddressMap.MoveTo(&cursor, address) )
+	{
+		return asMA_NONE;
+	}
+	asCGlobalProperty *prop = engine->varAddressMap.GetValue(cursor);
+	// Only a registered property has an application address
+	return prop->realAddress ? asMA_ENGINE : asMA_MODULE;
+}
+
+asBYTE asCMemoryAccessScanner::GlobalLoads(void *address)
+{
+	asSMapNode<void*, asCGlobalProperty*> *cursor = 0;
+	if( !engine->varAddressMap.MoveTo(&cursor, address) )
+	{
+		return asMA_PROGRAM;
+	}
+	asCGlobalProperty *prop = engine->varAddressMap.GetValue(cursor);
+	if( prop->type.IsObjectHandle() || !prop->type.IsObject() )
+	{
+		return asMA_PROGRAM;
+	}
+	// The object a non-handle object global holds belongs to that global
+	return GlobalOrigin(address);
+}
+
 bool asCMemoryAccessScanner::PtrAt(State &s, asUINT k, asSAbstractValue &v)
 {
 	asSAbstractValue *c = Cell(s, k);
@@ -963,6 +995,60 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 	}
 	case asBC_PshRPtr:
 		Push(s, s.valueReg, AS_PTR_SIZE);
+		break;
+
+	// Global variables. The address operand is at instr+1 in every one of them
+	case asBC_PGA:
+	{
+		void *at = (void*)asBC_PTRARG(instr);
+		Push(s, Value(GlobalOrigin(at), GlobalLoads(at), asRH_NONE), AS_PTR_SIZE);
+		break;
+	}
+	case asBC_PshGPtr:
+	{
+		void *at = (void*)asBC_PTRARG(instr);
+		RecordRead(GlobalOrigin(at));
+		Push(s, Value(GlobalLoads(at), asMA_PROGRAM, asRH_NONE), AS_PTR_SIZE);
+		break;
+	}
+	case asBC_LDG:
+	{
+		void *at = (void*)asBC_PTRARG(instr);
+		s.valueReg = Value(GlobalOrigin(at), GlobalLoads(at), asRH_NONE);
+		break;
+	}
+	case asBC_LdGRdR4:
+	{
+		void *at = (void*)asBC_PTRARG(instr);
+		RecordRead(GlobalOrigin(at));
+		if( !SetVarCells(s, asBC_SWORDARG0(instr), Unknown(), 1) )
+		{
+			return false;
+		}
+		// The VM leaves the global's address in the register
+		s.valueReg = Value(GlobalOrigin(at), GlobalLoads(at), asRH_NONE);
+		break;
+	}
+	case asBC_PshG4:
+		RecordRead(GlobalOrigin((void*)asBC_PTRARG(instr)));
+		Push(s, Unknown(), 1);
+		break;
+	case asBC_CpyGtoV4:
+		RecordRead(GlobalOrigin((void*)asBC_PTRARG(instr)));
+		if( !SetVarCells(s, asBC_SWORDARG0(instr), Unknown(), 1) )
+		{
+			return false;
+		}
+		break;
+	case asBC_CpyVtoG4:
+		if( Var(s, asBC_SWORDARG0(instr)) == 0 )
+		{
+			return false;
+		}
+		RecordWrite(GlobalOrigin((void*)asBC_PTRARG(instr)));
+		break;
+	case asBC_SetG4:
+		RecordWrite(GlobalOrigin((void*)asBC_PTRARG(instr)));
 		break;
 
 	// Reads and writes through the value register

@@ -304,9 +304,8 @@ static bool TestDispatch()
 	COutStream out;
 	asIScriptEngine *engine = CreateEngine(out);
 
-	// D's override writes a global, which no task so far models, so the join reaches
-	// Program (Task 5 moves it to {None, Module}); E has a single frame-local body,
-	// which shows the narrowing path is live
+	// D's override writes a module global, so the join reaches {None, Module}; E has
+	// a single frame-local body, which shows the narrowing path is live
 	asIScriptModule *mod = BuildModule(engine, "overrides",
 		"int gx; \n"
 		"class B { int f(int a) { return a + 1; } } \n"
@@ -319,7 +318,7 @@ static bool TestDispatch()
 	else
 	{
 		EXPECT_ACCESS(MethodOf(mod, "E", "int g(int)"), asMA_NONE, asMA_NONE);
-		EXPECT_ACCESS(MethodOf(mod, "B", "int f(int)"), asMA_PROGRAM, asMA_PROGRAM);
+		EXPECT_ACCESS(MethodOf(mod, "B", "int f(int)"), asMA_NONE, asMA_MODULE);
 	}
 
 	// A module built later can add implementations of a shared type
@@ -334,7 +333,7 @@ static bool TestDispatch()
 		EXPECT_ACCESS(MethodOf(mod, "S", "int h(int)"), asMA_PROGRAM, asMA_PROGRAM);
 	}
 
-	// Q writes a global, which no task so far models (Task 5 moves I::k to {None, Module})
+	// Q writes a module global, so the interface entry joins to {None, Module}
 	mod = BuildModule(engine, "interface",
 		"int gy; \n"
 		"interface I { int k(int a); } \n"
@@ -346,7 +345,7 @@ static bool TestDispatch()
 	}
 	else
 	{
-		EXPECT_ACCESS(MethodOf(mod, "I", "int k(int)"), asMA_PROGRAM, asMA_PROGRAM);
+		EXPECT_ACCESS(MethodOf(mod, "I", "int k(int)"), asMA_NONE, asMA_MODULE);
 		EXPECT_ACCESS(MethodOf(mod, "P", "int k(int)"), asMA_NONE, asMA_NONE);
 	}
 
@@ -465,12 +464,69 @@ static bool TestCompileGlobalVar()
 		}
 		else
 		{
-			// The body is SUSPEND; SetG4 g2, 5; RET. Writing g2 makes the final
-			// scope {None, Module}; until the global opcodes are modelled SetG4
-			// fails closed. Either way it is computed, never Unset.
-			EXPECT_ACCESS(initFunc, asMA_PROGRAM, asMA_PROGRAM);
+			// The body is SUSPEND; SetG4 g2, 5; RET: it writes the module global g2 and reads nothing
+			EXPECT_ACCESS(initFunc, asMA_NONE, asMA_MODULE);
 			initFunc->Release();
 		}
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+static int g_engineInt = 0;
+
+// A script global is Module, a registered property is Engine, and the object a
+// non-handle global holds belongs to that global
+static bool TestGlobals()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	if( engine->RegisterGlobalProperty("int eg", &g_engineInt) < 0 )
+	{
+		TEST_FAILED;
+	}
+	if( engine->RegisterObjectType("vec", sizeof(int), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_PRIMITIVE) < 0 ||
+		engine->RegisterObjectProperty("vec", "int x", 0) < 0 )
+	{
+		TEST_FAILED;
+	}
+	asIScriptModule *mod = BuildModule(engine, "globals",
+		"class In { int v; } \n"
+		"int g; \n"
+		"In gi; \n"
+		"In@ gh; \n"
+		"void writeG() { g = 1; } \n"
+		"int readG() { return g; } \n"
+		"void incG() { g++; } \n"
+		"void writeGi() { gi.v = 1; } \n"
+		"void writeGh() { gh.v = 1; } \n"
+		"void writeEg() { eg = 1; } \n"
+		"int readEg() { return eg; } \n"
+		"void copyGtoG() { g = g + eg; } \n"
+		"int postInc() { return g++; } \n"
+		"vec gv; \n"
+		"int readGv() { return gv.x; } \n"
+		"void writeGv() { gv.x = 1; } \n");
+	if( mod == 0 )
+	{
+		TEST_FAILED;
+	}
+	else
+	{
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeG()"), asMA_NONE, asMA_MODULE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int readG()"), asMA_MODULE, asMA_NONE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void incG()"), asMA_MODULE, asMA_MODULE);
+		// The global's object is owned by the global: still Module
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeGi()"), asMA_MODULE, asMA_MODULE);
+		// Through the global's handle: anything
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeGh()"), asMA_MODULE, asMA_PROGRAM);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeEg()"), asMA_NONE, asMA_ENGINE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int readEg()"), asMA_ENGINE, asMA_NONE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void copyGtoG()"), asMA_ENGINE, asMA_MODULE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int postInc()"), asMA_MODULE, asMA_MODULE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("int readGv()"), asMA_MODULE, asMA_NONE);
+		EXPECT_ACCESS(mod->GetFunctionByDecl("void writeGv()"), asMA_MODULE, asMA_MODULE);
 	}
 	engine->ShutDownAndRelease();
 	return fail;
@@ -504,6 +560,10 @@ bool Test()
 		fail = true;
 	}
 	if( TestCompileGlobalVar() )
+	{
+		fail = true;
+	}
+	if( TestGlobals() )
 	{
 		fail = true;
 	}
