@@ -585,6 +585,7 @@
     <ClCompile Include="..\..\source\test_cdecl_objlast.cpp" />
     <ClCompile Include="..\..\source\test_cdecl_return.cpp" />
     <ClCompile Include="..\..\source\test_circularimport.cpp" />
+    <ClCompile Include="..\..\source\test_compilemethod.cpp" />
     <ClCompile Include="..\..\source\test_compiler.cpp" />
     <ClCompile Include="..\..\source\test_composition.cpp" />
     <ClCompile Include="..\..\source\test_condition.cpp" />

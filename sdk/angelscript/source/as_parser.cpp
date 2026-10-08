@@ -2502,6 +2502,47 @@ int asCParser::ParseScript(asCScriptCode *in_script)
 	return 0;
 }
 
+// One method as it would appear in a class body, so that
+// trailing const and the class decorators parse. The result has the same
+// shape as ParseScript's, a script node holding the function node.
+int asCParser::ParseMethod(asCScriptCode *in_script)
+{
+	Reset();
+
+	this->script = in_script;
+
+	scriptNode = CreateNode(snScript);
+	if( scriptNode == 0 )
+		return -1;
+
+	if( IsFuncDecl(true) )
+		scriptNode->AddChildLast(ParseFunction(true));
+	else
+	{
+		sToken t;
+		GetToken(&t);
+		Error(TXT_EXPECTED_METHOD, &t);
+		return -1;
+	}
+
+	if( !isSyntaxError )
+	{
+		sToken t;
+		GetToken(&t);
+		if( t.type != ttEnd )
+		{
+			Error(ExpectedToken(asCTokenizer::GetDefinition(ttEnd)), &t);
+			Error(InsteadFound(t), &t);
+			return -1;
+		}
+	}
+
+	if( errorWhileParsing )
+		return -1;
+
+	return 0;
+}
+
 int asCParser::ParseExpression(asCScriptCode *in_script)
 {
 	Reset();

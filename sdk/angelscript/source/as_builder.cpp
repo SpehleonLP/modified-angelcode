@@ -512,7 +512,22 @@ int asCBuilder::CheckForConflictsDueToDefaultArgs(asCScriptCode *script, asCScri
 
 int asCBuilder::CompileFunction(const char *sectionName, const char *code, int lineOffset, asDWORD compileFlags, asCScriptFunction **outFunc)
 {
+	return CompileSingleFunction(sectionName, code, lineOffset, compileFlags, 0, outFunc);
+}
+
+// The method is compiled against objType, so it sees this and the
+// members, but it is not put in the type's methods or virtual table. That makes
+// it final, and leaves the type's layout and dispatch untouched.
+int asCBuilder::CompileMethod(asCObjectType *objType, const char *sectionName, const char *code, int lineOffset, asCScriptFunction **outFunc)
+{
+	asASSERT(objType != 0);
+	return CompileSingleFunction(sectionName, code, lineOffset, 0, objType, outFunc);
+}
+
+int asCBuilder::CompileSingleFunction(const char *sectionName, const char *code, int lineOffset, asDWORD compileFlags, asCObjectType *objType, asCScriptFunction **outFunc)
+{
 	asASSERT(outFunc != 0);
+	asASSERT(objType == 0 || !(compileFlags & asCOMP_ADD_TO_MODULE));
 
 	Reset();
 
@@ -528,7 +543,7 @@ int asCBuilder::CompileFunction(const char *sectionName, const char *code, int l
 
 	// Parse the string
 	asCParser parser(this);
-	if( parser.ParseScript(scripts[0]) < 0 )
+	if( (objType ? parser.ParseMethod(scripts[0]) : parser.ParseScript(scripts[0])) < 0 )
 		return asERROR;
 
 	asCScriptNode *node = parser.GetScriptNode();
@@ -552,13 +567,29 @@ int asCBuilder::CompileFunction(const char *sectionName, const char *code, int l
 	if( func == 0 )
 		return asOUT_OF_MEMORY;
 
-	GetParsedFunctionDetails(node, scripts[0], 0, func->name, func->returnType, func->parameterNames, func->parameterTypes, func->inOutFlags, func->defaultArgs, funcTraits, module->m_defaultNamespace);
+	asSNameSpace *ns = objType ? objType->nameSpace : module->m_defaultNamespace;
+	GetParsedFunctionDetails(node, scripts[0], objType, func->name, func->returnType, func->parameterNames, func->parameterTypes, func->inOutFlags, func->defaultArgs, funcTraits, ns);
 	func->id                           = engine->GetNextScriptFunctionId();
 	func->scriptData->scriptSectionIdx = engine->GetScriptSectionNameIndex(sectionName ? sectionName : "");
 	int row, col;
 	scripts[0]->ConvertPosToRowCol(node->tokenPos, &row, &col);
 	func->scriptData->declaredAt       = (row & 0xFFFFF)|((col & 0xFFF)<<20);
-	func->nameSpace                    = module->m_defaultNamespace;
+	func->nameSpace                    = ns;
+
+	if( objType )
+	{
+		// Constructors read the class declaration's member initializers, which
+		// a method compiled after the build does not have
+		if( funcTraits.GetTrait(asTRAIT_CONSTRUCTOR) || funcTraits.GetTrait(asTRAIT_DESTRUCTOR) )
+		{
+			func->ReleaseInternal();
+			return asNOT_SUPPORTED;
+		}
+		func->objectType = objType;
+		objType->AddRefInternal();
+		func->traits = funcTraits;
+		func->SetFinal(true);
+	}
 
 	// Make sure the default args are declared correctly
 	int r = ValidateDefaultArgs(script, node, func);

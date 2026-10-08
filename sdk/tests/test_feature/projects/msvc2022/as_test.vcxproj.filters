@@ -155,6 +155,9 @@
     <ClCompile Include="..\..\source\test_circularimport.cpp">
       <Filter>tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\source\test_compilemethod.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\source\test_compiler.cpp">
       <Filter>tests</Filter>
     </ClCompile>

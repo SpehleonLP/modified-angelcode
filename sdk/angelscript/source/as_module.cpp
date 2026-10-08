@@ -1737,6 +1737,67 @@ int asCModule::CompileGlobalVar(const char *sectionName, const char *code, int l
 }
 
 // interface
+// See asCBuilder::CompileMethod
+int asCModule::CompileMethod(asITypeInfo *objectType, const char *sectionName, const char *code, int lineOffset, asIScriptFunction **outFunc)
+{
+	if (outFunc)
+		*outFunc = 0;
+
+#ifdef AS_NO_COMPILER
+	UNUSED_VAR(objectType);
+	UNUSED_VAR(sectionName);
+	UNUSED_VAR(code);
+	UNUSED_VAR(lineOffset);
+	return asNOT_SUPPORTED;
+#else
+	if (code == 0)
+		return asINVALID_ARG;
+
+	// Only a script class this module declares; m_classTypes includes shared
+	// classes the module declared too
+	asCObjectType *ot = CastToObjectType(static_cast<asCTypeInfo*>(objectType));
+	if (ot == 0 ||
+		!(ot->flags & asOBJ_SCRIPT_OBJECT) ||
+		ot->IsInterface() ||
+		m_classTypes.IndexOf(ot) < 0)
+		return asINVALID_TYPE;
+
+	int r = m_engine->RequestBuild();
+	if (r < 0)
+		return r;
+
+	m_engine->PrepareEngine();
+	if (m_engine->configFailed)
+	{
+		m_engine->WriteMessage("", 0, 0, asMSGTYPE_ERROR, TXT_INVALID_CONFIGURATION);
+		m_engine->BuildCompleted();
+		return asINVALID_CONFIGURATION;
+	}
+
+	asCBuilder methodBuilder(m_engine, this);
+	asCString str = code;
+	asCScriptFunction* func = 0;
+	r = methodBuilder.CompileMethod(ot, sectionName, str.AddressOf(), lineOffset, &func);
+
+	if (r >= 0 && m_engine->jitCompiler)
+		func->JITCompile();
+
+	m_engine->BuildCompleted();
+
+	if (r >= 0 && outFunc && func)
+	{
+		*outFunc = func;
+		func->AddRef();
+	}
+
+	if (func)
+		func->ReleaseInternal();
+
+	return r;
+#endif
+}
+
+// interface
 int asCModule::CompileFunction(const char* sectionName, const char* code, int lineOffset, asDWORD compileFlags, asIScriptFunction** outFunc)
 {
 	// Make sure the outFunc is null if the function fails, so the

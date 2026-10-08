@@ -77,6 +77,7 @@ namespace TestSaveLoad          { bool Test(); }
 namespace TestConstructor2      { bool Test(); }
 namespace TestContext           { bool Test(); }
 namespace TestAppContext        { bool Test(); }
+namespace TestCompileMethod     { bool Test(); }
 namespace TestArray             { bool Test(); }
 namespace TestArrayHandle       { bool Test(); }
 namespace TestStdVector         { bool Test(); }
@@ -255,6 +256,7 @@ int allTests()
 	if( TestForEach::Test()                     ) goto failed; else PRINTF("-- TestForEach passed\n");
 	if( TestContext::Test()                     ) goto failed; else PRINTF("-- TestContext passed\n");
 	if( TestAppContext::Test()                  ) goto failed; else PRINTF("-- TestAppContext passed\n");
+	if( TestCompileMethod::Test()               ) goto failed; else PRINTF("-- TestCompileMethod passed\n");
 	if( TestComposition::Test()                 ) goto failed; else PRINTF("-- TestComposition passed\n");
 	if( TestPropIntegerDivision::Test()         ) goto failed; else PRINTF("-- TestPropIntegerDivision passed\n");
 	if( TestThisCallMethod_ConfigErrors::Test() ) goto failed; else PRINTF("-- TestThisCallMethod_ConfigErrors passed\n");

@@ -40,6 +40,7 @@ add_executable(
         ../../source/test_cdecl_objlast.cpp
         ../../source/test_cdecl_return.cpp
         ../../source/test_circularimport.cpp
+        ../../source/test_compilemethod.cpp
         ../../source/test_compiler.cpp
         ../../source/test_composition.cpp
         ../../source/test_condition.cpp
