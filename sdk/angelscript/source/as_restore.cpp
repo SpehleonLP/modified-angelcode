@@ -1448,11 +1448,11 @@ asCScriptFunction *asCReader::ReadFunction(bool &isNew, bool addToModule, bool a
 						ReadString(&func->parameterNames[n]);
 				}
 
-				// Memory access; the reserved bits are dropped. Stored regardless of debug info,
+				// Memory access; out-of-range scopes become Unset. Stored regardless of debug info,
 				// so that an engine without the compiler still knows the scopes
 				asBYTE access = 0;
 				ReadData(&access, 1);
-				func->memoryAccess = asPackMemoryAccess(asMemoryAccessRead(access), asMemoryAccessWrite(access));
+				func->memoryAccess = asSanitizeMemoryAccess(access);
 			}
 		}
 	}
@@ -1463,7 +1463,7 @@ asCScriptFunction *asCReader::ReadFunction(bool &isNew, bool addToModule, bool a
 		// Memory access: the join over the dispatch targets, which only a compiler build can recompute
 		asBYTE access = 0;
 		ReadData(&access, 1);
-		func->memoryAccess = asPackMemoryAccess(asMemoryAccessRead(access), asMemoryAccessWrite(access));
+		func->memoryAccess = asSanitizeMemoryAccess(access);
 	}
 	else if( func->funcType == asFUNC_FUNCDEF )
 	{
