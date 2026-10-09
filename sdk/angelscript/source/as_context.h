@@ -198,7 +198,10 @@ public:
 	bool            m_externalSuspendRequest;
 
 	// Set by the compiler on the context it folds a pure call with, since a fold must not change engine state
+private:
 	bool            m_noAutoGarbageCollect;
+public:
+	void SuppressAutoGarbageCollect() { m_noAutoGarbageCollect = true; }
 
 	asCScriptFunction *m_currentFunction;
 	asCScriptFunction *m_callingSystemFunction;
