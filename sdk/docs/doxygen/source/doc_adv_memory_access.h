@@ -202,6 +202,12 @@ The analysis depends on the application functions behaving as declared.
 The host must not run any of these, when they touch state visible to scripts, at the same time as calls that it has 
 scheduled in parallel.
 
+Automatic garbage collection is the one that is easy to miss. While \ref asEP_AUTO_GARBAGE_COLLECT is on, which is the 
+default, creating any garbage collected object, whether it is a script object or an application type, can run a step of 
+the garbage collector inside that call. The step can destroy garbage and run script destructors, whatever the scopes 
+of the function that created the object say. A host that runs calls in parallel on the strength of the scopes must set 
+\ref asEP_AUTO_GARBAGE_COLLECT to false, and run the garbage collector itself at a time when no scheduled calls are running.
+
 \section doc_adv_memory_access_save Saved bytecode
 
 The scopes of the script functions are stored in the bytecode saved by \ref asIScriptModule::SaveByteCode, one byte for 

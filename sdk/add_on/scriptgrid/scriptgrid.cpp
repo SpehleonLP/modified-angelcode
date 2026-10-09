@@ -226,7 +226,7 @@ static void RegisterScriptGrid_Native(asIScriptEngine *engine)
 	r = engine->RegisterObjectType("grid<class T>", 0, asOBJ_REF | asOBJ_GC | asOBJ_TEMPLATE); assert( r >= 0 );
 
 	// Register a callback for validating the subtype before it is used
-	r = engine->RegisterObjectBehaviour("grid<T>", asBEHAVE_TEMPLATE_CALLBACK, "bool f(int&in, bool&out)", asFUNCTION(ScriptGridTemplateCallback), asCALL_CDECL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("grid<T>", asBEHAVE_TEMPLATE_CALLBACK, "bool f(int&in, bool&out)", asFUNCTION(ScriptGridTemplateCallback), asCALL_CDECL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_ENGINE, asMA_PROGRAM); assert( r >= 0 );
 
 	// Templates receive the object type as the first parameter. To the script writer this is hidden
 	r = engine->RegisterObjectBehaviour("grid<T>", asBEHAVE_FACTORY, "grid<T>@ f(int&in)", asFUNCTIONPR(CScriptGrid::Create, (asITypeInfo*), CScriptGrid*), asCALL_CDECL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE); assert( r >= 0 );
@@ -241,8 +241,8 @@ static void RegisterScriptGrid_Native(asIScriptEngine *engine)
 	r = engine->RegisterObjectBehaviour("grid<T>", asBEHAVE_RELEASE, "void f()", asMETHOD(CScriptGrid,Release), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE); assert( r >= 0 );
 
 	// The index operator returns the template subtype
-	r = engine->RegisterObjectMethod("grid<T>", "T &opIndex(uint, uint)", asMETHODPR(CScriptGrid, At, (asUINT, asUINT), void*), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("grid<T>", "const T &opIndex(uint, uint) const", asMETHODPR(CScriptGrid, At, (asUINT, asUINT) const, const void*), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("grid<T>", "T &opIndex(uint, uint)", asMETHODPR(CScriptGrid, At, (asUINT, asUINT), void*), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_OWNED, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("grid<T>", "const T &opIndex(uint, uint) const", asMETHODPR(CScriptGrid, At, (asUINT, asUINT) const, const void*), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_OWNED, asMA_NONE); assert( r >= 0 );
 
 	// Other methods
 	r = engine->RegisterObjectMethod("grid<T>", "void resize(uint width, uint height)", asMETHODPR(CScriptGrid, Resize, (asUINT, asUINT), void), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );

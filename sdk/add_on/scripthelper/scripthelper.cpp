@@ -713,7 +713,7 @@ int ConfigEngineFromStream(asIScriptEngine *engine, istream &strm, const char *c
 			}
 			else
 			{
-				r = engine->RegisterObjectBehaviour(name.c_str(), behave, decl.c_str(), asFUNCTION(0), asCALL_GENERIC); if( r >= 0 ) r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+				r = engine->RegisterObjectBehaviour(name.c_str(), behave, decl.c_str(), asFUNCTION(0), asCALL_GENERIC); if( r >= 0 ) { r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); if( r == asNOT_SUPPORTED ) r = 0; /* template functions have no scopes to set */ }
 				if( r < 0 )
 				{
 					engine->WriteMessage(configFile, in::GetLineNumber(config, pos), 0, asMSGTYPE_ERROR, "Failed to register behaviour");
@@ -730,7 +730,7 @@ int ConfigEngineFromStream(asIScriptEngine *engine, istream &strm, const char *c
 			decl = decl.substr(1, decl.length() - 2);
 			in::ReplaceSlashQuote(decl);
 
-			r = engine->RegisterObjectMethod(name.c_str(), decl.c_str(), asFUNCTION(0), asCALL_GENERIC); if( r >= 0 ) r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+			r = engine->RegisterObjectMethod(name.c_str(), decl.c_str(), asFUNCTION(0), asCALL_GENERIC); if( r >= 0 ) { r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); if( r == asNOT_SUPPORTED ) r = 0; /* template functions have no scopes to set */ }
 			if( r < 0 )
 			{
 				engine->WriteMessage(configFile, in::GetLineNumber(config, pos), 0, asMSGTYPE_ERROR, "Failed to register object method");
@@ -802,7 +802,7 @@ int ConfigEngineFromStream(asIScriptEngine *engine, istream &strm, const char *c
 			decl = decl.substr(1, decl.length() - 2);
 			in::ReplaceSlashQuote(decl);
 
-			r = engine->RegisterGlobalFunction(decl.c_str(), asFUNCTION(0), asCALL_GENERIC); if( r >= 0 ) r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+			r = engine->RegisterGlobalFunction(decl.c_str(), asFUNCTION(0), asCALL_GENERIC); if( r >= 0 ) { r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); if( r == asNOT_SUPPORTED ) r = 0; /* template functions have no scopes to set */ }
 			if( r < 0 )
 			{
 				engine->WriteMessage(configFile, in::GetLineNumber(config, pos), 0, asMSGTYPE_ERROR, "Failed to register global function");

@@ -11,6 +11,8 @@
 #include "../../../add_on/scriptfile/scriptfilesystem.h"
 #include "../../../add_on/contextmgr/contextmgr.h"
 #include "../../../add_on/scriptsocket/scriptsocket.h"
+#include "../../../add_on/scripthelper/scripthelper.h"
+#include <sstream>
 
 namespace TestMemoryAccess
 {
@@ -1471,6 +1473,112 @@ static bool TestAddOnScopes()
 	return fail;
 }
 
+// A dictionary's foreach iterator points into that dictionary's map, so another dictionary has to refuse it
+static bool RunForeignIterator(asIScriptEngine *engine, asIScriptModule *mod, const char *call, bool expectException)
+{
+	asIScriptFunction *func = mod->GetFunctionByName(call);
+	asIScriptContext *ctx = engine->CreateContext();
+	ctx->Prepare(func);
+	int r = ctx->Execute();
+	bool fail = false;
+	if( expectException )
+	{
+		if( r != asEXECUTION_EXCEPTION || std::string(ctx->GetExceptionString()) != "Iterator belongs to a different dictionary" )
+		{
+			PRINTF("foreign iterator: '%s' did not raise the exception (status %d)\n", call, r);
+			fail = true;
+		}
+	}
+	else if( r != asEXECUTION_FINISHED || (func->GetReturnTypeId() == asTYPEID_BOOL && ctx->GetReturnByte() != 1) )
+	{
+		PRINTF("foreign iterator: '%s' failed (status %d)\n", call, r);
+		fail = true;
+	}
+	ctx->Release();
+	return fail;
+}
+
+static bool TestDictionaryForeignIterator()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+	RegisterStdString(engine);
+	RegisterScriptArray(engine, true);
+	RegisterScriptDictionary(engine);
+
+	asIScriptModule *mod = BuildModule(engine, "foreign",
+		"dictionary d1, d2; \n"
+		"dictionaryIter @it; \n"
+		"void setup() { d1.set('a', 1); d2.set('x', 9); @it = d1.opForBegin(); } \n"
+		"void next() { d2.opForNext(it); } \n"
+		"void value0() { d2.opForValue0(it); } \n"
+		"void value1() { d2.opForValue1(it); } \n"
+		// The refused calls must leave the iterator on d1's first entry, and d2 untouched
+		"bool intact() { return d1.opForValue1(it) == 'a' && !d1.opForEnd(it) && d2.getSize() == 1 && string(d2.getKeys()[0]) == 'x' && !d2.opForEnd(d2.opForBegin()) \n"
+		"  && d1.opForEnd(d1.opForNext(it)); } \n");
+	if( mod == 0 )
+	{
+		fail = true;
+	}
+	else
+	{
+		fail = RunForeignIterator(engine, mod, "setup", false) || fail;
+		fail = RunForeignIterator(engine, mod, "next", true) || fail;
+		fail = RunForeignIterator(engine, mod, "value0", true) || fail;
+		fail = RunForeignIterator(engine, mod, "value1", true) || fail;
+		fail = RunForeignIterator(engine, mod, "intact", false) || fail;
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+// ConfigEngineFromStream declares every function Program, which a template function cannot take. The config must still load
+static bool TestConfigWithTemplateFunctions()
+{
+	bool fail = false;
+	COutStream out;
+	std::stringstream s;
+	{
+		asIScriptEngine *engine = CreateEngine(out);
+		int r = engine->RegisterObjectType("obj", 0, asOBJ_REF | asOBJ_NOCOUNT);
+		fail = fail || r < 0;
+		r = engine->RegisterObjectBehaviour("obj", asBEHAVE_FACTORY, "obj @f()", asFUNCTION(0), asCALL_GENERIC);
+		fail = fail || r < 0;
+		r = engine->RegisterObjectMethod("obj", "T tm<T>(const T &in)", asFUNCTION(TmplNoopGeneric), asCALL_GENERIC);
+		fail = fail || r < 0;
+		r = engine->RegisterGlobalFunction("T tf<T>(const T &in)", asFUNCTION(TmplNoopGeneric), asCALL_GENERIC);
+		fail = fail || r < 0;
+		r = engine->RegisterGlobalFunction("int plain(int)", asFUNCTION(0), asCALL_GENERIC);
+		fail = fail || r < 0;
+		if( fail || WriteConfigToStream(engine, s) < 0 )
+		{
+			PRINTF("config with template functions: could not set up the source engine\n");
+			fail = true;
+		}
+		engine->ShutDownAndRelease();
+	}
+	{
+		asIScriptEngine *engine = CreateEngine(out);
+		if( ConfigEngineFromStream(engine, s) < 0 )
+		{
+			PRINTF("config with template functions: ConfigEngineFromStream failed\n");
+			fail = true;
+		}
+		else
+		{
+			// The non-template function still got its scopes
+			asIScriptFunction *plain = engine->GetGlobalFunctionByDecl("int plain(int)");
+			if( plain == 0 || CheckAccess(plain, asMA_PROGRAM, asMA_PROGRAM, __LINE__) )
+			{
+				fail = true;
+			}
+		}
+		engine->ShutDownAndRelease();
+	}
+	return fail;
+}
+
 bool Test()
 {
 	bool fail = false;
@@ -1543,6 +1651,14 @@ bool Test()
 		fail = true;
 	}
 	if( TestAddOnScopes() )
+	{
+		fail = true;
+	}
+	if( TestDictionaryForeignIterator() )
+	{
+		fail = true;
+	}
+	if( TestConfigWithTemplateFunctions() )
 	{
 		fail = true;
 	}

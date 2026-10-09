@@ -1063,7 +1063,7 @@ static void CScriptDictValue_FreeValue_Generic(asIScriptGeneric *gen)
 
 //----------------------------------------------------------------------------
 // Foreach support
-CScriptDictionary::CScriptDictIter::CScriptDictIter(const CScriptDictionary* dict) : iter(dict->begin()), refCount(1), iterGuard(dict->iterGuard) {}
+CScriptDictionary::CScriptDictIter::CScriptDictIter(const CScriptDictionary* dict) : iter(dict->begin()), refCount(1), iterGuard(dict->iterGuard), owner(dict) {}
 CScriptDictionary::CScriptDictIter::~CScriptDictIter() {}
 
 void CScriptDictionary::CScriptDictIter::AddRef() const
@@ -1101,6 +1101,15 @@ bool CScriptDictionary::opForEnd(const CScriptDictionary::CScriptDictIter& iter)
 
 CScriptDictionary::CScriptDictIter* CScriptDictionary::opForNext(CScriptDictionary::CScriptDictIter& iter) const
 {
+	// An iterator made by another dictionary points into that dictionary's map, so it must not be touched
+	if (iter.owner != this)
+	{
+		asIScriptContext *ctx = asGetActiveContext();
+		if( ctx )
+			ctx->SetException("Iterator belongs to a different dictionary");
+		return &iter;
+	}
+
 	if (iter.iterGuard != iterGuard)
 		iter.iter = end();
 	else
@@ -1110,11 +1119,32 @@ CScriptDictionary::CScriptDictIter* CScriptDictionary::opForNext(CScriptDictiona
 
 const CScriptDictValue& CScriptDictionary::opForValue0(const CScriptDictionary::CScriptDictIter& iter) const
 {
+	if (iter.owner != this)
+	{
+		asIScriptContext *ctx = asGetActiveContext();
+		if( ctx )
+			ctx->SetException("Iterator belongs to a different dictionary");
+
+		// The exception abandons the script call, so this constant is never seen by the script
+		static const CScriptDictValue foreignIter;
+		return foreignIter;
+	}
+
 	return iter.iter.m_it->second;
 }
 
 const dictKey_t& CScriptDictionary::opForValue1(const CScriptDictionary::CScriptDictIter& iter) const
 {
+	if (iter.owner != this)
+	{
+		asIScriptContext *ctx = asGetActiveContext();
+		if( ctx )
+			ctx->SetException("Iterator belongs to a different dictionary");
+
+		static const dictKey_t foreignIter;
+		return foreignIter;
+	}
+
 	return iter.iter.m_it->first;
 }
 
@@ -1310,7 +1340,7 @@ void RegisterScriptDictionary_Native(asIScriptEngine *engine)
 	r = engine->RegisterObjectMethod("dictionary", "bool delete(const string &in)", asMETHOD(CScriptDictionary,Delete), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert( r >= 0 );
 	r = engine->RegisterObjectMethod("dictionary", "void deleteAll()", asMETHOD(CScriptDictionary,DeleteAll), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert( r >= 0 );
 
-	r = engine->RegisterObjectMethod("dictionary", "array<string> @getKeys() const", asMETHOD(CScriptDictionary,GetKeys), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_WORLD_STABLE, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("dictionary", "array<string> @getKeys() const", asMETHOD(CScriptDictionary,GetKeys), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
 
 	r = engine->RegisterObjectMethod("dictionary", "dictionaryValue &opIndex(const string &in)", asMETHODPR(CScriptDictionary, operator[], (const dictKey_t &), CScriptDictValue*), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_THIS); assert( r >= 0 );
 	r = engine->RegisterObjectMethod("dictionary", "const dictionaryValue &opIndex(const string &in) const", asMETHODPR(CScriptDictionary, operator[], (const dictKey_t &) const, const CScriptDictValue*), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
@@ -1401,7 +1431,7 @@ void RegisterScriptDictionary_Generic(asIScriptEngine *engine)
 	r = engine->RegisterObjectMethod("dictionary", "bool delete(const string &in)", asFUNCTION(ScriptDictionaryDelete_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert( r >= 0 );
 	r = engine->RegisterObjectMethod("dictionary", "void deleteAll()", asFUNCTION(ScriptDictionaryDeleteAll_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert( r >= 0 );
 
-	r = engine->RegisterObjectMethod("dictionary", "array<string> @getKeys() const", asFUNCTION(CScriptDictionaryGetKeys_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_WORLD_STABLE, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("dictionary", "array<string> @getKeys() const", asFUNCTION(CScriptDictionaryGetKeys_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
 
 	r = engine->RegisterObjectMethod("dictionary", "dictionaryValue &opIndex(const string &in)", asFUNCTION(CScriptDictionary_opIndex_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_THIS); assert( r >= 0 );
 	r = engine->RegisterObjectMethod("dictionary", "const dictionaryValue &opIndex(const string &in) const", asFUNCTION(CScriptDictionary_opIndex_const_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
