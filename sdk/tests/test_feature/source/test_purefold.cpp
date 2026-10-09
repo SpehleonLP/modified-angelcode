@@ -96,6 +96,11 @@ static void GSumV(asIScriptGeneric *gen)
 	}
 	gen->SetReturnDWord(s);
 }
+static asINT8 NNeg8(asINT8 x) { ++g_calls; return asINT8(-x); }
+static bool NIsNeg(int x) { ++g_calls; return x < 0; }
+static asINT16 NTwice16(asINT16 x) { ++g_calls; return asINT16(x * 2); }
+static float NHalf(float x) { ++g_calls; return x * 0.5f; }
+static int NBump(int &x) { ++g_calls; x += 10; return x; }
 struct Obj { int Pure() const { return 5; } };
 static Obj g_obj;
 static Obj *GetObj() { return &g_obj; }
@@ -133,7 +138,7 @@ static int IdOf(asIScriptEngine *engine, const char *decl)
 	return engine->GetGlobalFunctionByDecl(decl)->GetId();
 }
 
-// Runs a no-argument function returning int, bool or double, reading the result by its
+// Runs a no-argument function returning a primitive, reading the result by its
 // return type because each GetReturn* reads only its own width; returns the context result
 static int Run(asIScriptEngine *engine, asIScriptFunction *func, double &result)
 {
@@ -145,9 +150,21 @@ static int Run(asIScriptEngine *engine, asIScriptFunction *func, double &result)
 	{
 		result = ctx->GetReturnDouble();
 	}
+	else if( typeId == asTYPEID_FLOAT )
+	{
+		result = ctx->GetReturnFloat();
+	}
 	else if( typeId == asTYPEID_BOOL )
 	{
 		result = ctx->GetReturnByte();
+	}
+	else if( typeId == asTYPEID_INT8 )
+	{
+		result = asINT8(ctx->GetReturnByte());
+	}
+	else if( typeId == asTYPEID_INT16 )
+	{
+		result = asINT16(ctx->GetReturnWord());
 	}
 	else
 	{
@@ -258,7 +275,15 @@ static bool TestNotFolded()
 	COutStream out;
 	int sqrtId = 0;
 	asIScriptEngine *engine = MakeEngine(out, sqrtId);
+	// Each half of the purity check on its own: a write, or a read, beyond None never folds.
+	// A global function cannot be This or Owned, so Engine and Program are the writes to try.
+	Declare(engine, engine->RegisterGlobalFunction("int writesProgram(int)", asFUNCTION(NUndeclared), asCALL_CDECL), asMA_NONE, asMA_PROGRAM);
+	Declare(engine, engine->RegisterGlobalFunction("int writesEngine(int)", asFUNCTION(NUndeclared), asCALL_CDECL), asMA_NONE, asMA_ENGINE);
+	Declare(engine, engine->RegisterGlobalFunction("int readsProgram(int)", asFUNCTION(NUndeclared), asCALL_CDECL), asMA_PROGRAM, asMA_NONE);
 	asIScriptModule *mod = Build(engine,
+		"int wProgram() { return writesProgram(1); }\n"
+		"int wEngine() { return writesEngine(1); }\n"
+		"int rProgram() { return readsProgram(1); }\n"
 		"double variable(double x) { return fsqrt(x); }\n"
 		"double stable() { return now(); }\n"
 		"int unset() { return undeclared(1); }\n"
@@ -268,6 +293,9 @@ static bool TestNotFolded()
 		"int fine() { return checked(5); }\n");
 	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
 
+	if( !CallsSystem(mod->GetFunctionByName("wProgram"), IdOf(engine, "int writesProgram(int)")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("wEngine"), IdOf(engine, "int writesEngine(int)")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("rProgram"), IdOf(engine, "int readsProgram(int)")) ) TEST_FAILED;
 	if( !CallsSystem(mod->GetFunctionByName("variable"), sqrtId) ) TEST_FAILED;
 	if( !CallsSystem(mod->GetFunctionByName("stable"), IdOf(engine, "double now()")) ) TEST_FAILED;
 	if( !CallsSystem(mod->GetFunctionByName("unset"), IdOf(engine, "int undeclared(int)")) ) TEST_FAILED;
@@ -281,6 +309,53 @@ static bool TestNotFolded()
 	double v = 0;
 	if( Run(engine, mod->GetFunctionByName("raises"), v) != asEXECUTION_EXCEPTION ) TEST_FAILED;
 	if( Run(engine, mod->GetFunctionByName("fine"), v) != asEXECUTION_FINISHED || v != 5 ) TEST_FAILED;
+
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+static bool TestWidths()
+{
+	bool fail = false;
+	COutStream out;
+	int sqrtId = 0;
+	asIScriptEngine *engine = MakeEngine(out, sqrtId);
+	Declare(engine, engine->RegisterGlobalFunction("int8 neg8(int8)", asFUNCTION(NNeg8), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("bool isNeg(int)", asFUNCTION(NIsNeg), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("int16 twice16(int16)", asFUNCTION(NTwice16), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("float half(float)", asFUNCTION(NHalf), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("int bump(int &in)", asFUNCTION(NBump), asCALL_CDECL), asMA_NONE, asMA_NONE);
+
+	g_calls = 0;
+	asIScriptModule *mod = Build(engine,
+		"int8 n8() { return neg8(5); }\n"
+		"bool neg() { return isNeg(-3); }\n"
+		"int16 n16() { return twice16(-300); }\n"
+		"float fh() { return half(3.0f); }\n"
+		"int bl() { return bump(4); }\n"
+		"const int K = 5;\n"
+		"int bk() { return bump(K) * 100 + K; }\n");
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+
+	// 1-byte, 2-byte and float arguments and results all fold
+	int afterBuild = g_calls;
+	if( CallsSystem(mod->GetFunctionByName("n8"), IdOf(engine, "int8 neg8(int8)")) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("neg"), IdOf(engine, "bool isNeg(int)")) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("n16"), IdOf(engine, "int16 twice16(int16)")) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("fh"), IdOf(engine, "float half(float)")) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("bl"), IdOf(engine, "int bump(int &in)")) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("bk"), IdOf(engine, "int bump(int &in)")) ) TEST_FAILED;
+
+	double v = 0;
+	if( Run(engine, mod->GetFunctionByName("n8"), v) != asEXECUTION_FINISHED || v != -5 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("neg"), v) != asEXECUTION_FINISHED || v != 1 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("n16"), v) != asEXECUTION_FINISHED || v != -600 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("fh"), v) != asEXECUTION_FINISHED || v != 1.5 ) TEST_FAILED;
+
+	// A non-const &in native that alters its argument changes only the fold's own copy
+	if( Run(engine, mod->GetFunctionByName("bl"), v) != asEXECUTION_FINISHED || v != 14 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("bk"), v) != asEXECUTION_FINISHED || v != 1505 ) TEST_FAILED;
+	if( g_calls != afterBuild ) TEST_FAILED;
 
 	engine->ShutDownAndRelease();
 	return fail;
@@ -321,6 +396,7 @@ bool Test()
 	fail = TestNesting() || fail;
 	fail = TestConstGlobal() || fail;
 	fail = TestNotFolded() || fail;
+	fail = TestWidths() || fail;
 	fail = TestSaveLoad() || fail;
 	if( fail )
 	{

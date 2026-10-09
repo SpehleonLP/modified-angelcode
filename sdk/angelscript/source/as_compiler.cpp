@@ -15371,7 +15371,9 @@ int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType
 		}
 	}
 
-	// The argument code is held apart so that a folded call can discard it
+	// The argument code is held apart so that a folded call can discard it. A call that
+	// folds is still prepared, so its errors and warnings are the same as when it does
+	// not; the cost is that the temporaries it allocates may leave an unused stack slot.
 	asCByteCode argBC(engine);
 	int r = PrepareFunctionCall(funcId, &argBC, args);
 	if (r < 0)
@@ -15483,6 +15485,8 @@ bool asCCompiler::CanFoldCall(asCScriptFunction *func)
 		func->funcType == asFUNC_SYSTEM &&
 		asMemoryAccessRead(func->memoryAccess) == asMA_NONE &&
 		asMemoryAccessWrite(func->memoryAccess) == asMA_NONE &&
+		// No test reaches this: a method call always has object code, which already
+		// stops the fold in MakeFunctionCall. It is kept so a method can never fold.
 		func->objectType == 0 &&
 		!func->IsVariadic() &&
 		!func->returnType.IsReference() &&
