@@ -145,27 +145,27 @@ void RegisterScriptAny_Native(asIScriptEngine *engine)
 	r = engine->RegisterObjectType("any", sizeof(CScriptAny), asOBJ_REF | asOBJ_GC); assert( r >= 0 );
 
 	// We'll use the generic interface for the constructor as we need the engine pointer
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f()", asFUNCTION(ScriptAnyFactory_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(?&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(const int64&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert(r >= 0);
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(const double&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert(r >= 0);
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f()", asFUNCTION(ScriptAnyFactory_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_WORLD_STABLE, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(?&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(const int64&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_WORLD_STABLE, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(const double&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_WORLD_STABLE, asMA_NONE); assert( r >= 0 );
 
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_ADDREF, "void f()", asMETHOD(CScriptAny,AddRef), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_RELEASE, "void f()", asMETHOD(CScriptAny,Release), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "any &opAssign(any&in)", asFUNCTION(ScriptAnyAssignment), asCALL_CDECL_OBJLAST); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "void store(?&in)", asMETHODPR(CScriptAny,Store,(void*,int),void), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "void store(const int64&in)", asMETHODPR(CScriptAny,Store,(asINT64&),void), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "void store(const double&in)", asMETHODPR(CScriptAny,Store,(double&),void), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "bool retrieve(?&out) const", asMETHODPR(CScriptAny,Retrieve,(void*,int) const,bool), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "bool retrieve(int64&out) const", asMETHODPR(CScriptAny,Retrieve,(asINT64&) const,bool), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "bool retrieve(double&out) const", asMETHODPR(CScriptAny,Retrieve,(double&) const,bool), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_ADDREF, "void f()", asMETHOD(CScriptAny,AddRef), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_RELEASE, "void f()", asMETHOD(CScriptAny,Release), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "any &opAssign(any&in)", asFUNCTION(ScriptAnyAssignment), asCALL_CDECL_OBJLAST); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "void store(?&in)", asMETHODPR(CScriptAny,Store,(void*,int),void), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "void store(const int64&in)", asMETHODPR(CScriptAny,Store,(asINT64&),void), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "void store(const double&in)", asMETHODPR(CScriptAny,Store,(double&),void), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "bool retrieve(?&out) const", asMETHODPR(CScriptAny,Retrieve,(void*,int) const,bool), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "bool retrieve(int64&out) const", asMETHODPR(CScriptAny,Retrieve,(asINT64&) const,bool), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "bool retrieve(double&out) const", asMETHODPR(CScriptAny,Retrieve,(double&) const,bool), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
 
 	// Register GC behaviours
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_GETREFCOUNT, "int f()", asMETHOD(CScriptAny,GetRefCount), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_SETGCFLAG, "void f()", asMETHOD(CScriptAny,SetFlag), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_GETGCFLAG, "bool f()", asMETHOD(CScriptAny,GetFlag), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_ENUMREFS, "void f(int&in)", asMETHOD(CScriptAny,EnumReferences), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_RELEASEREFS, "void f(int&in)", asMETHOD(CScriptAny,ReleaseAllHandles), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_GETREFCOUNT, "int f()", asMETHOD(CScriptAny,GetRefCount), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_SETGCFLAG, "void f()", asMETHOD(CScriptAny,SetFlag), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_THIS); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_GETGCFLAG, "bool f()", asMETHOD(CScriptAny,GetFlag), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_ENUMREFS, "void f(int&in)", asMETHOD(CScriptAny,EnumReferences), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_RELEASEREFS, "void f(int&in)", asMETHOD(CScriptAny,ReleaseAllHandles), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 }
 
 void RegisterScriptAny_Generic(asIScriptEngine *engine)
@@ -174,27 +174,27 @@ void RegisterScriptAny_Generic(asIScriptEngine *engine)
 	r = engine->RegisterObjectType("any", sizeof(CScriptAny), asOBJ_REF | asOBJ_GC); assert( r >= 0 );
 
 	// We'll use the generic interface for the constructor as we need the engine pointer
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f()", asFUNCTION(ScriptAnyFactory_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(?&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(const int64&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert(r >= 0);
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(const double&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert(r >= 0);
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f()", asFUNCTION(ScriptAnyFactory_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_WORLD_STABLE, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(?&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(const int64&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_WORLD_STABLE, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_FACTORY, "any@ f(const double&in) explicit", asFUNCTION(ScriptAnyFactory2_Generic), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_WORLD_STABLE, asMA_NONE); assert( r >= 0 );
 
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_ADDREF, "void f()", asFUNCTION(ScriptAny_AddRef_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_RELEASE, "void f()", asFUNCTION(ScriptAny_Release_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "any &opAssign(any&in)", asFUNCTION(ScriptAnyAssignment_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "void store(?&in)", asFUNCTION(ScriptAny_Store_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "void store(const int64&in)", asFUNCTION(ScriptAny_StoreInt_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "void store(const double&in)", asFUNCTION(ScriptAny_StoreFlt_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "bool retrieve(?&out) const", asFUNCTION(ScriptAny_Retrieve_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "bool retrieve(int64&out) const", asFUNCTION(ScriptAny_RetrieveInt_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("any", "bool retrieve(double&out) const", asFUNCTION(ScriptAny_RetrieveFlt_Generic), asCALL_GENERIC); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_ADDREF, "void f()", asFUNCTION(ScriptAny_AddRef_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_RELEASE, "void f()", asFUNCTION(ScriptAny_Release_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "any &opAssign(any&in)", asFUNCTION(ScriptAnyAssignment_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "void store(?&in)", asFUNCTION(ScriptAny_Store_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "void store(const int64&in)", asFUNCTION(ScriptAny_StoreInt_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "void store(const double&in)", asFUNCTION(ScriptAny_StoreFlt_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "bool retrieve(?&out) const", asFUNCTION(ScriptAny_Retrieve_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "bool retrieve(int64&out) const", asFUNCTION(ScriptAny_RetrieveInt_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("any", "bool retrieve(double&out) const", asFUNCTION(ScriptAny_RetrieveFlt_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
 
 	// Register GC behaviours
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_GETREFCOUNT, "int f()", asFUNCTION(ScriptAny_GetRefCount_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_SETGCFLAG, "void f()", asFUNCTION(ScriptAny_SetFlag_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_GETGCFLAG, "bool f()", asFUNCTION(ScriptAny_GetFlag_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_ENUMREFS, "void f(int&in)", asFUNCTION(ScriptAny_EnumReferences_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("any", asBEHAVE_RELEASEREFS, "void f(int&in)", asFUNCTION(ScriptAny_ReleaseAllHandles_Generic), asCALL_GENERIC); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_GETREFCOUNT, "int f()", asFUNCTION(ScriptAny_GetRefCount_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_SETGCFLAG, "void f()", asFUNCTION(ScriptAny_SetFlag_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_THIS); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_GETGCFLAG, "bool f()", asFUNCTION(ScriptAny_GetFlag_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_ENUMREFS, "void f(int&in)", asFUNCTION(ScriptAny_EnumReferences_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("any", asBEHAVE_RELEASEREFS, "void f(int&in)", asFUNCTION(ScriptAny_ReleaseAllHandles_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 }
 
 

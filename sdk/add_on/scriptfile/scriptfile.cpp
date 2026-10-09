@@ -171,30 +171,30 @@ void RegisterScriptFile_Native(asIScriptEngine *engine)
     int r;
 
     r = engine->RegisterObjectType("file", 0, asOBJ_REF); assert( r >= 0 );
-    r = engine->RegisterObjectBehaviour("file", asBEHAVE_FACTORY, "file @f()", asFUNCTION(ScriptFile_Factory), asCALL_CDECL); assert( r >= 0 );
-    r = engine->RegisterObjectBehaviour("file", asBEHAVE_ADDREF, "void f()", asMETHOD(CScriptFile,AddRef), asCALL_THISCALL); assert( r >= 0 );
-    r = engine->RegisterObjectBehaviour("file", asBEHAVE_RELEASE, "void f()", asMETHOD(CScriptFile,Release), asCALL_THISCALL); assert( r >= 0 );
+    r = engine->RegisterObjectBehaviour("file", asBEHAVE_FACTORY, "file @f()", asFUNCTION(ScriptFile_Factory), asCALL_CDECL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE); assert( r >= 0 );
+    r = engine->RegisterObjectBehaviour("file", asBEHAVE_ADDREF, "void f()", asMETHOD(CScriptFile,AddRef), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE); assert( r >= 0 );
+    r = engine->RegisterObjectBehaviour("file", asBEHAVE_RELEASE, "void f()", asMETHOD(CScriptFile,Release), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert( r >= 0 );
 
-    r = engine->RegisterObjectMethod("file", "int open(const string &in, const string &in)", asMETHOD(CScriptFile,Open), asCALL_THISCALL); assert( r >= 0 );
-    r = engine->RegisterObjectMethod("file", "int close()", asMETHOD(CScriptFile,Close), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int getSize() const", asMETHOD(CScriptFile,GetSize), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "bool isEndOfFile() const", asMETHOD(CScriptFile,IsEOF), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "string readString(uint)", asMETHOD(CScriptFile,ReadString), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "string readLine()", asMETHOD(CScriptFile,ReadLine), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int64 readInt(uint)", asMETHOD(CScriptFile,ReadInt), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "uint64 readUInt(uint)", asMETHOD(CScriptFile,ReadUInt), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "float readFloat()", asMETHOD(CScriptFile,ReadFloat), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "double readDouble()", asMETHOD(CScriptFile,ReadDouble), asCALL_THISCALL); assert( r >= 0 );
+    r = engine->RegisterObjectMethod("file", "int open(const string &in, const string &in)", asMETHOD(CScriptFile,Open), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+    r = engine->RegisterObjectMethod("file", "int close()", asMETHOD(CScriptFile,Close), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int getSize() const", asMETHOD(CScriptFile,GetSize), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "bool isEndOfFile() const", asMETHOD(CScriptFile,IsEOF), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "string readString(uint)", asMETHOD(CScriptFile,ReadString), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "string readLine()", asMETHOD(CScriptFile,ReadLine), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int64 readInt(uint)", asMETHOD(CScriptFile,ReadInt), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "uint64 readUInt(uint)", asMETHOD(CScriptFile,ReadUInt), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "float readFloat()", asMETHOD(CScriptFile,ReadFloat), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "double readDouble()", asMETHOD(CScriptFile,ReadDouble), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 #if AS_WRITE_OPS == 1
-	r = engine->RegisterObjectMethod("file", "int writeString(const string &in)", asMETHOD(CScriptFile,WriteString), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int writeInt(int64, uint)", asMETHOD(CScriptFile,WriteInt), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int writeUInt(uint64, uint)", asMETHOD(CScriptFile,WriteUInt), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int writeFloat(float)", asMETHOD(CScriptFile,WriteFloat), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int writeDouble(double)", asMETHOD(CScriptFile,WriteDouble), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int writeString(const string &in)", asMETHOD(CScriptFile,WriteString), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int writeInt(int64, uint)", asMETHOD(CScriptFile,WriteInt), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int writeUInt(uint64, uint)", asMETHOD(CScriptFile,WriteUInt), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int writeFloat(float)", asMETHOD(CScriptFile,WriteFloat), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int writeDouble(double)", asMETHOD(CScriptFile,WriteDouble), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 #endif
-	r = engine->RegisterObjectMethod("file", "int getPos() const", asMETHOD(CScriptFile,GetPos), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int setPos(int)", asMETHOD(CScriptFile,SetPos), asCALL_THISCALL); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int movePos(int)", asMETHOD(CScriptFile,MovePos), asCALL_THISCALL); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int getPos() const", asMETHOD(CScriptFile,GetPos), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int setPos(int)", asMETHOD(CScriptFile,SetPos), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int movePos(int)", asMETHOD(CScriptFile,MovePos), asCALL_THISCALL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 
 	r = engine->RegisterObjectProperty("file", "bool mostSignificantByteFirst", asOFFSET(CScriptFile, mostSignificantByteFirst)); assert( r >= 0 );
 }
@@ -204,30 +204,30 @@ void RegisterScriptFile_Generic(asIScriptEngine *engine)
 	int r;
 
 	r = engine->RegisterObjectType("file", 0, asOBJ_REF); assert( r >= 0 );
-	r = engine->RegisterObjectBehaviour("file", asBEHAVE_FACTORY, "file @f()", asFUNCTION(ScriptFile_Factory_Generic), asCALL_GENERIC); assert( r >= 0 );
-    r = engine->RegisterObjectBehaviour("file", asBEHAVE_ADDREF, "void f()", asFUNCTION(ScriptFile_AddRef_Generic), asCALL_GENERIC); assert( r >= 0 );
-    r = engine->RegisterObjectBehaviour("file", asBEHAVE_RELEASE, "void f()", asFUNCTION(ScriptFile_Release_Generic), asCALL_GENERIC); assert( r >= 0 );
+	r = engine->RegisterObjectBehaviour("file", asBEHAVE_FACTORY, "file @f()", asFUNCTION(ScriptFile_Factory_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE); assert( r >= 0 );
+    r = engine->RegisterObjectBehaviour("file", asBEHAVE_ADDREF, "void f()", asFUNCTION(ScriptFile_AddRef_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE); assert( r >= 0 );
+    r = engine->RegisterObjectBehaviour("file", asBEHAVE_RELEASE, "void f()", asFUNCTION(ScriptFile_Release_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert( r >= 0 );
 
-    r = engine->RegisterObjectMethod("file", "int open(const string &in, const string &in)", asFUNCTION(ScriptFile_Open_Generic), asCALL_GENERIC); assert( r >= 0 );
-    r = engine->RegisterObjectMethod("file", "int close()", asFUNCTION(ScriptFile_Close_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int getSize() const", asFUNCTION(ScriptFile_GetSize_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "bool isEndOfFile() const", asFUNCTION(ScriptFile_IsEOF_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "string readString(uint)", asFUNCTION(ScriptFile_ReadString_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "string readLine()", asFUNCTION(ScriptFile_ReadLine_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int64 readInt(uint)", asFUNCTION(ScriptFile_ReadInt_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "uint64 readUInt(uint)", asFUNCTION(ScriptFile_ReadUInt_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "float readFloat()", asFUNCTION(ScriptFile_ReadFloat_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "double readDouble()", asFUNCTION(ScriptFile_ReadDouble_Generic), asCALL_GENERIC); assert( r >= 0 );
+    r = engine->RegisterObjectMethod("file", "int open(const string &in, const string &in)", asFUNCTION(ScriptFile_Open_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+    r = engine->RegisterObjectMethod("file", "int close()", asFUNCTION(ScriptFile_Close_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int getSize() const", asFUNCTION(ScriptFile_GetSize_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "bool isEndOfFile() const", asFUNCTION(ScriptFile_IsEOF_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "string readString(uint)", asFUNCTION(ScriptFile_ReadString_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "string readLine()", asFUNCTION(ScriptFile_ReadLine_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int64 readInt(uint)", asFUNCTION(ScriptFile_ReadInt_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "uint64 readUInt(uint)", asFUNCTION(ScriptFile_ReadUInt_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "float readFloat()", asFUNCTION(ScriptFile_ReadFloat_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "double readDouble()", asFUNCTION(ScriptFile_ReadDouble_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 #if AS_WRITE_OPS == 1
-	r = engine->RegisterObjectMethod("file", "int writeString(const string &in)", asFUNCTION(ScriptFile_WriteString_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int writeInt(int64, uint)", asFUNCTION(ScriptFile_WriteInt_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int writeUInt(uint64, uint)", asFUNCTION(ScriptFile_WriteUInt_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int writeFloat(float)", asFUNCTION(ScriptFile_WriteFloat_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int writeDouble(double)", asFUNCTION(ScriptFile_WriteDouble_Generic), asCALL_GENERIC); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int writeString(const string &in)", asFUNCTION(ScriptFile_WriteString_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int writeInt(int64, uint)", asFUNCTION(ScriptFile_WriteInt_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int writeUInt(uint64, uint)", asFUNCTION(ScriptFile_WriteUInt_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int writeFloat(float)", asFUNCTION(ScriptFile_WriteFloat_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int writeDouble(double)", asFUNCTION(ScriptFile_WriteDouble_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 #endif
-	r = engine->RegisterObjectMethod("file", "int getPos() const", asFUNCTION(ScriptFile_GetPos_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int setPos(int)", asFUNCTION(ScriptFile_SetPos_Generic), asCALL_GENERIC); assert( r >= 0 );
-	r = engine->RegisterObjectMethod("file", "int movePos(int)", asFUNCTION(ScriptFile_MovePos_Generic), asCALL_GENERIC); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int getPos() const", asFUNCTION(ScriptFile_GetPos_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_NONE); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int setPos(int)", asFUNCTION(ScriptFile_SetPos_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
+	r = engine->RegisterObjectMethod("file", "int movePos(int)", asFUNCTION(ScriptFile_MovePos_Generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 
 	r = engine->RegisterObjectProperty("file", "bool mostSignificantByteFirst", asOFFSET(CScriptFile, mostSignificantByteFirst)); assert( r >= 0 );
 }

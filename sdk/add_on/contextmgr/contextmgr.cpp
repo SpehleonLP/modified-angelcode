@@ -370,7 +370,7 @@ void CContextMgr::RegisterThreadSupport(asIScriptEngine *engine)
 	assert( m_getTimeFunc != 0 );
 
 	// Register the sleep function
-	r = engine->RegisterGlobalFunction("void sleep(uint)", asFUNCTION(ScriptSleep), asCALL_CDECL); assert( r >= 0 );
+	r = engine->RegisterGlobalFunction("void sleep(uint)", asFUNCTION(ScriptSleep), asCALL_CDECL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 
 	// TODO: Add support for spawning new threads, waiting for signals, etc
 }
@@ -383,13 +383,13 @@ void CContextMgr::RegisterCoRoutineSupport(asIScriptEngine *engine)
 	assert( engine->GetTypeInfoByDecl("dictionary") );
 
 #ifndef AS_MAX_PORTABILITY
-	r = engine->RegisterGlobalFunction("void yield()", asFUNCTION(ScriptYield), asCALL_CDECL); assert( r >= 0 );
+	r = engine->RegisterGlobalFunction("void yield()", asFUNCTION(ScriptYield), asCALL_CDECL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 	r = engine->RegisterFuncdef("void coroutine(dictionary@)");
-	r = engine->RegisterGlobalFunction("void createCoRoutine(coroutine @+, dictionary @+)", asFUNCTION(ScriptCreateCoRoutine), asCALL_CDECL); assert( r >= 0 );
+	r = engine->RegisterGlobalFunction("void createCoRoutine(coroutine @+, dictionary @+)", asFUNCTION(ScriptCreateCoRoutine), asCALL_CDECL); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 #else
-	r = engine->RegisterGlobalFunction("void yield()", asFUNCTION(ScriptYield_generic), asCALL_GENERIC); assert( r >= 0 );
+	r = engine->RegisterGlobalFunction("void yield()", asFUNCTION(ScriptYield_generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 	r = engine->RegisterFuncdef("void coroutine(dictionary@)");
-	r = engine->RegisterGlobalFunction("void createCoRoutine(coroutine @+, dictionary @+)", asFUNCTION(ScriptCreateCoRoutine_generic), asCALL_GENERIC); assert( r >= 0 );
+	r = engine->RegisterGlobalFunction("void createCoRoutine(coroutine @+, dictionary @+)", asFUNCTION(ScriptCreateCoRoutine_generic), asCALL_GENERIC); assert( r >= 0 ); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert( r >= 0 );
 #endif
 }
 

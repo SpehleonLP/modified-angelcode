@@ -1,4 +1,16 @@
 #include "utils.h"
+#include "../../../add_on/scriptdictionary/scriptdictionary.h"
+#include "../../../add_on/scripthandle/scripthandle.h"
+#include "../../../add_on/scriptany/scriptany.h"
+#include "../../../add_on/weakref/weakref.h"
+#include "../../../add_on/scriptgrid/scriptgrid.h"
+#include "../../../add_on/scriptmath/scriptmath.h"
+#include "../../../add_on/scriptmath/scriptmathcomplex.h"
+#include "../../../add_on/datetime/datetime.h"
+#include "../../../add_on/scriptfile/scriptfile.h"
+#include "../../../add_on/scriptfile/scriptfilesystem.h"
+#include "../../../add_on/contextmgr/contextmgr.h"
+#include "../../../add_on/scriptsocket/scriptsocket.h"
 
 namespace TestMemoryAccess
 {
@@ -1359,6 +1371,106 @@ static bool TestSaveWritesScopes()
 	return fail;
 }
 
+// Every function an add-on registers must declare its scopes; a native that does
+// not reports Unset, which the analysis treats as touching everything
+static bool CheckDeclared(asIScriptFunction *func, const char *what)
+{
+	if( func == 0 )
+	{
+		PRINTF("add-on scopes: missing %s\n", what);
+		return true;
+	}
+	asEMemoryAccess r = asMA_UNSET, w = asMA_UNSET;
+	func->GetMemoryAccess(&r, &w);
+	if( r == asMA_UNSET || w == asMA_UNSET )
+	{
+		PRINTF("add-on function without declared scopes (%s): %s\n", what, func->GetDeclaration(true, true, true));
+		return true;
+	}
+	return false;
+}
+
+static asUINT NoTime() { return 0; }
+
+static bool TestAddOnScopes()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = CreateEngine(out);
+
+	RegisterStdString(engine);
+	RegisterScriptArray(engine, true);
+	RegisterStdStringUtils(engine);
+	RegisterScriptDictionary(engine);
+	RegisterScriptMath(engine);
+	RegisterScriptMathComplex(engine);
+	RegisterScriptAny(engine);
+	RegisterScriptHandle(engine);
+	RegisterScriptWeakRef(engine);
+	RegisterScriptDateTime(engine);
+	RegisterScriptFile(engine);
+	RegisterScriptFileSystem(engine);
+	RegisterScriptGrid(engine);
+	RegisterExceptionRoutines(engine);
+	CContextMgr ctxMgr;
+	ctxMgr.SetGetTimeCallback(NoTime);
+	ctxMgr.RegisterThreadSupport(engine);
+	ctxMgr.RegisterCoRoutineSupport(engine);
+	RegisterScriptSocket(engine);
+
+	asUINT checked = 0;
+	for( asUINT n = 0; n < engine->GetGlobalFunctionCount(); n++ )
+	{
+		if( CheckDeclared(engine->GetGlobalFunctionByIndex(n), "global function") )
+		{
+			fail = true;
+		}
+		checked++;
+	}
+	for( asUINT n = 0; n < engine->GetObjectTypeCount(); n++ )
+	{
+		asITypeInfo *type = engine->GetObjectTypeByIndex(n);
+		if( type == 0 || (type->GetFlags() & asOBJ_FUNCDEF) )
+		{
+			continue;
+		}
+		for( asUINT m = 0; m < type->GetMethodCount(); m++ )
+		{
+			if( CheckDeclared(type->GetMethodByIndex(m, false), "method") )
+			{
+				fail = true;
+			}
+			checked++;
+		}
+		for( asUINT m = 0; m < type->GetBehaviourCount(); m++ )
+		{
+			// The behaviours include the template callback
+			asEBehaviours beh;
+			if( CheckDeclared(type->GetBehaviourByIndex(m, &beh), "behaviour") )
+			{
+				fail = true;
+			}
+			checked++;
+		}
+		for( asUINT m = 0; m < type->GetFactoryCount(); m++ )
+		{
+			if( CheckDeclared(type->GetFactoryByIndex(m), "factory") )
+			{
+				fail = true;
+			}
+			checked++;
+		}
+	}
+	// Guard against the walk silently covering nothing
+	if( checked < 250 )
+	{
+		PRINTF("add-on scopes: only %u functions were walked\n", checked);
+		fail = true;
+	}
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
 bool Test()
 {
 	bool fail = false;
@@ -1427,6 +1539,10 @@ bool Test()
 		fail = true;
 	}
 	if( TestSaveWritesScopes() )
+	{
+		fail = true;
+	}
+	if( TestAddOnScopes() )
 	{
 		fail = true;
 	}
