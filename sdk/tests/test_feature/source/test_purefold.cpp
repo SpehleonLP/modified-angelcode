@@ -100,6 +100,7 @@ static asINT8 NNeg8(asINT8 x) { ++g_calls; return asINT8(-x); }
 static bool NIsNeg(int x) { ++g_calls; return x < 0; }
 static asINT16 NTwice16(asINT16 x) { ++g_calls; return asINT16(x * 2); }
 static float NHalf(float x) { ++g_calls; return x * 0.5f; }
+static int NOutArg(int &o) { ++g_calls; o = 7; return 3; }
 static int NBump(int &x) { ++g_calls; x += 10; return x; }
 struct Obj { int Pure() const { return 5; } };
 static Obj g_obj;
@@ -284,6 +285,8 @@ static bool TestNotFolded()
 	Declare(engine, engine->RegisterGlobalFunction("int writesProgram(int)", asFUNCTION(NUndeclared), asCALL_CDECL), asMA_NONE, asMA_PROGRAM);
 	Declare(engine, engine->RegisterGlobalFunction("int writesEngine(int)", asFUNCTION(NUndeclared), asCALL_CDECL), asMA_NONE, asMA_ENGINE);
 	Declare(engine, engine->RegisterGlobalFunction("int readsProgram(int)", asFUNCTION(NUndeclared), asCALL_CDECL), asMA_PROGRAM, asMA_NONE);
+	// An &out parameter with a constant default has no code, yet the native writes through it, so it is never folded
+	Declare(engine, engine->RegisterGlobalFunction("int outArg(int &out o = 0)", asFUNCTION(NOutArg), asCALL_CDECL), asMA_NONE, asMA_NONE);
 	asIScriptModule *mod = Build(engine,
 		"int wProgram() { return writesProgram(1); }\n"
 		"int wEngine() { return writesEngine(1); }\n"
@@ -294,6 +297,7 @@ static bool TestNotFolded()
 		"int method() { return getObj().pure(); }\n"
 		"int variadic() { return sumv(1, 2, 3); }\n"
 		"int raises() { return checked(-1); }\n"
+		"int outp() { return outArg(); }\n"
 		"int fine() { return checked(5); }\n");
 	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
 
@@ -305,6 +309,7 @@ static bool TestNotFolded()
 	if( !CallsSystem(mod->GetFunctionByName("unset"), IdOf(engine, "int undeclared(int)")) ) TEST_FAILED;
 	if( !CallsSystem(mod->GetFunctionByName("variadic"), IdOf(engine, "int sumv(int ...)")) ) TEST_FAILED;
 	if( !CallsSystem(mod->GetFunctionByName("raises"), IdOf(engine, "int checked(int)")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("outp"), IdOf(engine, "int outArg(int &out)")) ) TEST_FAILED;
 	if( CallsSystem(mod->GetFunctionByName("fine"), IdOf(engine, "int checked(int)")) ) TEST_FAILED;
 	asITypeInfo *objType = engine->GetTypeInfoByName("Obj");
 	if( !CallsSystem(mod->GetFunctionByName("method"), objType->GetMethodByName("pure")->GetId()) ) TEST_FAILED;
@@ -312,6 +317,7 @@ static bool TestNotFolded()
 	// A call that raised at build time still raises at run time
 	double v = 0;
 	if( Run(engine, mod->GetFunctionByName("raises"), v) != asEXECUTION_EXCEPTION ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("outp"), v) != asEXECUTION_FINISHED || v != 3 ) TEST_FAILED;
 	if( Run(engine, mod->GetFunctionByName("fine"), v) != asEXECUTION_FINISHED || v != 5 ) TEST_FAILED;
 
 	engine->ShutDownAndRelease();

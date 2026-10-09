@@ -16373,7 +16373,7 @@ bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCA
 	{
 		return false;
 	}
-	reinterpret_cast<asCContext*>(exec)->m_noAutoGarbageCollect = true;
+	static_cast<asCContext*>(exec)->SuppressAutoGarbageCollect();
 
 	// A by-reference parameter gets the address of its own copy, so the native cannot alter a constant
 	asCArray<asQWORD> copies;
