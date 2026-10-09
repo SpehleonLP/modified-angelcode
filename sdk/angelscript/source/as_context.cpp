@@ -232,6 +232,7 @@ asCContext::asCContext(asCScriptEngine *engine, bool holdRef)
 	m_exceptionCallback         = false;
 	m_regs.doProcessSuspend     = false;
 	m_doSuspend                 = false;
+	m_noAutoGarbageCollect      = false;
 	m_exceptionWillBeCaught     = false;
 	m_regs.ctx                  = this;
 	m_regs.objectRegister       = 0;
@@ -1551,7 +1552,7 @@ int asCContext::Execute()
 		SetProgramPointer();
 
 	asUINT gcPreObjects = 0;
-	if( m_engine->ep.autoGarbageCollect )
+	if( m_engine->ep.autoGarbageCollect && !m_noAutoGarbageCollect )
 		m_engine->gc.GetStatistics(&gcPreObjects, 0, 0, 0, 0);
 
 	while (m_status == asEXECUTION_ACTIVE)
@@ -1576,7 +1577,7 @@ int asCContext::Execute()
 
 	m_doSuspend = false;
 
-	if( m_engine->ep.autoGarbageCollect )
+	if( m_engine->ep.autoGarbageCollect && !m_noAutoGarbageCollect )
 	{
 		asUINT gcPosObjects = 0;
 		m_engine->gc.GetStatistics(&gcPosObjects, 0, 0, 0, 0);

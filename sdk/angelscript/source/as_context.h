@@ -197,6 +197,9 @@ public:
 	bool            m_doAbort;
 	bool            m_externalSuspendRequest;
 
+	// Set by the compiler on the context it folds a pure call with, since a fold must not change engine state
+	bool            m_noAutoGarbageCollect;
+
 	asCScriptFunction *m_currentFunction;
 	asCScriptFunction *m_callingSystemFunction;
 

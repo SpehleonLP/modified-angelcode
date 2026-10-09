@@ -174,6 +174,7 @@ A call is folded when all of these hold:
 The compiler runs the function once, with the same call path as at run time. If the call raises a script exception, or does not
 finish, it is not folded: the call is compiled as usual and raises when the script runs. Folding never turns an error at
 run time into an error at compile time. A result that is NaN or infinity is a result like any other.
+The fold runs on a private context, so no context callbacks (\ref asIScriptEngine::SetContextCallbacks "SetContextCallbacks"), line callbacks or garbage collection run at compile time. A native that throws a C++ exception still reaches the engine's translate-exception callback, as it would at run time.
 
 \code
 engine->SetEngineProperty(asEP_FOLD_PURE_CALLS, true);

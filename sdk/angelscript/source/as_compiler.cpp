@@ -16366,12 +16366,14 @@ bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCA
 		values[n] = conv.type.GetConstantData();
 	}
 
-	// The compiler may run on a thread that holds no context, so borrow one from the engine
-	asIScriptContext *exec = engine->RequestContext();
-	if( exec == 0 )
+	// The fold runs on a context of its own: a pooled one would run the host's context callbacks,
+	// and the garbage collection step after Execute could run script destructors mid-compile
+	asIScriptContext *exec = 0;
+	if( engine->CreateContext(&exec, true) < 0 )
 	{
 		return false;
 	}
+	reinterpret_cast<asCContext*>(exec)->m_noAutoGarbageCollect = true;
 
 	// A by-reference parameter gets the address of its own copy, so the native cannot alter a constant
 	asCArray<asQWORD> copies;
@@ -16464,7 +16466,7 @@ bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCA
 		}
 		finished = true;
 	}
-	engine->ReturnContext(exec);
+	exec->Release();
 
 	// Released whether or not the call finished, since the native is done with them either way
 	for( asUINT n = 0; n < stringCopies.GetLength(); n++ )
