@@ -535,6 +535,7 @@ public:
 		asUINT memberInitMode;
 		asUINT boolConversionMode;
 		bool   foreachSupport;
+		bool   foldPureCalls;
 	} ep;
 
 	// Callbacks

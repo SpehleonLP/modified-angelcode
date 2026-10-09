@@ -176,6 +176,11 @@ expected, e.g. in conditions.
 By turning off this property the support for \ref while "foreach loops" is disabled. This option was added to provide 
 backwards compatibility for existing scripts before 2.38.0 that may be using the reserved keyword <tt>foreach</tt>.
 
+\ref asEP_FOLD_PURE_CALLS
+
+When true, a call to an application function declared {asMA_NONE, asMA_NONE} whose arguments are all constants is evaluated by the
+compiler and replaced with its result. See \ref doc_adv_memory_access. Default: false.
+
 \ref asEP_MEMBER_INIT_MODE
 
 When this property to 0, the class members with an initialization expression in the declaration will always be initialized 

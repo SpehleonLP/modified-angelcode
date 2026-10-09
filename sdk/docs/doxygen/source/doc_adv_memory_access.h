@@ -151,6 +151,39 @@ so the result cannot be shared.
 
 The host must discard stored results when it changes world-stable state. It may only change that state while the VM is stopped.
 
+\subsection doc_adv_memory_access_fold Folding pure calls
+
+With \ref asEP_FOLD_PURE_CALLS set to true, which is not the default, the compiler stores the result of such a call
+itself. A call to a function declared <tt>{asMA_NONE, asMA_NONE}</tt> whose arguments are all constants is evaluated at
+compile time and replaced with its result, so <tt>sqrt(2.0) * 3.0</tt> compiles to one constant. The result is a
+constant like any literal, so it can be used where the language requires one, e.g. as a <tt>case</tt> label or in a
+<tt>const</tt> global's initialiser.
+
+A call is folded when all of these hold:
+
+ - the callee is a registered global function. A method, a behaviour, a factory, a constructor, a script function,
+   a function handle and a delegate are not folded, and neither is a function with a variadic parameter.
+ - its scopes are exactly <tt>{asMA_NONE, asMA_NONE}</tt>. A function that reads \ref asMA_WORLD_STABLE is never
+   folded, because that state is only constant while the VM is stopped, and the compiler cannot know it is.
+ - every argument is a constant after the implicit conversions: a primitive or an enum, passed by value, as <tt>const &in</tt> or as
+   <tt>&in</tt>, or a string literal, passed by value, as <tt>const &in</tt> or as <tt>&in</tt>.
+   A function that changes an <tt>&in</tt> argument changes a copy that the compiler made for the call, so it
+   cannot alter a constant or a string literal.
+ - the function returns a primitive or an enum by value. A call that returns a string or another object is not folded.
+
+The compiler runs the function once, with the same call path as at run time. If the call raises a script exception, or does not
+finish, it is not folded: the call is compiled as usual and raises when the script runs. Folding never turns an error at
+run time into an error at compile time. A result that is NaN or infinity is a result like any other.
+
+\code
+engine->SetEngineProperty(asEP_FOLD_PURE_CALLS, true);
+// "double f() { return sqrt(2.0) * 3.0; }" now compiles to a constant, without a call to sqrt
+\endcode
+
+The saved bytecode contains the constant, so loading it needs no support for folding. The result is the one that the
+compiling machine computes. A host that compiles bytecode on one platform and runs it on another gets the result of the
+compiling platform's implementation, e.g. of <tt>sqrt</tt>.
+
 \section doc_adv_memory_access_params Parameters
 
 These rules apply to the parameters of script functions. The arguments of application functions are counted by the 
@@ -178,6 +211,9 @@ The analysis depends on the application functions behaving as declared.
    as its own, so a factory that returns a shared object breaks the analysis.
  - The declared scopes cover everything the function reaches beyond the objects passed as arguments, including 
    objects reached through handles stored inside the arguments.
+ - A function declared <tt>{asMA_NONE, asMA_NONE}</tt> returns the same result for the same arguments every time and has no
+   observable effect. With \ref asEP_FOLD_PURE_CALLS the compiler evaluates such a function, see \ref doc_adv_memory_access_fold,
+   so a wrong declaration shows at compile time.
  - An \ref asBEHAVE_ADDREF behaviour touches only the reference count of the object. The analysis never consults it.
  - An \ref asBEHAVE_RELEASE behaviour of a reference type, and the \ref asBEHAVE_DESTRUCT behaviour of a value type, 
    declare what destroying the object can do in the worst case. That includes releasing everything that the object holds, 

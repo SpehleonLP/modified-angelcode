@@ -147,6 +147,7 @@ namespace TestDefaultArg        { bool Test(); }
 namespace TestNamedArgs         { bool Test(); }
 namespace TestShared            { bool Test(); }
 namespace TestMemoryAccess      { bool Test(); }
+namespace TestPureFold          { bool Test(); }
 namespace TestNamespace         { bool Test(); }
 namespace TestCDeclObjLast      { bool Test(); }
 namespace TestMixin             { bool Test(); }
@@ -263,6 +264,7 @@ int allTests()
 	if( TestNamespace::Test()                   ) goto failed; else PRINTF("-- TestNamespace passed\n");
 	if( TestShared::Test()                      ) goto failed; else PRINTF("-- TestShared passed\n");
 	if( TestMemoryAccess::Test()                ) goto failed; else PRINTF("-- TestMemoryAccess passed\n");
+	if( TestPureFold::Test()                    ) goto failed; else PRINTF("-- TestPureFold passed\n");
 	if( TestDefaultArg::Test()                  ) goto failed; else PRINTF("-- TestDefaultArg passed\n");
 	if( TestNamedArgs::Test()                   ) goto failed; else PRINTF("-- TestNamedArgs passed\n");
 	if( TestScriptRetRef::Test()                ) goto failed; else PRINTF("-- TestScriptRetRef passed\n");

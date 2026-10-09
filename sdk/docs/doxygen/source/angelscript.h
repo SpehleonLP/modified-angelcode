@@ -299,6 +299,8 @@ enum asEEngineProp
 	asEP_BOOL_CONVERSION_MODE               = 39,
 	//! Enable foreach support. Default: true
 	asEP_FOREACH_SUPPORT                    = 40,
+	//! Fold calls to pure application functions with constant arguments at compile time. Default: false
+	asEP_FOLD_PURE_CALLS                    = 41,
 
 	asEP_LAST_PROPERTY
 };
