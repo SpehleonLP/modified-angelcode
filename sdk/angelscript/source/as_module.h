@@ -194,6 +194,8 @@ public:
 	void JITCompile();
 
 #ifndef AS_NO_COMPILER
+	// The one module-wide metadata pass: memory access, minimum access masks,
+	// calls-delegate and halting, settled together in one round loop.
 	// Called after Build() completes, so all class types and function bodies are finalized.
 	// Metadata is stored in function fields and persists through serialization,
 	// so this is not needed in compiler-free (load-only) builds.
@@ -201,6 +203,16 @@ public:
 	// time. In particular it must never consume the per-function inputs it
 	// reads (asCScriptFunction::funcdefCallTargets).
 	void ComputeTransitiveFunctionMetadata();
+	// A CompileFunction product that was not added to the module: nothing
+	// calls it, so one memory-access scan against the stored results is final.
+	void ComputeMemoryAccessOfDetachedFunction(asCScriptFunction *func);
+	// Every function a CALLINTF on `called` can dispatch to: the one dispatch
+	// walk, shared by BuildCalleeList and the memory-access scanner. Returns
+	// false when the set is open (a shared type, or a vtable that does not
+	// have the slot); the targets found before and after the open point are
+	// still appended.
+	bool GetDispatchTargets(asCScriptFunction *called, asCArray<asCScriptFunction*> &outTargets) const;
+	const asCArray<asCObjectType*> &GetClassTypes() const { return m_classTypes; }
 	// Scans func's bytecode, appending indices into m_scriptFunctions (via funcIdToIndex)
 	// for each CALL/CALLINTF/ALLOC target. Analysis-time poisons (unmapped/unresolvable
 	// call sites) are reported via outUnresolved rather than mutating func; the caller
@@ -214,7 +226,8 @@ public:
 	// asBC_CallPtr site with a statically-known target, that target when it
 	// is a system function or a shared script function. The caller folds it
 	// like a resolved edge; it is not deduped (the fold is a join of
-	// idempotent max()-style operations).
+	// idempotent max()-style operations). CALLINTF targets come from
+	// GetDispatchTargets.
 	//
 	// outDirectSiteAddr/outDirectSiteIndex additionally record, per direct
 	// asBC_CALL site with a single resolved target, the site's byte code

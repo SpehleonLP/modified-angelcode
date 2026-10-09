@@ -320,6 +320,32 @@ void RegisterScriptObject(asCScriptEngine *engine)
 	r = engine->RegisterBehaviourToObjectType(&engine->scriptTypeBehaviours, asBEHAVE_ENUMREFS, "void f(int&in)", asFUNCTION(ScriptObject_EnumReferences_Generic), asCALL_GENERIC, 0); asASSERT( r >= 0 );
 	r = engine->RegisterBehaviourToObjectType(&engine->scriptTypeBehaviours, asBEHAVE_RELEASEREFS, "void f(int&in)", asFUNCTION(ScriptObject_ReleaseAllHandles_Generic), asCALL_GENERIC, 0); asASSERT( r >= 0 );
 #endif
+
+	// Declare the built-ins so hosts that check for undeclared natives find none.
+	// AddRef, the GC behaviours and the weakref flag touch only the object's
+	// atomic header, so they read and write nothing outside it.
+	asCObjectType &ot = engine->scriptTypeBehaviours;
+	engine->scriptFunctions[ot.beh.addref]->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	// Release may destroy the object, and destruction runs a script destructor
+	engine->scriptFunctions[ot.beh.release]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+#ifdef AS_NO_MEMBER_INIT
+	// Without member initialisation the constructor builds its members through
+	// ScriptObjectFactory, which runs script constructors. The garbage collector
+	// registration is not counted: the collector is outside this analysis and its
+	// lists are internally locked.
+	engine->scriptFunctions[ot.beh.construct]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+#else
+	// Construct only zeroes the memory of a fresh object that just the caller holds
+	engine->scriptFunctions[ot.beh.construct]->SetMemoryAccess(asMA_THIS, asMA_THIS);
+#endif
+	// Assignment reads the source object and may release handle members it overwrites
+	engine->scriptFunctions[ot.beh.copy]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+	engine->scriptFunctions[ot.beh.gcGetRefCount]->SetMemoryAccess(asMA_THIS, asMA_NONE);
+	engine->scriptFunctions[ot.beh.gcSetFlag]->SetMemoryAccess(asMA_NONE, asMA_THIS);
+	engine->scriptFunctions[ot.beh.gcGetFlag]->SetMemoryAccess(asMA_THIS, asMA_NONE);
+	engine->scriptFunctions[ot.beh.gcEnumReferences]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+	engine->scriptFunctions[ot.beh.gcReleaseAllReferences]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+	engine->scriptFunctions[ot.beh.getWeakRefFlag]->SetMemoryAccess(asMA_THIS, asMA_THIS);
 }
 
 void ScriptObject_Construct(asCObjectType *objType, asCScriptObject *self)

@@ -115,6 +115,8 @@
 		<Unit filename="../../source/as_map.h" />
 		<Unit filename="../../source/as_memory.cpp" />
 		<Unit filename="../../source/as_memory.h" />
+		<Unit filename="../../source/as_memoryaccess.cpp" />
+		<Unit filename="../../source/as_memoryaccess.h" />
 		<Unit filename="../../source/as_module.cpp" />
 		<Unit filename="../../source/as_module.h" />
 		<Unit filename="../../source/as_objecttype.cpp" />

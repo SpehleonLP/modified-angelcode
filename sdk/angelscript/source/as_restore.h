@@ -47,8 +47,10 @@
 // order it emits it in) MUST bump this: the reader refuses non-matching
 // streams instead of misparsing them. The halting/access-mask metadata made
 // the format incompatible with stock AngelScript long before this header
-// existed; version 1 is the first self-identifying format.
-#define AS_BYTECODE_FORMAT_VERSION 1
+// existed; version 1 is the first self-identifying format. Version 2 adds
+// a memory-access byte to each script function (after its halting and
+// access-mask metadata) and to each virtual or interface function.
+#define AS_BYTECODE_FORMAT_VERSION 2
 
 BEGIN_AS_NAMESPACE
 

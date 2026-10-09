@@ -25,6 +25,7 @@ angel_srcs = [
   '../../source/as_gc.cpp',
   '../../source/as_globalproperty.cpp',
   '../../source/as_memory.cpp',
+  '../../source/as_memoryaccess.cpp',
   '../../source/as_module.cpp',
   '../../source/as_objecttype.cpp',
   '../../source/as_outputbuffer.cpp',

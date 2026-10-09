@@ -1481,12 +1481,22 @@ asCScriptFunction *asCReader::ReadFunction(bool &isNew, bool addToModule, bool a
 				ReadData(metaHalts, 2);
 				func->localHalts = metaHalts[0] <= asHALTS_NO ? metaHalts[0] : asHALTS_UNKNOWN;
 				func->transitiveHalts = metaHalts[1] <= asHALTS_NO ? metaHalts[1] : asHALTS_UNKNOWN;
+				// Memory access; out-of-range scopes become Unset. Stored regardless of debug info,
+				// so that an engine without the compiler still knows the scopes
+				asBYTE access = 0;
+				ReadData(&access, 1);
+				func->memoryAccess = asSanitizeMemoryAccess(access);
 			}
 		}
 	}
 	else if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
 	{
 		func->vfTableIdx = ReadEncodedUInt();
+
+		// Memory access: the join over the dispatch targets, which only a compiler build can recompute
+		asBYTE access = 0;
+		ReadData(&access, 1);
+		func->memoryAccess = asSanitizeMemoryAccess(access);
 	}
 	else if( func->funcType == asFUNC_FUNCDEF )
 	{
@@ -4521,11 +4531,16 @@ void asCWriter::WriteFunction(asCScriptFunction* func)
 		WriteData(&flags, 1);
 		asBYTE halts[2] = { (asBYTE)func->localHalts, (asBYTE)func->transitiveHalts };
 		WriteData(halts, 2);
+		// Memory access, so that an engine without the compiler still knows it.
+		// Written regardless of stripDebugInfo, matching the reader
+		WriteData(&func->memoryAccess, 1);
 	}
 	else if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
 	{
 		// TODO: Do we really need to store this? It can probably be reconstructed by the reader
 		WriteEncodedInt64(func->vfTableIdx);
+
+		WriteData(&func->memoryAccess, 1);
 	}
 	else if( func->funcType == asFUNC_FUNCDEF )
 	{

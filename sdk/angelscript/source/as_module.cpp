@@ -43,6 +43,7 @@
 #include "as_texts.h"
 #include "as_debug.h"
 #include "as_restore.h"
+#include "as_memoryaccess.h"
 
 BEGIN_AS_NAMESPACE
 
@@ -1721,8 +1722,11 @@ int asCModule::LoadByteCode(asIBinaryStream *in, bool *wasDebugInfoStripped)
 	// verbatim, but not the bind state that justified them: a module saved
 	// while its imports were bound loads with those imports unbound, so a
 	// restored asHALTS_YES can describe a call graph this module does not
-	// have. Recompute, so that every verdict in the engine is one this pass
-	// derived from the module's current state.
+	// have. Likewise it carries each function's memory-access scopes, but this
+	// engine's natives may be declared differently from the one that saved it.
+	// Recompute, so that every verdict in the engine is one this pass derived
+	// from the module's current state and describes this engine. A build
+	// without the compiler keeps the restored values.
 	//
 	// Cost: one fixed-point pass per load - the same pass Build() runs.
 	// Precision: asCScriptFunction::funcdefCallTargets is not serialized, so a
@@ -1778,6 +1782,13 @@ int asCModule::CompileGlobalVar(const char *sectionName, const char *code, int l
 	asCBuilder varBuilder(m_engine, this);
 	asCString str = code;
 	r = varBuilder.CompileGlobalVar(sectionName, str.AddressOf(), lineOffset);
+
+	// The new global's init function lives on its property, which the pass
+	// scans; computing before InitGlobalProp means it never runs with Unset
+	if( r >= 0 )
+	{
+		ComputeTransitiveFunctionMetadata();
+	}
 
 	m_engine->BuildCompleted();
 
@@ -1847,6 +1858,14 @@ int asCModule::CompileMethod(asITypeInfo *objectType, const char *sectionName, c
 	asCScriptFunction* func = 0;
 	r = methodBuilder.CompileMethod(ot, sectionName, str.AddressOf(), lineOffset, &func);
 
+	// The method is in neither the module nor its class's virtual table, so
+	// nothing calls it: it gets its memory access the way a detached
+	// CompileFunction product does
+	if (r >= 0)
+	{
+		ComputeMemoryAccessOfDetachedFunction(func);
+	}
+
 	if (r >= 0 && m_engine->jitCompiler)
 		func->JITCompile();
 
@@ -1908,6 +1927,15 @@ int asCModule::CompileFunction(const char* sectionName, const char* code, int li
 
 	if (r >= 0)
 	{
+		if( m_scriptFunctions.IndexOf(func) >= 0 )
+		{
+			ComputeTransitiveFunctionMetadata();
+		}
+		else
+		{
+			ComputeMemoryAccessOfDetachedFunction(func);
+		}
+
 		// Invoke the JIT compiler if it has been set
 		if (m_engine->jitCompiler)
 			func->JITCompile();
@@ -2062,6 +2090,78 @@ static bool asNoRetReachableWithout(asCScriptFunction *func, const asCArray<asUI
 	return true;
 }
 
+// Every function a CALLINTF on `called` can dispatch to. This is the one
+// dispatch walk: BuildCalleeList takes its call edges from it and the
+// memory-access scanner its targets. Returns false when the set is open: a
+// shared type can gain implementations in a module built later, so a result
+// computed now would be too narrow then, and a vtable without the slot is out
+// of contract. The targets found are appended either way; BuildCalleeList
+// keeps them as edges beside its poison, and the scanner ignores them.
+bool asCModule::GetDispatchTargets(asCScriptFunction *called, asCArray<asCScriptFunction*> &outTargets) const
+{
+	if( called == 0 || called->objectType == 0 || called->objectType->IsShared() )
+	{
+		return false;
+	}
+	asCObjectType *baseType = called->objectType;
+	int vfIdx = called->vfTableIdx;
+	if( vfIdx < 0 )
+	{
+		return false;
+	}
+	bool closed = true;
+	for( asUINT c = 0; c < m_classTypes.GetLength(); c++ )
+	{
+		asCObjectType *classType = m_classTypes[c];
+		// An interface has no bodies, and a derived one lists its bases in
+		// `interfaces` without the vtable offsets a class has
+		if( classType == 0 || classType->IsInterface() )
+		{
+			continue;
+		}
+		if( baseType->IsInterface() )
+		{
+			for( asUINT k = 0; k < classType->interfaces.GetLength(); k++ )
+			{
+				if( classType->interfaces[k] == baseType )
+				{
+					if( k >= classType->interfaceVFTOffsets.GetLength() )
+					{
+						closed = false;
+						break;
+					}
+					asUINT at = classType->interfaceVFTOffsets[k] + asUINT(vfIdx);
+					if( at >= classType->virtualFunctionTable.GetLength() )
+					{
+						closed = false;
+						break;
+					}
+					if( classType->virtualFunctionTable[at] )
+					{
+						outTargets.PushLast(classType->virtualFunctionTable[at]);
+					}
+					break;
+				}
+			}
+			continue;
+		}
+		if( classType != baseType && !classType->DerivesFrom(baseType) )
+		{
+			continue;
+		}
+		if( asUINT(vfIdx) >= classType->virtualFunctionTable.GetLength() )
+		{
+			closed = false;
+			continue;
+		}
+		if( classType->virtualFunctionTable[vfIdx] )
+		{
+			outTargets.PushLast(classType->virtualFunctionTable[vfIdx]);
+		}
+	}
+	return closed;
+}
+
 void asCModule::BuildCalleeList(asCScriptFunction *func,
                                 const asCMap<int, asUINT> &funcIdToIndex,
                                 asCArray<asUINT> &outCallees,
@@ -2129,83 +2229,31 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 		}
 		else if (op == asBC_CALLINTF)
 		{
+			// Interface or virtual dispatch (asBC_CALLINTF is emitted for
+			// asFUNC_VIRTUAL too). GetDispatchTargets walks this module's
+			// classes; non-shared types can only be implemented or derived
+			// from within this module, so m_classTypes is the complete set of
+			// candidates. An open set (a shared type, whose implementations may
+			// come from other modules, or a vtable without the slot) poisons
+			// the site, and the targets that were found are edges all the same.
 			int funcId = asBC_INTARG(&bc[n]);
 			asCScriptFunction *calledFunc = m_engine->GetScriptFunction(funcId);
-			if (calledFunc && calledFunc->objectType && calledFunc->objectType->IsShared())
+			asCArray<asCScriptFunction*> targets;
+			if (!GetDispatchTargets(calledFunc, targets))
 			{
-				// Shared interface - implementations may come from other modules
 				outUnresolved = true;
 			}
-			else if (calledFunc && calledFunc->objectType && calledFunc->objectType->IsInterface())
+			for (asUINT t = 0; t < targets.GetLength(); t++)
 			{
-				// Non-shared interface - find all implementations in this module.
-				// Safe because ComputeTransitiveFunctionMetadata runs after Build() completes,
-				// so m_classTypes contains all declared classes. (Init funcs never implement
-				// interfaces, so this branch is a no-op for them; the code path is still correct.)
-				asCObjectType *ifaceType = calledFunc->objectType;
-				int vfIdx = calledFunc->vfTableIdx;
-
-				for (asUINT c = 0; c < m_classTypes.GetLength(); c++)
+				asSMapNode<int, asUINT> *cursor = 0;
+				if (funcIdToIndex.MoveTo(&cursor, targets[t]->id))
 				{
-					asCObjectType *classType = m_classTypes[c];
-					if (!classType) continue;
-
-					for (asUINT k = 0; k < classType->interfaces.GetLength(); k++)
-					{
-						if (classType->interfaces[k] == ifaceType)
-						{
-							asUINT vtableOffset = classType->interfaceVFTOffsets[k] + vfIdx;
-							if (vtableOffset < classType->virtualFunctionTable.GetLength())
-							{
-								asCScriptFunction *implFunc = classType->virtualFunctionTable[vtableOffset];
-								if (implFunc)
-								{
-									asSMapNode<int, asUINT> *cursor = 0;
-									if (funcIdToIndex.MoveTo(&cursor, implFunc->id))
-										outCallees.PushLast(funcIdToIndex.GetValue(cursor));
-								}
-							}
-							break;
-						}
-					}
+					outCallees.PushLast(funcIdToIndex.GetValue(cursor));
 				}
-			}
-			else if (calledFunc && calledFunc->objectType)
-			{
-				// Virtual class method - asBC_CALLINTF is emitted for
-				// asFUNC_VIRTUAL too. Dispatch can land on the class's own
-				// implementation or any override in a derived class; all of
-				// them share vtable slot vfTableIdx. Non-shared classes can
-				// only be derived from within this module, so m_classTypes
-				// is the complete set of candidates.
-				asCObjectType *baseType = calledFunc->objectType;
-				int vfIdx = calledFunc->vfTableIdx;
-
-				for (asUINT c = 0; c < m_classTypes.GetLength(); c++)
+				else
 				{
-					asCObjectType *classType = m_classTypes[c];
-					if (!classType) continue;
-					if (classType != baseType && !classType->DerivesFrom(baseType)) continue;
-
-					if (vfIdx < 0 || (asUINT)vfIdx >= classType->virtualFunctionTable.GetLength())
-					{
-						outUnresolved = true; // out of contract - stay conservative
-						continue;
-					}
-					asCScriptFunction *implFunc = classType->virtualFunctionTable[vfIdx];
-					if (!implFunc) continue;
-
-					asSMapNode<int, asUINT> *cursor = 0;
-					if (funcIdToIndex.MoveTo(&cursor, implFunc->id))
-						outCallees.PushLast(funcIdToIndex.GetValue(cursor));
-					else
-						outUnresolved = true; // impl not in this module's map
+					outUnresolved = true; // impl not in this module's map
 				}
-			}
-			else
-			{
-				// Can't resolve - treat as delegate
-				outUnresolved = true;
 			}
 		}
 		else if (op == asBC_CALLBND)
@@ -2358,6 +2406,145 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 	}
 }
 
+// One memory-access round over `order`: rescans every function not yet
+// pinned, and reports whether any result changed. `changedNow` records which
+// ones did.
+static bool ScanMemoryAccessRound(asCMemoryAccessScanner &scanner, const asCArray<asCScriptFunction*> &funcs, const asCArray<asUINT> &order, asSMemoryAccessTable &table, const asCArray<bool> &pinned, asCArray<bool> &changedNow)
+{
+	bool changed = false;
+	for( asUINT n = 0; n < order.GetLength(); n++ )
+	{
+		asUINT i = order[n];
+		changedNow[i] = false;
+		if( pinned[i] )
+		{
+			continue;
+		}
+		asSMemoryScanResult res = scanner.Scan(funcs[i]);
+		asBYTE packed = asPackMemoryAccess(res.read, res.write);
+		if( packed != table.access[i] || res.dropsStoredHandle != table.drops[i] )
+		{
+			table.access[i] = packed;
+			table.drops[i] = res.dropsStoredHandle;
+			changedNow[i] = true;
+			changed = true;
+		}
+	}
+	return changed;
+}
+
+// One round of the transitive fold over `order`: joins each function's access
+// mask, calls-delegate flag and halting verdict with its callees'. Reports
+// whether any field moved.
+static bool FoldTransitiveMetadataRound(const asCArray<asCScriptFunction*> &funcs, const asCArray<asUINT> &order, const asCArray<asCArray<asUINT>> &callees)
+{
+	bool changed = false;
+	for( asUINT n = 0; n < order.GetLength(); n++ )
+	{
+		asUINT i = order[n];
+		asCScriptFunction *func = funcs[i];
+		if( !func || !func->scriptData )
+		{
+			continue;
+		}
+
+		for( asUINT j = 0; j < callees[i].GetLength(); j++ )
+		{
+			asUINT calleeIdx = callees[i][j];
+			asCScriptFunction *callee = funcs[calleeIdx];
+			if( !callee )
+			{
+				continue;
+			}
+
+			asDWORD newMask = func->minTransitiveAccessMask | callee->minTransitiveAccessMask;
+			if( newMask != func->minTransitiveAccessMask )
+			{
+				func->minTransitiveAccessMask = newMask;
+				changed = true;
+			}
+
+			if( !func->transitiveCallsDelegate && callee->transitiveCallsDelegate )
+			{
+				func->transitiveCallsDelegate = true;
+				// The flag can newly appear on a caller already settled
+				// at YES from an earlier iteration; cap it here so no
+				// propagation ordering leaves a flagged function at YES.
+				if( func->transitiveHalts == asHALTS_YES )
+				{
+					func->transitiveHalts = asHALTS_UNKNOWN;
+				}
+				changed = true;
+			}
+
+			// NO must not cross a call edge: whether the caller halts then
+			// depends on whether this call site is reached, which the
+			// graph doesn't track. A never-halting callee contributes
+			// UNKNOWN; a function is NO only by its own control flow.
+			int calleeHalts = callee->transitiveHalts == asHALTS_NO
+				? (int)asHALTS_UNKNOWN : (int)callee->transitiveHalts;
+			int newHalts = func->transitiveHalts > calleeHalts
+				? func->transitiveHalts : calleeHalts;
+			if( newHalts != func->transitiveHalts )
+			{
+				func->transitiveHalts = newHalts;
+				changed = true;
+			}
+		}
+	}
+	return changed;
+}
+
+// One round of the "may return normally" fixed point over `order`: admits
+// every function that reaches a RET once each call to a not-yet-admitted
+// direct target is cut. Reports whether any function was admitted.
+static bool AdmitMayReturnRound(const asCArray<asCScriptFunction*> &funcs, const asCArray<asUINT> &order, const asCArray<asCArray<asUINT>> &directSiteAddr, const asCArray<asCArray<asUINT>> &directSiteIndex, asCArray<bool> &mayReturn)
+{
+	asUINT funcCount = (asUINT)funcs.GetLength();
+	bool grew = false;
+	for( asUINT n = 0; n < order.GetLength(); n++ )
+	{
+		asUINT i = order[n];
+		if( mayReturn[i] )
+		{
+			continue;
+		}
+
+		asCArray<asUINT> cut;
+		for( asUINT s = 0; s < directSiteAddr[i].GetLength(); s++ )
+		{
+			asUINT tgt = directSiteIndex[i][s];
+			if( tgt == asMODULE_SITE_DIVERGES )
+			{
+				cut.PushLast(directSiteAddr[i][s]);
+			}
+			else if( tgt < funcCount && !mayReturn[tgt] )
+			{
+				cut.PushLast(directSiteAddr[i][s]);
+			}
+		}
+
+		if( !asNoRetReachableWithout(funcs[i], cut) )
+		{
+			mayReturn[i] = true;
+			grew = true;
+		}
+	}
+	return grew;
+}
+
+// The module's one metadata pass. It settles every per-function result
+// together: the memory-access scopes, and the minimum access masks,
+// calls-delegate flags and halting verdicts. They share one id map, one
+// dispatch walk (GetDispatchTargets) and one round loop; each computation
+// keeps its own transfer function, because they answer different questions
+// over different lattices.
+//
+// Called after Build() completes, so all class types and function bodies are
+// finalized. Idempotent: a pure function of current module state, re-runnable
+// at any time. A function's memory-access byte is written only when its value
+// changes, so re-running the pass while contexts execute this module writes no
+// memory-access byte.
 void asCModule::ComputeTransitiveFunctionMetadata()
 {
 	asUINT funcCount = (asUINT)m_scriptFunctions.GetLength();
@@ -2365,11 +2552,13 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	// Build id -> index map over m_scriptFunctions only. Init funcs are never
 	// callees (no bytecode CALL targets them), so they don't need to be in this map.
 	asCMap<int, asUINT> funcIdToIndex;
-	for (asUINT i = 0; i < funcCount; i++)
+	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		asCScriptFunction *func = m_scriptFunctions[i];
-		if (func && func->scriptData)
+		if( func && func->scriptData )
+		{
 			funcIdToIndex.Insert(func->id, i);
+		}
 	}
 
 	// Phase 1: build callee lists for regular script functions
@@ -2383,7 +2572,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	unresolved.SetLength(funcCount);
 	directSiteAddr.SetLength(funcCount);
 	directSiteIndex.SetLength(funcCount);
-	for (asUINT i = 0; i < funcCount; i++)
+	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		unresolved[i] = false;
 		BuildCalleeList(m_scriptFunctions[i], funcIdToIndex, callees[i], externalCallees[i], unresolved[i],
@@ -2391,10 +2580,13 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	}
 
 	// Phase 2: init transitive fields from local
-	for (asUINT i = 0; i < funcCount; i++)
+	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		asCScriptFunction *func = m_scriptFunctions[i];
-		if (!func) continue;
+		if( !func )
+		{
+			continue;
+		}
 		func->minTransitiveAccessMask = func->minLocalAccessMask;
 		// localCallsDelegate = the compiler saw a funcdef call site it could
 		// not resolve (caps the LOCAL verdict). unresolved = this pass found
@@ -2412,204 +2604,365 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		// own fields - the fold reads them once, as a true constant - so
 		// folding it here cannot introduce a cycle back into this module or
 		// break the idempotence of this pass.
-		for (asUINT j = 0; j < externalCallees[i].GetLength(); j++)
+		for( asUINT j = 0; j < externalCallees[i].GetLength(); j++ )
 		{
 			asCScriptFunction *ext = externalCallees[i][j];
 			func->minTransitiveAccessMask |= ext->minTransitiveAccessMask;
-			if (ext->transitiveCallsDelegate)
+			if( ext->transitiveCallsDelegate )
+			{
 				func->transitiveCallsDelegate = true;
+			}
 			// Same NO-doesn't-cross-a-call-edge rule as phase 4.
 			int extHalts = ext->transitiveHalts == asHALTS_NO
 				? (int)asHALTS_UNKNOWN : (int)ext->transitiveHalts;
-			if (extHalts > (int)func->transitiveHalts)
+			if( extHalts > (int)func->transitiveHalts )
+			{
 				func->transitiveHalts = extHalts;
+			}
 		}
 
 		// BuildCalleeList's poisonings (shared targets, imports,
 		// unresolvable dispatch) contribute no call edges, so an
 		// unresolved site must cost precision, not soundness: a
 		// function whose calls are not all modeled cannot promise YES.
-		if (func->transitiveCallsDelegate && func->transitiveHalts == asHALTS_YES)
+		if( func->transitiveCallsDelegate && func->transitiveHalts == asHALTS_YES )
+		{
 			func->transitiveHalts = asHALTS_UNKNOWN;
+		}
 	}
 
 	// Phase 3: recursion check - any regular function that can reach itself in the
 	// call graph has unknown halting (unless already NO). Must run before fixed-point
 	// so UNKNOWN values from cycles propagate to callers outside the cycle.
-	for (asUINT i = 0; i < funcCount; i++)
+	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		asCScriptFunction *func = m_scriptFunctions[i];
-		if (!func || !func->scriptData) continue;
-		if (func->transitiveHalts >= asHALTS_UNKNOWN) continue;
+		if( !func || !func->scriptData )
+		{
+			continue;
+		}
+		if( func->transitiveHalts >= asHALTS_UNKNOWN )
+		{
+			continue;
+		}
 
 		asCArray<bool> visited;
 		visited.SetLength(funcCount);
-		for (asUINT v = 0; v < funcCount; v++) visited[v] = false;
+		for( asUINT v = 0; v < funcCount; v++ )
+		{
+			visited[v] = false;
+		}
 
 		asCArray<asUINT> stack;
-		for (asUINT j = 0; j < callees[i].GetLength(); j++)
+		for( asUINT j = 0; j < callees[i].GetLength(); j++ )
+		{
 			stack.PushLast(callees[i][j]);
+		}
 
 		bool selfReachable = false;
-		while (stack.GetLength() > 0)
+		while( stack.GetLength() > 0 )
 		{
 			asUINT cur = stack[stack.GetLength() - 1];
 			stack.PopLast();
 
-			if (cur == i) { selfReachable = true; break; }
-			if (visited[cur]) continue;
+			if( cur == i )
+			{
+				selfReachable = true;
+				break;
+			}
+			if( visited[cur] )
+			{
+				continue;
+			}
 			visited[cur] = true;
 
-			for (asUINT j = 0; j < callees[cur].GetLength(); j++)
+			for( asUINT j = 0; j < callees[cur].GetLength(); j++ )
+			{
 				stack.PushLast(callees[cur][j]);
+			}
 		}
 
-		if (selfReachable && func->transitiveHalts < asHALTS_UNKNOWN)
+		if( selfReachable && func->transitiveHalts < asHALTS_UNKNOWN )
+		{
 			func->transitiveHalts = asHALTS_UNKNOWN;
-	}
-
-	// Phase 4: Fixed-point iteration - propagate transitive metadata along the
-	// call graph for regular funcs.
-	// Terminates: each field only ever moves up its finite lattice (mask
-	// bits set, delegate flag false->true, halts YES<UNKNOWN<NO) per pass,
-	// never back down, so a pass with no field movement is a true fixpoint.
-	bool changed = true;
-	while (changed)
-	{
-		changed = false;
-		for (asUINT i = 0; i < funcCount; i++)
-		{
-			asCScriptFunction *func = m_scriptFunctions[i];
-			if (!func || !func->scriptData) continue;
-
-			for (asUINT j = 0; j < callees[i].GetLength(); j++)
-			{
-				asUINT calleeIdx = callees[i][j];
-				asCScriptFunction *callee = m_scriptFunctions[calleeIdx];
-				if (!callee) continue;
-
-				asDWORD newMask = func->minTransitiveAccessMask | callee->minTransitiveAccessMask;
-				if (newMask != func->minTransitiveAccessMask)
-				{
-					func->minTransitiveAccessMask = newMask;
-					changed = true;
-				}
-
-				if (!func->transitiveCallsDelegate && callee->transitiveCallsDelegate)
-				{
-					func->transitiveCallsDelegate = true;
-					// The flag can newly appear on a caller already settled
-					// at YES from an earlier iteration; cap it here so no
-					// propagation ordering leaves a flagged function at YES.
-					if (func->transitiveHalts == asHALTS_YES)
-						func->transitiveHalts = asHALTS_UNKNOWN;
-					changed = true;
-				}
-
-				// NO must not cross a call edge: whether the caller halts then
-				// depends on whether this call site is reached, which the
-				// graph doesn't track. A never-halting callee contributes
-				// UNKNOWN; a function is NO only by its own control flow.
-				int calleeHalts = callee->transitiveHalts == asHALTS_NO
-					? (int)asHALTS_UNKNOWN : (int)callee->transitiveHalts;
-				int newHalts = func->transitiveHalts > calleeHalts
-					? func->transitiveHalts : calleeHalts;
-				if (newHalts != func->transitiveHalts)
-				{
-					func->transitiveHalts = newHalts;
-					changed = true;
-				}
-			}
 		}
 	}
 
-	// Phase 4b: recover asHALTS_NO across call edges the caller must reach.
-	//
-	// Phase 4 folds a callee's NO down to UNKNOWN, because whether the caller
-	// halts then depends on whether the call site is reached — which the call
-	// graph alone does not track. That costs an accurate NO on code whose
-	// divergence is obvious on sight: `void f() { spin(); }` and
-	// `void f() { f(); }` both read as "never returns" at a glance. The byte
-	// code answers the question the call graph cannot.
-	//
-	// Least fixed point on "may return normally". A function enters mayReturn
-	// once a RET is reachable from entry with every call to a not-yet-admitted
-	// direct target cut. Starting from the empty set and only ever growing is
-	// what lets this prove self- and mutual recursion: `f` is admitted only if
-	// it can reach a RET *without* its call to `f`, so `void f() { f(); }`
-	// never enters and is NO. Whatever never enters cannot return by any path.
-	//
-	// Only single-target direct asBC_CALL sites are ever cut. Virtual
-	// dispatch, imports, delegates and anything unresolved is absent from the
-	// site table and so always counts as returning, which can only keep a
-	// function out of NO. Terminates because mayReturn only grows and is
-	// bounded by funcCount; cost is one CFG walk per unadmitted function per
-	// pass, so a deep call chain costs more passes than a broad one.
+	// Memory access: the least fixed point from {None, None}. A scan is
+	// monotone in its callees' scopes and in the destructors it consults:
+	// reads are floored at WorldStable, a write scope is never WorldStable,
+	// and a returned reference's origin maps WorldStable to None. So scopes
+	// only rise, through eight values, and the loop ends. Round-robin rather
+	// than a worklist, because a function also depends on destructors it
+	// never calls directly.
+	asSMemoryAccessTable table;
+	table.funcIdToIndex = &funcIdToIndex;
+	table.access.SetLength(funcCount);
+	table.drops.SetLength(funcCount);
+	asCArray<bool> pinned, changedNow;
+	pinned.SetLength(funcCount);
+	changedNow.SetLength(funcCount);
+	for( asUINT i = 0; i < funcCount; i++ )
 	{
-		asCArray<bool> mayReturn;
-		mayReturn.SetLength(funcCount);
-		for (asUINT i = 0; i < funcCount; i++) mayReturn[i] = false;
+		table.access[i] = asPackMemoryAccess(asMA_NONE, asMA_NONE);
+		table.drops[i] = false;
+		pinned[i] = false;
+		changedNow[i] = false;
+	}
+	asCMemoryAccessScanner scanner(m_engine, this, &table);
 
-		bool grew = true;
-		while (grew)
+	// The first memory-access round, in declaration order, also records each
+	// function's direct script callees: the callees of function i are
+	// memCallees[calleeStart[i]] up to memCallees[calleeStart[i+1]]
+	asCArray<asUINT> order, memCallees, calleeStart, log;
+	calleeStart.SetLength(funcCount + 1);
+	calleeStart[0] = 0;
+	for( asUINT i = 0; i < funcCount; i++ )
+	{
+		if( m_scriptFunctions[i] && m_scriptFunctions[i]->scriptData )
 		{
-			grew = false;
-			for (asUINT i = 0; i < funcCount; i++)
+			order.PushLast(i);
+		}
+	}
+	bool memChanged = false;
+	for( asUINT i = 0; i < funcCount; i++ )
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if( func && func->scriptData )
+		{
+			log.SetLength(0);
+			scanner.SetCalleeLog(&log);
+			asSMemoryScanResult res = scanner.Scan(func);
+			scanner.SetCalleeLog(0);
+			asBYTE packed = asPackMemoryAccess(res.read, res.write);
+			if( packed != table.access[i] || res.dropsStoredHandle != table.drops[i] )
 			{
-				if (mayReturn[i]) continue;
+				table.access[i] = packed;
+				table.drops[i] = res.dropsStoredHandle;
+				changedNow[i] = true;
+				memChanged = true;
+			}
+			for( asUINT n = 0; n < log.GetLength(); n++ )
+			{
+				memCallees.PushLast(log[n]);
+			}
+		}
+		calleeStart[i + 1] = memCallees.GetLength();
+	}
 
-				asCScriptFunction *func = m_scriptFunctions[i];
-				if (!func || !func->scriptData)
+	// Later rounds visit callees before their callers, in a depth-first
+	// post-order over the recorded calls, so that a call chain settles in a
+	// few rounds whatever order its functions are declared in
+	if( memChanged )
+	{
+		asCArray<asUINT> postOrder, path, next;
+		asCArray<bool> visited;
+		visited.SetLength(funcCount);
+		for( asUINT i = 0; i < funcCount; i++ )
+		{
+			visited[i] = false;
+		}
+		for( asUINT n = 0; n < order.GetLength(); n++ )
+		{
+			if( visited[order[n]] )
+			{
+				continue;
+			}
+			visited[order[n]] = true;
+			path.PushLast(order[n]);
+			next.PushLast(calleeStart[order[n]]);
+			while( path.GetLength() )
+			{
+				asUINT at = path[path.GetLength() - 1];
+				asUINT &edge = next[next.GetLength() - 1];
+				if( edge < calleeStart[at + 1] )
 				{
-					// Nothing to walk, so nothing can be proven. Admit it so
-					// its callers are never cut on its account.
-					mayReturn[i] = true;
-					grew = true;
-					continue;
+					asUINT callee = memCallees[edge++];
+					if( !visited[callee] )
+					{
+						visited[callee] = true;
+						path.PushLast(callee);
+						next.PushLast(calleeStart[callee]);
+					}
 				}
-
-				asCArray<asUINT> cut;
-				for (asUINT s = 0; s < directSiteAddr[i].GetLength(); s++)
+				else
 				{
-					asUINT tgt = directSiteIndex[i][s];
-					if (tgt == asMODULE_SITE_DIVERGES)
-						cut.PushLast(directSiteAddr[i][s]);
-					else if (tgt < funcCount && !mayReturn[tgt])
-						cut.PushLast(directSiteAddr[i][s]);
-				}
-
-				if (!asNoRetReachableWithout(func, cut))
-				{
-					mayReturn[i] = true;
-					grew = true;
+					postOrder.PushLast(at);
+					path.PopLast();
+					next.PopLast();
 				}
 			}
 		}
+		order = postOrder;
+	}
 
-		for (asUINT i = 0; i < funcCount; i++)
+	// Phase 4: the round loop. Each round runs, over `order`, whichever of
+	// three monotone computations has not yet settled:
+	//
+	// - Memory access: rescans every function not pinned. Fail closed if the
+	//   scopes keep changing past what a monotone scan can do: whatever still
+	//   changes is pinned at {Program, Program}, dropping stored handles, and
+	//   the rounds go on so that its callers see the pinned result. Each time
+	//   this happens at least one more function is pinned, so the loop still
+	//   ends.
+	//
+	// - Phase 4 proper: the transitive fold of access masks, calls-delegate
+	//   flags and halting along the call graph. Terminates: each field only
+	//   ever moves up its finite lattice (mask bits set, delegate flag
+	//   false->true, halts YES<UNKNOWN<NO) per round, never back down, so a
+	//   round with no field movement is a true fixpoint.
+	//
+	// - Phase 4b: the least fixed point on "may return normally", which
+	//   recovers asHALTS_NO across call edges the caller must reach. Phase 4
+	//   folds a callee's NO down to UNKNOWN, because whether the caller halts
+	//   then depends on whether the call site is reached — which the call graph
+	//   alone does not track. That costs an accurate NO on code whose
+	//   divergence is obvious on sight: `void f() { spin(); }` and
+	//   `void f() { f(); }` both read as "never returns" at a glance. The
+	//   byte code answers the question the call graph cannot. A function
+	//   enters mayReturn once a RET is reachable from entry with every call
+	//   to a not-yet-admitted direct target cut. Starting from the empty set
+	//   and only ever growing is what lets this prove self- and mutual
+	//   recursion: `f` is admitted only if it can reach a RET *without* its
+	//   call to `f`, so `void f() { f(); }` never enters and is NO. Whatever
+	//   never enters cannot return by any path. Only single-target direct
+	//   asBC_CALL sites are ever cut. Virtual dispatch, imports, delegates
+	//   and anything unresolved is absent from the site table and so always
+	//   counts as returning, which can only keep a function out of NO.
+	//   Terminates because mayReturn only grows and is bounded by funcCount;
+	//   cost is one CFG walk per unadmitted function per round, so a deep
+	//   call chain costs more rounds than a broad one.
+	//
+	// The three read disjoint state, so sharing rounds changes none of their
+	// results: each settles to the fixed point it reaches alone, and the
+	// memory-access rounds run in the same order and number as they would
+	// alone, which is what the round cap counts.
+	asCArray<bool> mayReturn;
+	mayReturn.SetLength(funcCount);
+	for( asUINT i = 0; i < funcCount; i++ )
+	{
+		// Nothing to walk, so nothing can be proven. Admit it so its callers
+		// are never cut on its account.
+		asCScriptFunction *func = m_scriptFunctions[i];
+		mayReturn[i] = !func || !func->scriptData;
+	}
+
+	const asUINT maxRounds = 16 * 8;
+	asUINT rounds = 1;
+	bool foldChanged = true;
+	bool grew = true;
+	while( memChanged || foldChanged || grew )
+	{
+		if( memChanged )
 		{
-			asCScriptFunction *func = m_scriptFunctions[i];
-			if (!func || !func->scriptData) continue;
-			if (mayReturn[i]) continue;
-			// A function already settled at YES cannot also be unable to
-			// return. Consistent analysis never produces the combination, but
-			// LoadByteCode restores verdicts from a stream this process did
-			// not produce, so prefer the weaker claim over trusting either.
-			if (func->transitiveHalts == asHALTS_YES) continue;
-			func->transitiveHalts = asHALTS_NO;
+			memChanged = ScanMemoryAccessRound(scanner, m_scriptFunctions, order, table, pinned, changedNow);
+			rounds++;
+			if( memChanged && rounds >= maxRounds )
+			{
+				for( asUINT i = 0; i < funcCount; i++ )
+				{
+					if( changedNow[i] )
+					{
+						pinned[i] = true;
+						table.access[i] = asPackMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+						table.drops[i] = true;
+					}
+				}
+				rounds = 0;
+			}
+		}
+		if( foldChanged )
+		{
+			foldChanged = FoldTransitiveMetadataRound(m_scriptFunctions, order, callees);
+		}
+		if( grew )
+		{
+			grew = AdmitMayReturnRound(m_scriptFunctions, order, directSiteAddr, directSiteIndex, mayReturn);
+		}
+	}
+
+	// Phase 4b's verdict: whatever never entered mayReturn cannot return by
+	// any path
+	for( asUINT i = 0; i < funcCount; i++ )
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if( !func || !func->scriptData )
+		{
+			continue;
+		}
+		if( mayReturn[i] )
+		{
+			continue;
+		}
+		// A function already settled at YES cannot also be unable to
+		// return. Consistent analysis never produces the combination, but
+		// LoadByteCode restores verdicts from a stream this process did
+		// not produce, so prefer the weaker claim over trusting either.
+		if( func->transitiveHalts == asHALTS_YES )
+		{
+			continue;
+		}
+		func->transitiveHalts = asHALTS_NO;
+	}
+
+	for( asUINT i = 0; i < funcCount; i++ )
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if( func && func->scriptData && func->memoryAccess != table.access[i] )
+		{
+			func->memoryAccess = table.access[i];
+		}
+	}
+
+	// A virtual or interface method has no body. A host asking about it gets
+	// the join over everything a call through it can reach.
+	for( asUINT i = 0; i < funcCount; i++ )
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if( !func || (func->funcType != asFUNC_VIRTUAL && func->funcType != asFUNC_INTERFACE) )
+		{
+			continue;
+		}
+		asEMemoryAccess r = asMA_PROGRAM, w = asMA_PROGRAM;
+		asCArray<asCScriptFunction*> targets;
+		if( GetDispatchTargets(func, targets) )
+		{
+			r = w = asMA_NONE;
+			for( asUINT n = 0; n < targets.GetLength(); n++ )
+			{
+				asEMemoryAccess tr, tw;
+				bool td;
+				scanner.AccessOf(targets[n], tr, tw, td);
+				if( tr > r )
+				{
+					r = tr;
+				}
+				if( tw > w )
+				{
+					w = tw;
+				}
+			}
+		}
+		asBYTE packed = asPackMemoryAccess(r, w);
+		if( func->memoryAccess != packed )
+		{
+			func->memoryAccess = packed;
 		}
 	}
 
 	// Phase 5: Global-property init funcs. These are pure sources — no bytecode
 	// CALLs them, so they cannot appear in any cycle. Their callees live in
 	// m_scriptFunctions and are fully settled after phase 4, so one propagation
-	// pass is sufficient.
+	// pass, and one memory-access scan against the settled table, is final.
 	asCSymbolTableIterator<asCGlobalProperty> globIt = m_scriptGlobals.List();
-	while (globIt)
+	while( globIt )
 	{
 		asCScriptFunction *initFunc = (*globIt)->GetInitFunc();
 		globIt++;
-		if (!initFunc) continue;
+		if( !initFunc )
+		{
+			continue;
+		}
 
 		asCArray<asUINT> initCallees;
 		asCArray<asCScriptFunction*> initExternalCallees;
@@ -2628,43 +2981,63 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		// External fixed callees: same constant fold as phase 2 (shared
 		// functions are frozen at first compile, so this cannot form a
 		// cycle back into this module's init funcs).
-		for (asUINT j = 0; j < initExternalCallees.GetLength(); j++)
+		for( asUINT j = 0; j < initExternalCallees.GetLength(); j++ )
 		{
 			asCScriptFunction *ext = initExternalCallees[j];
 			initFunc->minTransitiveAccessMask |= ext->minTransitiveAccessMask;
-			if (ext->transitiveCallsDelegate)
+			if( ext->transitiveCallsDelegate )
+			{
 				initFunc->transitiveCallsDelegate = true;
+			}
 			// Same NO-doesn't-cross-a-call-edge rule as phase 4.
 			int extHalts = ext->transitiveHalts == asHALTS_NO
 				? (int)asHALTS_UNKNOWN : (int)ext->transitiveHalts;
-			if (extHalts > (int)initFunc->transitiveHalts)
+			if( extHalts > (int)initFunc->transitiveHalts )
+			{
 				initFunc->transitiveHalts = extHalts;
+			}
 		}
 
 		// BuildCalleeList's poisonings (shared targets, imports,
 		// unresolvable dispatch) contribute no call edges, so an
 		// unresolved site must cost precision, not soundness: a
 		// function whose calls are not all modeled cannot promise YES.
-		if (initFunc->transitiveCallsDelegate && initFunc->transitiveHalts == asHALTS_YES)
+		if( initFunc->transitiveCallsDelegate && initFunc->transitiveHalts == asHALTS_YES )
+		{
 			initFunc->transitiveHalts = asHALTS_UNKNOWN;
+		}
 
-		for (asUINT j = 0; j < initCallees.GetLength(); j++)
+		for( asUINT j = 0; j < initCallees.GetLength(); j++ )
 		{
 			asCScriptFunction *callee = m_scriptFunctions[initCallees[j]];
-			if (!callee) continue;
+			if( !callee )
+			{
+				continue;
+			}
 
 			initFunc->minTransitiveAccessMask |= callee->minTransitiveAccessMask;
-			if (callee->transitiveCallsDelegate)
+			if( callee->transitiveCallsDelegate )
 			{
 				initFunc->transitiveCallsDelegate = true;
-				if (initFunc->transitiveHalts == asHALTS_YES)
+				if( initFunc->transitiveHalts == asHALTS_YES )
+				{
 					initFunc->transitiveHalts = asHALTS_UNKNOWN;
+				}
 			}
 			// Same NO-doesn't-cross-a-call-edge rule as phase 4.
 			int calleeHalts = callee->transitiveHalts == asHALTS_NO
 				? (int)asHALTS_UNKNOWN : (int)callee->transitiveHalts;
-			if (calleeHalts > initFunc->transitiveHalts)
+			if( calleeHalts > initFunc->transitiveHalts )
+			{
 				initFunc->transitiveHalts = calleeHalts;
+			}
+		}
+
+		asSMemoryScanResult res = scanner.Scan(initFunc);
+		asBYTE packed = asPackMemoryAccess(res.read, res.write);
+		if( initFunc->memoryAccess != packed )
+		{
+			initFunc->memoryAccess = packed;
 		}
 	}
 
@@ -2676,6 +3049,20 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	// "unresolved" and downgrade an otherwise YES caller to UNKNOWN. The cost
 	// of retention is a handful of pointers per script function, which is not
 	// worth trading a substrate guarantee for.
+}
+
+// A CompileFunction or CompileMethod product that was not added to the
+// module: nothing calls it, so one scan against the module's stored results
+// is final.
+void asCModule::ComputeMemoryAccessOfDetachedFunction(asCScriptFunction *func)
+{
+	asCMemoryAccessScanner scanner(m_engine, this, 0);
+	asSMemoryScanResult res = scanner.Scan(func);
+	asBYTE packed = asPackMemoryAccess(res.read, res.write);
+	if( func->memoryAccess != packed )
+	{
+		func->memoryAccess = packed;
+	}
 }
 #endif // !AS_NO_COMPILER
 

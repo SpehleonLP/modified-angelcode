@@ -212,6 +212,10 @@ public:
 		mutable int refCount;
 		asUINT iterGuard;
 
+		// The dictionary that produced the iterator. Only compared, never dereferenced,
+		// so that an iterator handed to another dictionary can be refused
+		const CScriptDictionary *owner;
+
 		CScriptDictIter(const CScriptDictionary* dict);
 		~CScriptDictIter();
 	};

@@ -147,6 +147,27 @@ struct asSSystemFunctionInterface;
 
 void RegisterScriptFunction(asCScriptEngine *engine);
 
+inline asBYTE          asPackMemoryAccess(asEMemoryAccess read, asEMemoryAccess write) { return asBYTE((read << 4) | write); }
+inline asEMemoryAccess asMemoryAccessRead(asBYTE packed)  { return asEMemoryAccess((packed >> 4) & 7); }
+inline asEMemoryAccess asMemoryAccessWrite(asBYTE packed) { return asEMemoryAccess(packed & 7); }
+
+// An out-of-range scope (bit 3 set) from a corrupt or foreign stream must never read
+// as narrower than Unset, which masking with & 7 would do (0x8 would become None)
+inline asBYTE asSanitizeMemoryAccess(asBYTE packed)
+{
+	asBYTE read  = asBYTE((packed >> 4) & 15);
+	asBYTE write = asBYTE(packed & 15);
+	if( read & 8 )
+	{
+		read = asMA_UNSET;
+	}
+	if( write & 8 )
+	{
+		write = asMA_UNSET;
+	}
+	return asBYTE((read << 4) | write);
+}
+
 class asCScriptFunction : public asIScriptFunction
 {
 public:
@@ -174,6 +195,8 @@ public:
 	bool                 GetTransitiveCallsDelegate() const override;
 	asEHalts             GetLocalHalts() const override;
 	asEHalts             GetTransitiveHalts() const override;
+	int                  SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write);
+	void                 GetMemoryAccess(asEMemoryAccess *read, asEMemoryAccess *write) const;
 	void                *GetAuxiliary() const;
 
 	// Function signature
@@ -327,6 +350,9 @@ public:
 	asCArray<asETypeModifiers>   inOutFlags;
 	asCArray<asCString *>        defaultArgs;
 	asSFunctionTraits            traits;
+	// Read scope in the high nibble, write scope in the low nibble. Bit 3 of
+	// each nibble is reserved. Placed here to fill the padding before objectType.
+	asBYTE                       memoryAccess;
 	asCObjectType               *objectType;
 	int                          signatureId;
 

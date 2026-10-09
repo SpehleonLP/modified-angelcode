@@ -255,16 +255,16 @@ int RegisterScriptSocket(asIScriptEngine* engine)
 
 	// Register the socket class with the script engine
 	engine->RegisterObjectType("socket", 0, asOBJ_REF);
-	r = engine->RegisterObjectBehaviour("socket", asBEHAVE_FACTORY, "socket @f()", asFUNCTION(CScriptSocket_Factory), asCALL_CDECL); assert(r >= 0);
-	r = engine->RegisterObjectBehaviour("socket", asBEHAVE_ADDREF, "void f()", asMETHOD(CScriptSocket, AddRef), asCALL_THISCALL); assert(r >= 0);
-	r = engine->RegisterObjectBehaviour("socket", asBEHAVE_RELEASE, "void f()", asMETHOD(CScriptSocket, Release), asCALL_THISCALL); assert(r >= 0);
+	r = engine->RegisterObjectBehaviour("socket", asBEHAVE_FACTORY, "socket @f()", asFUNCTION(CScriptSocket_Factory), asCALL_CDECL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE); assert(r >= 0);
+	r = engine->RegisterObjectBehaviour("socket", asBEHAVE_ADDREF, "void f()", asMETHOD(CScriptSocket, AddRef), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_NONE); assert(r >= 0);
+	r = engine->RegisterObjectBehaviour("socket", asBEHAVE_RELEASE, "void f()", asMETHOD(CScriptSocket, Release), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
 
-	r = engine->RegisterObjectMethod("socket", "int listen(uint16 port)", asMETHOD(CScriptSocket, Listen), asCALL_THISCALL); assert(r >= 0);
-	r = engine->RegisterObjectMethod("socket", "int close()", asMETHOD(CScriptSocket, Close), asCALL_THISCALL); assert(r >= 0);
-	r = engine->RegisterObjectMethod("socket", "socket @accept(int64 timeout = 0)", asMETHOD(CScriptSocket, Accept), asCALL_THISCALL); assert(r >= 0);
-	r = engine->RegisterObjectMethod("socket", "int connect(uint ipv4address, uint16 port)", asMETHOD(CScriptSocket, Connect), asCALL_THISCALL); assert(r >= 0);
-	r = engine->RegisterObjectMethod("socket", "int send(const string &in data)", asMETHOD(CScriptSocket, Send), asCALL_THISCALL); assert(r >= 0);
-	r = engine->RegisterObjectMethod("socket", "string receive(int64 timeout = 0)", asMETHOD(CScriptSocket, Receive), asCALL_THISCALL); assert(r >= 0);
+	r = engine->RegisterObjectMethod("socket", "int listen(uint16 port)", asMETHOD(CScriptSocket, Listen), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert(r >= 0);
+	r = engine->RegisterObjectMethod("socket", "int close()", asMETHOD(CScriptSocket, Close), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+	r = engine->RegisterObjectMethod("socket", "socket @accept(int64 timeout = 0)", asMETHOD(CScriptSocket, Accept), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert(r >= 0);
+	r = engine->RegisterObjectMethod("socket", "int connect(uint ipv4address, uint16 port)", asMETHOD(CScriptSocket, Connect), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert(r >= 0);
+	r = engine->RegisterObjectMethod("socket", "int send(const string &in data)", asMETHOD(CScriptSocket, Send), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert(r >= 0);
+	r = engine->RegisterObjectMethod("socket", "string receive(int64 timeout = 0)", asMETHOD(CScriptSocket, Receive), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert(r >= 0);
 
 	return 0;
 }

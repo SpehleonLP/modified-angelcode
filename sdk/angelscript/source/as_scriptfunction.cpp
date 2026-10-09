@@ -167,6 +167,22 @@ void RegisterScriptFunction(asCScriptEngine *engine)
 	// Change the return type so the VM will know the function really returns a handle
 	engine->scriptFunctions[r]->returnType = asCDataType::CreateType(&engine->functionBehaviours, false);
 	engine->scriptFunctions[r]->returnType.MakeHandle(true);
+
+	// The delegate factory allocates a fresh delegate and adds it to the garbage
+	// collector, which is outside this analysis. The analysis never consults AddRef,
+	// so the bound object's AddRef behaviour is assumed to touch only its reference
+	// count: that is a documented host contract.
+	engine->scriptFunctions[r]->SetMemoryAccess(asMA_NONE, asMA_NONE);
+
+	asCObjectType &ot = engine->functionBehaviours;
+	engine->scriptFunctions[ot.beh.addref]->SetMemoryAccess(asMA_NONE, asMA_NONE);
+	// Releasing a delegate may release, and so destroy, the object it holds
+	engine->scriptFunctions[ot.beh.release]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+	engine->scriptFunctions[ot.beh.gcGetRefCount]->SetMemoryAccess(asMA_THIS, asMA_NONE);
+	engine->scriptFunctions[ot.beh.gcSetFlag]->SetMemoryAccess(asMA_NONE, asMA_THIS);
+	engine->scriptFunctions[ot.beh.gcGetFlag]->SetMemoryAccess(asMA_THIS, asMA_NONE);
+	engine->scriptFunctions[ot.beh.gcEnumReferences]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
+	engine->scriptFunctions[ot.beh.gcReleaseAllReferences]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
 }
 
 asCScriptFunction *CreateDelegate(asCScriptFunction *func, void *obj)
@@ -377,10 +393,13 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	// Registered natives are trusted to halt (the application vouches for
 	// them). Everything else rests at UNKNOWN until the compiler/module
 	// analysis writes a real verdict — a function whose analysis never runs
-	// (e.g. a CompileFunction product, where the transitive pass is dormant)
+	// (e.g. a CompileFunction product not added to the module, or a
+	// CompileMethod product, neither of which the transitive pass visits)
 	// must not claim YES.
 	localHalts             = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
 	transitiveHalts        = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
+	// Zero would be None, the most permissive scope; an undeclared function must not look safe
+	memoryAccess           = asPackMemoryAccess(asMA_UNSET, asMA_UNSET);
 	nameSpace              = engine->nameSpaces[0];
 	objForDelegate         = 0;
 	funcForDelegate        = 0;
@@ -1573,6 +1592,47 @@ bool    asCScriptFunction::GetLocalCallsDelegate() const { return localCallsDele
 bool    asCScriptFunction::GetTransitiveCallsDelegate() const { return transitiveCallsDelegate; }
 asEHalts asCScriptFunction::GetLocalHalts() const { return (asEHalts)localHalts; }
 asEHalts asCScriptFunction::GetTransitiveHalts() const { return (asEHalts)transitiveHalts; }
+
+// interface
+int asCScriptFunction::SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write)
+{
+	// Script functions get their scopes from the analysis
+	if( funcType != asFUNC_SYSTEM )
+	{
+		return asNOT_SUPPORTED;
+	}
+	if( read > asMA_PROGRAM || write > asMA_PROGRAM )
+	{
+		return asINVALID_ARG;
+	}
+	// World-stable state only changes while the VM is stopped
+	if( write == asMA_WORLD_STABLE )
+	{
+		return asINVALID_ARG;
+	}
+	// A template callback belongs to its type but is called without an object
+	bool hasObject = objectType != 0 && objectType->beh.templateCallback != id;
+	if( !hasObject &&
+		(read == asMA_THIS || read == asMA_OWNED || write == asMA_THIS || write == asMA_OWNED) )
+	{
+		return asINVALID_ARG;
+	}
+	memoryAccess = asPackMemoryAccess(read, write);
+	return asSUCCESS;
+}
+
+// interface
+void asCScriptFunction::GetMemoryAccess(asEMemoryAccess *read, asEMemoryAccess *write) const
+{
+	if( read )
+	{
+		*read = asMemoryAccessRead(memoryAccess);
+	}
+	if( write )
+	{
+		*write = asMemoryAccessWrite(memoryAccess);
+	}
+}
 
 // interface
 int asCScriptFunction::SetJITFunction(asJITFunction jitFunc)

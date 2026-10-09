@@ -244,53 +244,53 @@ void RegisterScriptDateTime(asIScriptEngine *engine)
 
 	if(strstr(asGetLibraryOptions(), "AS_MAX_PORTABILITY")==0)
 	{
-		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f()", asFUNCTION(Construct), asCALL_CDECL_OBJLAST); assert(r >= 0);
-		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f(const datetime &in)", asFUNCTION(ConstructCopy), asCALL_CDECL_OBJFIRST); assert(r >= 0);
-		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f(uint, uint, uint, uint = 0, uint = 0, uint = 0)", asFUNCTION(ConstructSet), asCALL_CDECL_OBJFIRST); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime &opAssign(const datetime &in)", asMETHOD(CDateTime, operator=), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_year() const property", asMETHOD(CDateTime, getYear), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_month() const property", asMETHOD(CDateTime, getMonth), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_day() const property", asMETHOD(CDateTime, getDay), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_hour() const property", asMETHOD(CDateTime, getHour), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_minute() const property", asMETHOD(CDateTime, getMinute), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_second() const property", asMETHOD(CDateTime, getSecond), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_weekDay() const property", asMETHOD(CDateTime, getWeekDay), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "bool setDate(uint year, uint month, uint day)", asMETHOD(CDateTime, setDate), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "bool setTime(uint hour, uint minute, uint second)", asMETHOD(CDateTime, setTime), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "int64 opSub(const datetime &in) const", asMETHODPR(CDateTime, operator-, (const CDateTime &other) const, asINT64), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime opAdd(int64 seconds) const", asMETHOD(CDateTime, operator+), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime opAdd_r(int64 seconds) const", asFUNCTIONPR(operator+, (asINT64 seconds, const CDateTime &other), CDateTime), asCALL_CDECL_OBJLAST); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime &opAddAssign(int64 seconds)", asMETHOD(CDateTime, operator+=), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime opSub(int64 seconds) const", asMETHODPR(CDateTime, operator-, (asINT64) const, CDateTime), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime opSub_r(int64 seconds) const", asFUNCTIONPR(operator-, (asINT64 seconds, const CDateTime &other), CDateTime), asCALL_CDECL_OBJLAST); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime &opSubAssign(int64 seconds)", asMETHOD(CDateTime, operator-=), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "bool opEquals(const datetime &in) const", asMETHODPR(CDateTime, operator==, (const CDateTime &other) const, bool), asCALL_THISCALL); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "int opCmp(const datetime &in) const", asFUNCTION(opCmp), asCALL_CDECL_OBJFIRST); assert(r >= 0);
+		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f()", asFUNCTION(Construct), asCALL_CDECL_OBJLAST); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_THIS); assert(r >= 0);
+		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f(const datetime &in)", asFUNCTION(ConstructCopy), asCALL_CDECL_OBJFIRST); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_THIS); assert(r >= 0);
+		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f(uint, uint, uint, uint = 0, uint = 0, uint = 0)", asFUNCTION(ConstructSet), asCALL_CDECL_OBJFIRST); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime &opAssign(const datetime &in)", asMETHOD(CDateTime, operator=), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_THIS); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_year() const property", asMETHOD(CDateTime, getYear), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_month() const property", asMETHOD(CDateTime, getMonth), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_day() const property", asMETHOD(CDateTime, getDay), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_hour() const property", asMETHOD(CDateTime, getHour), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_minute() const property", asMETHOD(CDateTime, getMinute), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_second() const property", asMETHOD(CDateTime, getSecond), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_weekDay() const property", asMETHOD(CDateTime, getWeekDay), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "bool setDate(uint year, uint month, uint day)", asMETHOD(CDateTime, setDate), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "bool setTime(uint hour, uint minute, uint second)", asMETHOD(CDateTime, setTime), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "int64 opSub(const datetime &in) const", asMETHODPR(CDateTime, operator-, (const CDateTime &other) const, asINT64), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime opAdd(int64 seconds) const", asMETHOD(CDateTime, operator+), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime opAdd_r(int64 seconds) const", asFUNCTIONPR(operator+, (asINT64 seconds, const CDateTime &other), CDateTime), asCALL_CDECL_OBJLAST); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime &opAddAssign(int64 seconds)", asMETHOD(CDateTime, operator+=), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_THIS); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime opSub(int64 seconds) const", asMETHODPR(CDateTime, operator-, (asINT64) const, CDateTime), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime opSub_r(int64 seconds) const", asFUNCTIONPR(operator-, (asINT64 seconds, const CDateTime &other), CDateTime), asCALL_CDECL_OBJLAST); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime &opSubAssign(int64 seconds)", asMETHOD(CDateTime, operator-=), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_THIS); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "bool opEquals(const datetime &in) const", asMETHODPR(CDateTime, operator==, (const CDateTime &other) const, bool), asCALL_THISCALL); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "int opCmp(const datetime &in) const", asFUNCTION(opCmp), asCALL_CDECL_OBJFIRST); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
 	}
 	else
 	{
-		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f()", WRAP_OBJ_LAST(Construct), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f(const datetime &in)", WRAP_OBJ_FIRST(ConstructCopy), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f(uint, uint, uint, uint = 0, uint = 0, uint = 0)", asFUNCTION(ConstructSet_Generic), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime &opAssign(const datetime &in)", WRAP_MFN(CDateTime, operator=), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_year() const property", WRAP_MFN(CDateTime, getYear), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_month() const property", WRAP_MFN(CDateTime, getMonth), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_day() const property", WRAP_MFN(CDateTime, getDay), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_hour() const property", WRAP_MFN(CDateTime, getHour), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_minute() const property", WRAP_MFN(CDateTime, getMinute), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_second() const property", WRAP_MFN(CDateTime, getSecond), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "uint get_weekDay() const property", WRAP_MFN(CDateTime, getWeekDay), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "bool setDate(uint year, uint month, uint day)", WRAP_MFN(CDateTime, setDate), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "bool setTime(uint hour, uint minute, uint second)", WRAP_MFN(CDateTime, setTime), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "int64 opSub(const datetime &in) const", WRAP_MFN_PR(CDateTime, operator-, (const CDateTime &other) const, asINT64), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime opAdd(int64 seconds) const", WRAP_MFN(CDateTime, operator+), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime opAdd_r(int64 seconds) const", WRAP_OBJ_LAST_PR(operator+, (asINT64 seconds, const CDateTime &other), CDateTime), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime &opAddAssign(int64 seconds)", WRAP_MFN(CDateTime, operator+=), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime opSub(int64 seconds) const", WRAP_MFN_PR(CDateTime, operator-, (asINT64) const, CDateTime), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime opSub_r(int64 seconds) const", WRAP_OBJ_LAST_PR(operator-, (asINT64 seconds, const CDateTime &other), CDateTime), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "datetime &opSubAssign(int64 seconds)", WRAP_MFN(CDateTime, operator-=), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "bool opEquals(const datetime &in) const", WRAP_MFN_PR(CDateTime, operator==, (const CDateTime &other) const, bool), asCALL_GENERIC); assert(r >= 0);
-		r = engine->RegisterObjectMethod("datetime", "int opCmp(const datetime &in) const", WRAP_OBJ_FIRST(opCmp), asCALL_GENERIC); assert(r >= 0);
+		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f()", WRAP_OBJ_LAST(Construct), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_THIS); assert(r >= 0);
+		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f(const datetime &in)", WRAP_OBJ_FIRST(ConstructCopy), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_NONE, asMA_THIS); assert(r >= 0);
+		r = engine->RegisterObjectBehaviour("datetime", asBEHAVE_CONSTRUCT, "void f(uint, uint, uint, uint = 0, uint = 0, uint = 0)", asFUNCTION(ConstructSet_Generic), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime &opAssign(const datetime &in)", WRAP_MFN(CDateTime, operator=), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_THIS); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_year() const property", WRAP_MFN(CDateTime, getYear), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_month() const property", WRAP_MFN(CDateTime, getMonth), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_day() const property", WRAP_MFN(CDateTime, getDay), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_hour() const property", WRAP_MFN(CDateTime, getHour), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_minute() const property", WRAP_MFN(CDateTime, getMinute), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_second() const property", WRAP_MFN(CDateTime, getSecond), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "uint get_weekDay() const property", WRAP_MFN(CDateTime, getWeekDay), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "bool setDate(uint year, uint month, uint day)", WRAP_MFN(CDateTime, setDate), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "bool setTime(uint hour, uint minute, uint second)", WRAP_MFN(CDateTime, setTime), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "int64 opSub(const datetime &in) const", WRAP_MFN_PR(CDateTime, operator-, (const CDateTime &other) const, asINT64), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime opAdd(int64 seconds) const", WRAP_MFN(CDateTime, operator+), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime opAdd_r(int64 seconds) const", WRAP_OBJ_LAST_PR(operator+, (asINT64 seconds, const CDateTime &other), CDateTime), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime &opAddAssign(int64 seconds)", WRAP_MFN(CDateTime, operator+=), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_THIS); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime opSub(int64 seconds) const", WRAP_MFN_PR(CDateTime, operator-, (asINT64) const, CDateTime), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime opSub_r(int64 seconds) const", WRAP_OBJ_LAST_PR(operator-, (asINT64 seconds, const CDateTime &other), CDateTime), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "datetime &opSubAssign(int64 seconds)", WRAP_MFN(CDateTime, operator-=), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_THIS); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "bool opEquals(const datetime &in) const", WRAP_MFN_PR(CDateTime, operator==, (const CDateTime &other) const, bool), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
+		r = engine->RegisterObjectMethod("datetime", "int opCmp(const datetime &in) const", WRAP_OBJ_FIRST(opCmp), asCALL_GENERIC); assert(r >= 0); r = engine->GetFunctionById(r)->SetMemoryAccess(asMA_THIS, asMA_NONE); assert(r >= 0);
 	}
 }
 
