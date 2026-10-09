@@ -47,10 +47,20 @@
 
 BEGIN_AS_NAMESPACE
 
+// A parse diagnostic collected for a host that parses without a builder.
+struct sParseMessage
+{
+	asCString text;
+	int       row;
+	int       col;
+};
+
 class asCParser
 {
 public:
 	asCParser(asCBuilder *builder);
+	// No builder: messages go to `messages`, so a host can parse without a module.
+	asCParser(asCScriptEngine *engine, asCArray<sParseMessage> *messages);
 	~asCParser();
 
 	int ParseFunctionDefinition(asCScriptCode *script, bool expectListPattern);
@@ -66,6 +76,10 @@ public:
 	int ParseStatementBlock(asCScriptCode *script, asCScriptNode *block);
 	int ParseVarInit(asCScriptCode *script, asCScriptNode *init);
 	int ParseExpression(asCScriptCode *script);
+
+	// A condition for the host: ASSIGN to the end of the input, types unchecked. ASSIGN, not
+	// EXPR, because a ternary's arms are ASSIGN; entering lower would mis-parse them.
+	int ParseAssignmentExpression(asCScriptCode *script);
 #endif
 
 	asCScriptNode *GetScriptNode();
@@ -189,6 +203,7 @@ protected:
 
 	asCScriptEngine *engine;
 	asCBuilder      *builder;
+	asCArray<sParseMessage> *messages;
 	asCScriptCode   *script;
 	asCScriptNode   *scriptNode;
 

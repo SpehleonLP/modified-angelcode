@@ -232,6 +232,11 @@ enum EVarGlobOrMem
 class asCCompiler
 {
 public:
+	// Static and public so a host that parses a condition with asCParser can order its operators
+	// the way the compiler does, without a compiler instance.
+	static void ConvertToPostFix(asCScriptNode *expr, asCArray<asCScriptNode *> &postfix);
+	static int  GetPrecedence(asCScriptNode *op);
+
 	asCCompiler(asCScriptEngine *engine);
 	~asCCompiler();
 
@@ -302,7 +307,6 @@ protected:
 	void CompileInitAsCopy(asCDataType &type, int offset, asCExprContext *ctx, asCExprContext *arg, asCScriptNode *node, bool derefDestination, EVarGlobOrMem isVarGlobOrMem = asVGM_VARIABLE);
 
 	// Helper functions
-	void ConvertToPostFix(asCScriptNode *expr, asCArray<asCScriptNode *> &postfix);
 	int  ProcessPropertyGetAccessor(asCExprContext *ctx, asCScriptNode *node);
 	int  ProcessPropertySetAccessor(asCExprContext *ctx, asCExprContext *arg, asCScriptNode *node);
 	int  ProcessPropertyGetSetAccessor(asCExprContext *ctx, asCExprContext *lctx, asCExprContext *rctx, eTokenType op, asCScriptNode *errNode);
@@ -386,7 +390,6 @@ protected:
 
 	asUINT ProcessStringConstant(asCString &str, asCScriptNode *node, bool processEscapeSequences = true);
 	void ProcessHeredocStringConstant(asCString &str, asCScriptNode *node);
-	int  GetPrecedence(asCScriptNode *op);
 	void Error(const asCString &msg, asCScriptNode *node);
 	void Warning(const asCString &msg, asCScriptNode *node);
 	void Information(const asCString &msg, asCScriptNode *node);

@@ -64,7 +64,20 @@ BEGIN_AS_NAMESPACE
 asCParser::asCParser(asCBuilder *builder)
 {
 	this->builder    = builder;
+	this->messages   = 0;
 	this->engine     = builder->engine;
+
+	script                = 0;
+	scriptNode            = 0;
+	checkValidTypes       = false;
+	isParsingAppInterface = false;
+}
+
+asCParser::asCParser(asCScriptEngine *engine, asCArray<sParseMessage> *messages)
+{
+	this->builder    = 0;
+	this->messages   = messages;
+	this->engine     = engine;
 
 	script                = 0;
 	scriptNode            = 0;
@@ -1072,7 +1085,17 @@ void asCParser::Error(const asCString &text, sToken *token)
 	script->ConvertPosToRowCol(token->pos, &row, &col);
 
 	if( builder )
+	{
 		builder->WriteError(script->name, text, row, col);
+	}
+	else if( messages )
+	{
+		sParseMessage m;
+		m.text = text;
+		m.row  = row;
+		m.col  = col;
+		messages->PushLast(m);
+	}
 }
 
 void asCParser::Warning(const asCString &text, sToken *token)
@@ -1081,7 +1104,17 @@ void asCParser::Warning(const asCString &text, sToken *token)
 	script->ConvertPosToRowCol(token->pos, &row, &col);
 
 	if( builder )
+	{
 		builder->WriteWarning(script->name, text, row, col);
+	}
+	else if( messages )
+	{
+		sParseMessage m;
+		m.text = text;
+		m.row  = row;
+		m.col  = col;
+		messages->PushLast(m);
+	}
 }
 
 void asCParser::Info(const asCString &text, sToken *token)
@@ -1095,7 +1128,17 @@ void asCParser::Info(const asCString &text, sToken *token)
 	script->ConvertPosToRowCol(token->pos, &row, &col);
 
 	if( builder )
+	{
 		builder->WriteInfo(script->name, text, row, col, false);
+	}
+	else if( messages )
+	{
+		sParseMessage m;
+		m.text = text;
+		m.row  = row;
+		m.col  = col;
+		messages->PushLast(m);
+	}
 }
 
 bool asCParser::IsRealType(int tokenType)
@@ -2555,6 +2598,32 @@ int asCParser::ParseExpression(asCScriptCode *in_script)
 	if( errorWhileParsing )
 		return -1;
 
+	return 0;
+}
+
+int asCParser::ParseAssignmentExpression(asCScriptCode *in_script)
+{
+	Reset();
+
+	this->script = in_script;
+
+	// No builder to ask whether an identifier names a type; the host resolves names later.
+	checkValidTypes = false;
+
+	scriptNode = ParseAssignment();
+	if( errorWhileParsing )
+	{
+		return -1;
+	}
+
+	sToken t;
+	GetToken(&t);
+	if( t.type != ttEnd )
+	{
+		Error(ExpectedToken("<end of condition>"), &t);
+		Error(InsteadFound(t), &t);
+		return -1;
+	}
 	return 0;
 }
 
