@@ -15593,8 +15593,14 @@ bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCA
 		{
 			if( !func->parameterTypes[n].IsReference() )
 			{
-				// SetArgObject itself copies an object passed by value
+				// SetArgObject itself copies an object passed by value, but reports success
+				// even when that copy fails, so the fold checks the slot it filled
 				r = exec->SetArgObject(n, literalsBefore[n]);
+				void **slot = (void**)exec->GetAddressOfArg(n);
+				if( r >= 0 && (slot == 0 || *slot == 0) )
+				{
+					r = asERROR;
+				}
 			}
 			else if( func->parameterTypes[n].IsReadOnly() )
 			{

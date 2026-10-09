@@ -404,6 +404,7 @@ static asUINT NHashConst(const std::string &s) { ++g_calls; return Fnv1a(s); }
 static asUINT NHashRef(std::string &s) { ++g_calls; asUINT h = Fnv1a(s); s = "clobbered"; return h; }
 static asUINT NHashValue(std::string s) { ++g_calls; return Fnv1a(s); }
 static std::string NFormat(int x) { ++g_calls; return std::to_string(x); }
+static asUINT NHash2(const std::string &s, int x) { ++g_calls; return Fnv1a(s) ^ asUINT(x); }
 
 static asIScriptEngine *MakeStringEngine(COutStream &out)
 {
@@ -415,6 +416,7 @@ static asIScriptEngine *MakeStringEngine(COutStream &out)
 	Declare(engine, engine->RegisterGlobalFunction("uint hashr(string &in)", asFUNCTION(NHashRef), asCALL_CDECL), asMA_NONE, asMA_NONE);
 	Declare(engine, engine->RegisterGlobalFunction("uint hashv(string)", asFUNCTION(NHashValue), asCALL_CDECL), asMA_NONE, asMA_NONE);
 	Declare(engine, engine->RegisterGlobalFunction("string fmt(int)", asFUNCTION(NFormat), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("uint hash2(const string &in, int)", asFUNCTION(NHash2), asCALL_CDECL), asMA_NONE, asMA_NONE);
 	return engine;
 }
 
@@ -436,7 +438,9 @@ static bool TestStringArguments()
 		"uint constGlobal() { return hashc(kName); }\n"
 		"uint viaCtor() { return hashc(string(\"Moniker\")); }\n"
 		"uint viaTernary(bool b) { return hashc(b ? \"Moniker\" : \"Other\"); }\n"
-		"uint viaConcat() { return hashc(\"Mon\" + \"iker\"); }\n");
+		"uint viaConcat() { return hashc(\"Mon\" + \"iker\"); }\n"
+		"uint mixed() { return hash2(\"M\", 3); }\n"
+		"uint mixedVar(int x) { return hash2(\"M\", x); }\n");
 	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
 	int afterBuild = g_calls;
 
@@ -451,12 +455,16 @@ static bool TestStringArguments()
 	if( !CallsSystem(mod->GetFunctionByName("viaCtor"), IdOf(engine, "uint hashc(const string &in)")) ) TEST_FAILED;
 	if( !CallsSystem(mod->GetFunctionByName("viaTernary"), IdOf(engine, "uint hashc(const string &in)")) ) TEST_FAILED;
 	if( !CallsSystem(mod->GetFunctionByName("viaConcat"), IdOf(engine, "uint hashc(const string &in)")) ) TEST_FAILED;
+	// A literal mixed with a primitive folds only when the primitive is constant too
+	if( CallsSystem(mod->GetFunctionByName("mixed"), IdOf(engine, "uint hash2(const string &in, int)")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("mixedVar"), IdOf(engine, "uint hash2(const string &in, int)")) ) TEST_FAILED;
 
 	double q = 0;
 	asUINT expected = Fnv1a("Moniker");
 	if( Run(engine, mod->GetFunctionByName("c"), q) != asEXECUTION_FINISHED || q != expected ) TEST_FAILED;
 	if( Run(engine, mod->GetFunctionByName("r"), q) != asEXECUTION_FINISHED || q != expected ) TEST_FAILED;
 	if( Run(engine, mod->GetFunctionByName("v"), q) != asEXECUTION_FINISHED || q != expected ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("mixed"), q) != asEXECUTION_FINISHED || q != (Fnv1a("M") ^ 3u) ) TEST_FAILED;
 	if( g_calls != afterBuild ) TEST_FAILED;
 	if( Run(engine, mod->GetFunctionByName("constGlobal"), q) != asEXECUTION_FINISHED || q != expected ) TEST_FAILED;
 	if( Run(engine, mod->GetFunctionByName("viaCtor"), q) != asEXECUTION_FINISHED || q != expected ) TEST_FAILED;
@@ -466,6 +474,16 @@ static bool TestStringArguments()
 	ctx->Prepare(mod->GetFunctionByName("sw"));
 	ctx->SetArgDWord(0, expected);
 	if( ctx->Execute() != asEXECUTION_FINISHED || ctx->GetReturnDWord() != 1 ) TEST_FAILED;
+	ctx->Prepare(mod->GetFunctionByName("mixedVar"));
+	ctx->SetArgDWord(0, 5);
+	if( ctx->Execute() != asEXECUTION_FINISHED || ctx->GetReturnDWord() != (Fnv1a("M") ^ 5u) ) TEST_FAILED;
+	// Both branches, so a fold that took the first literal in the code would show
+	ctx->Prepare(mod->GetFunctionByName("viaTernary"));
+	ctx->SetArgByte(0, 1);
+	if( ctx->Execute() != asEXECUTION_FINISHED || ctx->GetReturnDWord() != expected ) TEST_FAILED;
+	ctx->Prepare(mod->GetFunctionByName("viaTernary"));
+	ctx->SetArgByte(0, 0);
+	if( ctx->Execute() != asEXECUTION_FINISHED || ctx->GetReturnDWord() != Fnv1a("Other") ) TEST_FAILED;
 	ctx->Release();
 
 	engine->ShutDownAndRelease();
