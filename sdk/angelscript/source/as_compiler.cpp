@@ -15333,6 +15333,24 @@ int asCCompiler::CompileOverloadedDualOperator2(asCScriptNode *node, const char 
 	return 0;
 }
 
+// The string factory's object when arg is exactly a string literal, else 0. Only the
+// literal site marks a string constant, and it compiles to this one PGA; anything more
+// is some other expression whose code a fold would drop.
+static void *StringLiteralOf(asCScriptEngine *engine, asCExprContext *arg)
+{
+	if( !arg->type.isConstant || !arg->type.dataType.IsEqualExceptRefAndConst(engine->stringType) )
+	{
+		return 0;
+	}
+
+	asCByteInstruction *instr = arg->bc.GetFirstInstr();
+	if( instr == 0 || instr->next != 0 || instr->op != asBC_PGA )
+	{
+		return 0;
+	}
+	return (void*)*ARG_PTR(instr->arg);
+}
+
 int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType *objectType, asCArray<asCExprContext*> &args, asCScriptNode *node, bool useVariable, int stackOffset, int funcPtrVar)
 {
 	if( objectType )
@@ -15348,19 +15366,24 @@ int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType
 	objBC.AddCode(&ctx->bc);
 
 	// PrepareFunctionCall moves each constant argument into a temporary variable,
-	// so a call that may fold keeps each argument's value from before it
+	// so a call that may fold keeps each argument's value from before it, and the object of
+	// each string literal, which a non-const &in parameter likewise turns into a temporary
 	asCArray<asCExprValue> argsBefore;
+	asCArray<void*> literalsBefore;
 	bool mayFold = objBC.GetLastInstr() == -1 && CanFoldCall(descr);
 	for( asUINT a = 0; mayFold && a < args.GetLength(); a++ )
 	{
-		// Folding drops the argument code, which must then have had nothing to drop
-		if( args[a]->bc.GetLastInstr() != -1 )
+		// Folding drops the argument code, which must then have had nothing to drop. The
+		// one exception is a string literal's push of the factory's object, which has no effect.
+		void *literal = StringLiteralOf(engine, args[a]);
+		if( args[a]->bc.GetLastInstr() != -1 && literal == 0 )
 		{
 			mayFold = false;
 		}
 		else
 		{
 			argsBefore.PushLast(args[a]->type);
+			literalsBefore.PushLast(literal);
 
 			// An ambiguous enum value is resolved only against the parameter type, which
 			// the copy of the value cannot do on its own
@@ -15382,7 +15405,7 @@ int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType
 		return r;
 	}
 
-	if( mayFold && TryFoldCall(ctx, descr, args, argsBefore) )
+	if( mayFold && TryFoldCall(ctx, descr, args, argsBefore, literalsBefore) )
 	{
 		return 0;
 	}
@@ -15493,10 +15516,11 @@ bool asCCompiler::CanFoldCall(asCScriptFunction *func)
 		IsFoldableValue(func->returnType);
 }
 
-bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCArray<asCExprContext*> &args, asCArray<asCExprValue> &argsBefore)
+bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCArray<asCExprContext*> &args, asCArray<asCExprValue> &argsBefore, asCArray<void*> &literalsBefore)
 {
 	asASSERT( args.GetLength() == func->parameterTypes.GetLength() );
 	asASSERT( argsBefore.GetLength() == args.GetLength() );
+	asASSERT( literalsBefore.GetLength() == args.GetLength() );
 
 	// Each argument's value in the parameter's type
 	asCArray<asQWORD> values;
@@ -15504,12 +15528,23 @@ bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCA
 	for( asUINT n = 0; n < args.GetLength(); n++ )
 	{
 		asCDataType param = func->parameterTypes[n];
-		if( !IsFoldableValue(param) )
+		if( param.IsReference() && func->inOutFlags[n] != asTM_INREF )
 		{
 			return false;
 		}
 
-		if( param.IsReference() && func->inOutFlags[n] != asTM_INREF )
+		// A string literal goes to a string parameter as an object, set up below
+		if( literalsBefore[n] != 0 )
+		{
+			if( !param.IsEqualExceptRefAndConst(engine->stringType) )
+			{
+				return false;
+			}
+			values[n] = 0;
+			continue;
+		}
+
+		if( !IsFoldableValue(param) )
 		{
 			return false;
 		}
@@ -15543,13 +15578,43 @@ bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCA
 	asCArray<asQWORD> copies;
 	copies.SetLength(args.GetLength());
 
+	// A non-const &in string gets its own copy of the literal, which the fold releases;
+	// the factory's object is shared by every use of the literal and must not change
+	asITypeInfo *stringInfo = engine->stringType.GetTypeInfo();
+	asCArray<void*> stringCopies;
+
 	bool finished = false;
 	asQWORD result = 0;
 	int r = exec->Prepare(func);
 	for( asUINT n = 0; r >= 0 && n < args.GetLength(); n++ )
 	{
 		int size = func->parameterTypes[n].GetSizeInMemoryBytes();
-		if( func->parameterTypes[n].IsReference() )
+		if( literalsBefore[n] != 0 )
+		{
+			if( !func->parameterTypes[n].IsReference() )
+			{
+				// SetArgObject itself copies an object passed by value
+				r = exec->SetArgObject(n, literalsBefore[n]);
+			}
+			else if( func->parameterTypes[n].IsReadOnly() )
+			{
+				r = exec->SetArgAddress(n, literalsBefore[n]);
+			}
+			else
+			{
+				void *copy = engine->CreateScriptObjectCopy(literalsBefore[n], stringInfo);
+				if( copy == 0 )
+				{
+					r = asERROR;
+				}
+				else
+				{
+					stringCopies.PushLast(copy);
+					r = exec->SetArgAddress(n, copy);
+				}
+			}
+		}
+		else if( func->parameterTypes[n].IsReference() )
 		{
 			StoreFoldValue(&copies[n], size, values[n]);
 			r = exec->SetArgAddress(n, &copies[n]);
@@ -15595,6 +15660,12 @@ bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCA
 		finished = true;
 	}
 	engine->ReturnContext(exec);
+
+	// Released whether or not the call finished, since the native is done with them either way
+	for( asUINT n = 0; n < stringCopies.GetLength(); n++ )
+	{
+		engine->ReleaseScriptObject(stringCopies[n], stringInfo);
+	}
 
 	if( !finished )
 	{

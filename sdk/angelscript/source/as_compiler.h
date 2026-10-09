@@ -319,7 +319,7 @@ protected:
 	int  MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType *objectType, asCArray<asCExprContext*> &args, asCScriptNode *node, bool useVariable = false, int stackOffset = 0, int funcPtrVar = 0);
 	int  PrepareFunctionCall(int funcId, asCByteCode *bc, asCArray<asCExprContext *> &args);
 	bool CanFoldCall(asCScriptFunction *func);
-	bool TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCArray<asCExprContext*> &args, asCArray<asCExprValue> &argsBefore);
+	bool TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCArray<asCExprContext*> &args, asCArray<asCExprValue> &argsBefore, asCArray<void*> &literalsBefore);
 	void AfterFunctionCall(int funcId, asCArray<asCExprContext*> &args, asCExprContext *ctx, bool deferAll);
 	void ProcessDeferredParams(asCExprContext *ctx, bool processOnlyOutRef = false);
 	int  PrepareArgument(asCDataType *paramType, asCExprContext *ctx, asCScriptNode *node, bool isFunction = false, int refType = 0, bool isMakingCopy = false);

@@ -166,6 +166,10 @@ static int Run(asIScriptEngine *engine, asIScriptFunction *func, double &result)
 	{
 		result = asINT16(ctx->GetReturnWord());
 	}
+	else if( typeId == asTYPEID_UINT32 )
+	{
+		result = ctx->GetReturnDWord();
+	}
 	else
 	{
 		result = int(ctx->GetReturnDWord());
@@ -387,6 +391,113 @@ static bool TestSaveLoad()
 	return fail;
 }
 
+static asUINT Fnv1a(const std::string &s)
+{
+	asUINT h = 2166136261u;
+	for( size_t n = 0; n < s.size(); n++ )
+	{
+		h = (h ^ (unsigned char)s[n]) * 16777619u;
+	}
+	return h;
+}
+static asUINT NHashConst(const std::string &s) { ++g_calls; return Fnv1a(s); }
+static asUINT NHashRef(std::string &s) { ++g_calls; asUINT h = Fnv1a(s); s = "clobbered"; return h; }
+static asUINT NHashValue(std::string s) { ++g_calls; return Fnv1a(s); }
+static std::string NFormat(int x) { ++g_calls; return std::to_string(x); }
+
+static asIScriptEngine *MakeStringEngine(COutStream &out)
+{
+	asIScriptEngine *engine = asCreateScriptEngine();
+	engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+	engine->SetEngineProperty(asEP_FOLD_PURE_CALLS, 1);
+	RegisterStdString(engine);
+	Declare(engine, engine->RegisterGlobalFunction("uint hashc(const string &in)", asFUNCTION(NHashConst), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("uint hashr(string &in)", asFUNCTION(NHashRef), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("uint hashv(string)", asFUNCTION(NHashValue), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("string fmt(int)", asFUNCTION(NFormat), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	return engine;
+}
+
+static bool TestStringArguments()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = MakeStringEngine(out);
+	g_calls = 0;
+	asIScriptModule *mod = Build(engine,
+		"uint c() { return hashc(\"Moniker\"); }\n"
+		"uint r() { return hashr(\"Moniker\"); }\n"
+		"uint v() { return hashv(\"Moniker\"); }\n"
+		"const uint kId = hashc(\"Moniker\");\n"
+		"int sw(uint x) { switch( x ) { case kId: return 1; } return 0; }\n"
+		"string s() { return fmt(5); }\n"
+		"uint nonLiteral(const string &in x) { return hashc(x); }\n"
+		"const string kName = \"Moniker\";\n"
+		"uint constGlobal() { return hashc(kName); }\n"
+		"uint viaCtor() { return hashc(string(\"Moniker\")); }\n"
+		"uint viaTernary(bool b) { return hashc(b ? \"Moniker\" : \"Other\"); }\n"
+		"uint viaConcat() { return hashc(\"Mon\" + \"iker\"); }\n");
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+	int afterBuild = g_calls;
+
+	if( CallsSystem(mod->GetFunctionByName("c"), IdOf(engine, "uint hashc(const string &in)")) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("r"), IdOf(engine, "uint hashr(string &in)")) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("v"), IdOf(engine, "uint hashv(string)")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("s"), IdOf(engine, "string fmt(int)")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("nonLiteral"), IdOf(engine, "uint hashc(const string &in)")) ) TEST_FAILED;
+	// A const global is a variable, not a literal, so it does not fold in this step
+	if( !CallsSystem(mod->GetFunctionByName("constGlobal"), IdOf(engine, "uint hashc(const string &in)")) ) TEST_FAILED;
+	// A string expression with code of its own is not a literal, even with a constant value
+	if( !CallsSystem(mod->GetFunctionByName("viaCtor"), IdOf(engine, "uint hashc(const string &in)")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("viaTernary"), IdOf(engine, "uint hashc(const string &in)")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("viaConcat"), IdOf(engine, "uint hashc(const string &in)")) ) TEST_FAILED;
+
+	double q = 0;
+	asUINT expected = Fnv1a("Moniker");
+	if( Run(engine, mod->GetFunctionByName("c"), q) != asEXECUTION_FINISHED || q != expected ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("r"), q) != asEXECUTION_FINISHED || q != expected ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("v"), q) != asEXECUTION_FINISHED || q != expected ) TEST_FAILED;
+	if( g_calls != afterBuild ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("constGlobal"), q) != asEXECUTION_FINISHED || q != expected ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("viaCtor"), q) != asEXECUTION_FINISHED || q != expected ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("viaConcat"), q) != asEXECUTION_FINISHED || q != expected ) TEST_FAILED;
+
+	asIScriptContext *ctx = engine->CreateContext();
+	ctx->Prepare(mod->GetFunctionByName("sw"));
+	ctx->SetArgDWord(0, expected);
+	if( ctx->Execute() != asEXECUTION_FINISHED || ctx->GetReturnDWord() != 1 ) TEST_FAILED;
+	ctx->Release();
+
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+// hashr clobbers its argument; the literal itself must survive the fold. The std string
+// factory caches a literal by its text, so a clobbered object no longer matches "Moniker"
+// and later uses of the literal get a fresh one. Only code compiled before the fold still
+// holds the shared object, hence before() and after(): whichever is compiled first sees it.
+// They check the length, as "clobbered" is 9 long, because a literal compared in script
+// may itself be the clobbered object.
+static bool TestStringInRefCopy()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = MakeStringEngine(out);
+	asIScriptModule *mod = Build(engine,
+		"string before() { return \"Moniker\"; }\n"
+		"uint r() { return hashr(\"Moniker\"); }\n"
+		"string after() { return \"Moniker\"; }\n"
+		"bool same() { return \"Moniker\" == \"Moniker\" && hashc(\"Moniker\") == r(); }\n"
+		"bool intact() { return before().length() == 7 && after().length() == 7; }\n");
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+	if( CallsSystem(mod->GetFunctionByName("r"), IdOf(engine, "uint hashr(string &in)")) ) TEST_FAILED;
+	double q = 0;
+	if( Run(engine, mod->GetFunctionByName("same"), q) != asEXECUTION_FINISHED || q != 1 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("intact"), q) != asEXECUTION_FINISHED || q != 1 ) TEST_FAILED;
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
 bool Test()
 {
 	bool fail = false;
@@ -398,6 +509,8 @@ bool Test()
 	fail = TestNotFolded() || fail;
 	fail = TestWidths() || fail;
 	fail = TestSaveLoad() || fail;
+	fail = TestStringArguments() || fail;
+	fail = TestStringInRefCopy() || fail;
 	if( fail )
 	{
 		PRINTF("TestPureFold failed\n");
