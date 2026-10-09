@@ -115,6 +115,7 @@ add_executable(
         ../../source/test_scriptstruct.cpp
         ../../source/test_shared.cpp
         ../../source/test_memoryaccess.cpp
+        ../../source/test_purefold.cpp
         ../../source/test_shark.cpp
         ../../source/test_singleton.cpp
         ../../source/test_stack2.cpp

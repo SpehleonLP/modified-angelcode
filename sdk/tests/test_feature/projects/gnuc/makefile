@@ -113,6 +113,7 @@ SRCNAMES = \
   test_scriptstruct.cpp \
   test_shared.cpp \
   test_memoryaccess.cpp \
+  test_purefold.cpp \
   test_shark.cpp \
   test_singleton.cpp \
   test_suspend.cpp \

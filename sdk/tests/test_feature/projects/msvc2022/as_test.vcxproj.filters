@@ -362,6 +362,9 @@
     <ClCompile Include="..\..\source\test_memoryaccess.cpp">
       <Filter>tests</Filter>
     </ClCompile>
+    <ClCompile Include="..\..\source\test_purefold.cpp">
+      <Filter>tests</Filter>
+    </ClCompile>
     <ClCompile Include="..\..\source\test_shared.cpp">
       <Filter>tests</Filter>
     </ClCompile>
