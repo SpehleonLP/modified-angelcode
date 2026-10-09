@@ -496,6 +496,77 @@ static bool TestStringArguments()
 	return fail;
 }
 
+// Switching on a string: the subject is hashed at run time, the case labels at compile
+// time. A folded label is a constant like any literal, so the compiler also catches two
+// labels that hash alike, and without folding a call is no case label at all.
+static const char *kStringSwitch =
+	"int pick(const string &in s)\n"
+	"{\n"
+	"	switch( hashc(s) )\n"
+	"	{\n"
+	"	case hashc(\"apple\"): return 1;\n"
+	"	case hashc(\"banana\"): return 2;\n"
+	"	case hashc(\"cherry\"): return 3;\n"
+	"	}\n"
+	"	return 0;\n"
+	"}\n";
+
+static int Pick(asIScriptEngine *engine, asIScriptFunction *pick, const char *text)
+{
+	std::string s = text;
+	asIScriptContext *ctx = engine->CreateContext();
+	ctx->Prepare(pick);
+	ctx->SetArgObject(0, &s);
+	int result = -1;
+	if( ctx->Execute() == asEXECUTION_FINISHED )
+	{
+		result = int(ctx->GetReturnDWord());
+	}
+	ctx->Release();
+	return result;
+}
+
+static bool TestStringSwitch()
+{
+	bool fail = false;
+	COutStream out;
+	asIScriptEngine *engine = MakeStringEngine(out);
+	asIScriptModule *mod = Build(engine, kStringSwitch);
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+	asIScriptFunction *pick = mod->GetFunctionByName("pick");
+	// The subject is not a literal, so its call stays
+	if( !CallsSystem(pick, IdOf(engine, "uint hashc(const string &in)")) ) TEST_FAILED;
+
+	// Each run hashes only the subject: the three labels were hashed while building
+	g_calls = 0;
+	if( Pick(engine, pick, "apple") != 1 ) TEST_FAILED;
+	if( Pick(engine, pick, "banana") != 2 ) TEST_FAILED;
+	if( Pick(engine, pick, "cherry") != 3 ) TEST_FAILED;
+	if( Pick(engine, pick, "durian") != 0 ) TEST_FAILED;
+	if( g_calls != 4 ) TEST_FAILED;
+	engine->ShutDownAndRelease();
+
+	// Two labels with the same text fold to the same constant
+	CBufferedOutStream bout;
+	engine = MakeStringEngine(out);
+	engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &bout, asCALL_THISCALL);
+	mod = Build(engine,
+		"int dup(uint h) { switch( h ) { case hashc(\"apple\"): return 1; case hashc(\"apple\"): return 2; } return 0; }\n");
+	if( mod != 0 ) TEST_FAILED;
+	if( bout.buffer.find("Duplicate switch case") == std::string::npos ) TEST_FAILED;
+	engine->ShutDownAndRelease();
+
+	// Without folding, a call is not a constant and cannot be a label
+	bout.buffer = "";
+	engine = MakeStringEngine(out);
+	engine->SetMessageCallback(asMETHOD(CBufferedOutStream, Callback), &bout, asCALL_THISCALL);
+	engine->SetEngineProperty(asEP_FOLD_PURE_CALLS, 0);
+	if( Build(engine, kStringSwitch) != 0 ) TEST_FAILED;
+	if( bout.buffer.find("Case expressions must be literal constants") == std::string::npos ) TEST_FAILED;
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
 // hashr clobbers its argument; the literal itself must survive the fold. The std string
 // factory caches a literal by its text, so a clobbered object no longer matches "Moniker"
 // and later uses of the literal get a fresh one. Only code compiled before the fold still
@@ -615,6 +686,7 @@ bool Test()
 	fail = TestWidths() || fail;
 	fail = TestSaveLoad() || fail;
 	fail = TestStringArguments() || fail;
+	fail = TestStringSwitch() || fail;
 	fail = TestStringInRefCopy() || fail;
 	fail = TestNoContextCallbacks() || fail;
 	fail = TestNoGarbageCollect() || fail;
