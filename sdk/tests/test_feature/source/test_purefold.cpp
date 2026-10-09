@@ -70,10 +70,258 @@ static bool TestProperty()
 	return fail;
 }
 
+static int NMax(int a, int b) { ++g_calls; return a > b ? a : b; }
+static int NChecked(int x)
+{
+	++g_calls;
+	if( x < 0 )
+	{
+		asGetActiveContext()->SetException("negative");
+		return 0;
+	}
+	return x;
+}
+static double NNow() { ++g_calls; return 42.0; }
+static int NUndeclared(int x) { ++g_calls; return x; }
+static int NColor(int c) { ++g_calls; return c * 10; }
+static int NByRef(const int &x) { ++g_calls; return x + 1; }
+static void GSqrt(asIScriptGeneric *gen) { ++g_calls; gen->SetReturnDouble(sqrt(gen->GetArgDouble(0))); }
+static void GSumV(asIScriptGeneric *gen)
+{
+	++g_calls;
+	int s = 0;
+	for( int n = 0; n < gen->GetArgCount(); n++ )
+	{
+		s += *(int*)gen->GetAddressOfArg(n);
+	}
+	gen->SetReturnDWord(s);
+}
+struct Obj { int Pure() const { return 5; } };
+static Obj g_obj;
+static Obj *GetObj() { return &g_obj; }
+
+static void Declare(asIScriptEngine *engine, int id, asEMemoryAccess r, asEMemoryAccess w)
+{
+	engine->GetFunctionById(id)->SetMemoryAccess(r, w);
+}
+
+static asIScriptEngine *MakeEngine(COutStream &out, int &sqrtId)
+{
+	asIScriptEngine *engine = asCreateScriptEngine();
+	engine->SetMessageCallback(asMETHOD(COutStream, Callback), &out, asCALL_THISCALL);
+	engine->SetEngineProperty(asEP_FOLD_PURE_CALLS, 1);
+	sqrtId = RegisterSqrt(engine);
+	Declare(engine, engine->RegisterGlobalFunction("int imax(int, int)", asFUNCTION(NMax), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("int checked(int)", asFUNCTION(NChecked), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("double now()", asFUNCTION(NNow), asCALL_CDECL), asMA_WORLD_STABLE, asMA_NONE);
+	engine->RegisterGlobalFunction("int undeclared(int)", asFUNCTION(NUndeclared), asCALL_CDECL);
+	engine->RegisterEnum("Color");
+	engine->RegisterEnumValue("Color", "Red", 1);
+	engine->RegisterEnumValue("Color", "Blue", 2);
+	Declare(engine, engine->RegisterGlobalFunction("int colorValue(Color)", asFUNCTION(NColor), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("int byRef(const int &in)", asFUNCTION(NByRef), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("double gsqrt(double)", asFUNCTION(GSqrt), asCALL_GENERIC), asMA_NONE, asMA_NONE);
+	Declare(engine, engine->RegisterGlobalFunction("int sumv(int ...)", asFUNCTION(GSumV), asCALL_GENERIC), asMA_NONE, asMA_NONE);
+	engine->RegisterObjectType("Obj", 0, asOBJ_REF | asOBJ_NOCOUNT);
+	Declare(engine, engine->RegisterObjectMethod("Obj", "int pure() const", asMETHOD(Obj, Pure), asCALL_THISCALL), asMA_NONE, asMA_NONE);
+	engine->RegisterGlobalFunction("Obj @getObj()", asFUNCTION(GetObj), asCALL_CDECL);
+	return engine;
+}
+
+static int IdOf(asIScriptEngine *engine, const char *decl)
+{
+	return engine->GetGlobalFunctionByDecl(decl)->GetId();
+}
+
+// Runs a no-argument function returning int, bool or double, reading the result by its
+// return type because each GetReturn* reads only its own width; returns the context result
+static int Run(asIScriptEngine *engine, asIScriptFunction *func, double &result)
+{
+	asIScriptContext *ctx = engine->CreateContext();
+	ctx->Prepare(func);
+	int r = ctx->Execute();
+	int typeId = func->GetReturnTypeId();
+	if( typeId == asTYPEID_DOUBLE )
+	{
+		result = ctx->GetReturnDouble();
+	}
+	else if( typeId == asTYPEID_BOOL )
+	{
+		result = ctx->GetReturnByte();
+	}
+	else
+	{
+		result = int(ctx->GetReturnDWord());
+	}
+	ctx->Release();
+	return r;
+}
+
+static bool TestFolds()
+{
+	bool fail = false;
+	COutStream out;
+	int sqrtId = 0;
+	asIScriptEngine *engine = MakeEngine(out, sqrtId);
+
+	g_calls = 0;
+	asIScriptModule *mod = Build(engine,
+		"double root() { return fsqrt(2.0); }\n"
+		"double chain() { return fsqrt(2.0) * 3.0 + 1.0; }\n"
+		"int biggest() { return imax(3, 7); }\n"
+		"int color() { return colorValue(Color::Blue); }\n"
+		"int ref() { return byRef(4); }\n"
+		"double generic() { return gsqrt(9.0); }\n");
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+
+	// Every call folded at build time (at least one run each; the spec allows more), no CALLSYS left
+	int afterBuild = g_calls;
+	if( afterBuild < 6 ) { PRINTF("expected at least 6 build-time calls, got %d\n", afterBuild); TEST_FAILED; }
+	if( CallsSystem(mod->GetFunctionByName("root"), sqrtId) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("chain"), sqrtId) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("biggest"), IdOf(engine, "int imax(int, int)")) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("color"), IdOf(engine, "int colorValue(Color)")) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("ref"), IdOf(engine, "int byRef(const int &in)")) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("generic"), IdOf(engine, "double gsqrt(double)")) ) TEST_FAILED;
+
+	// The constants are the right values, and running them calls nothing
+	double v = 0;
+	if( Run(engine, mod->GetFunctionByName("root"), v) != asEXECUTION_FINISHED ) TEST_FAILED;
+	if( v != sqrt(2.0) ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("chain"), v) != asEXECUTION_FINISHED ) TEST_FAILED;
+	if( v != sqrt(2.0) * 3.0 + 1.0 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("biggest"), v) != asEXECUTION_FINISHED || v != 7 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("color"), v) != asEXECUTION_FINISHED || v != 20 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("ref"), v) != asEXECUTION_FINISHED || v != 5 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("generic"), v) != asEXECUTION_FINISHED ) TEST_FAILED;
+	if( v != 3.0 ) TEST_FAILED;
+	if( g_calls != afterBuild ) TEST_FAILED;
+
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+static bool TestConversion()
+{
+	bool fail = false;
+	COutStream out;
+	int sqrtId = 0;
+	asIScriptEngine *engine = MakeEngine(out, sqrtId);
+	asIScriptModule *mod = Build(engine, "double f() { return fsqrt(2); }");
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+	if( CallsSystem(mod->GetFunctionByName("f"), sqrtId) ) TEST_FAILED;
+	double v = 0;
+	Run(engine, mod->GetFunctionByName("f"), v);
+	if( v != sqrt(2.0) ) TEST_FAILED;
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+static bool TestNesting()
+{
+	bool fail = false;
+	COutStream out;
+	int sqrtId = 0;
+	asIScriptEngine *engine = MakeEngine(out, sqrtId);
+	asIScriptModule *mod = Build(engine, "double f() { return fsqrt(fsqrt(16.0)); }");
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+	if( CallsSystem(mod->GetFunctionByName("f"), sqrtId) ) TEST_FAILED;
+	double v = 0;
+	Run(engine, mod->GetFunctionByName("f"), v);
+	if( v != 2.0 ) TEST_FAILED;
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+static bool TestConstGlobal()
+{
+	bool fail = false;
+	COutStream out;
+	int sqrtId = 0;
+	asIScriptEngine *engine = MakeEngine(out, sqrtId);
+	// A folded initialiser makes the global a compile-time constant usable as a case label
+	asIScriptModule *mod = Build(engine,
+		"const int R = imax(2, 3);\n"
+		"int other = 1;\n"
+		"int sw(int x) { switch( x ) { case R: return 1; } return other; }\n"
+		"int pick() { return sw(3) * 10 + sw(4); }\n");
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+	double v = 0;
+	if( Run(engine, mod->GetFunctionByName("pick"), v) != asEXECUTION_FINISHED || v != 11 ) TEST_FAILED;
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+static bool TestNotFolded()
+{
+	bool fail = false;
+	COutStream out;
+	int sqrtId = 0;
+	asIScriptEngine *engine = MakeEngine(out, sqrtId);
+	asIScriptModule *mod = Build(engine,
+		"double variable(double x) { return fsqrt(x); }\n"
+		"double stable() { return now(); }\n"
+		"int unset() { return undeclared(1); }\n"
+		"int method() { return getObj().pure(); }\n"
+		"int variadic() { return sumv(1, 2, 3); }\n"
+		"int raises() { return checked(-1); }\n"
+		"int fine() { return checked(5); }\n");
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+
+	if( !CallsSystem(mod->GetFunctionByName("variable"), sqrtId) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("stable"), IdOf(engine, "double now()")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("unset"), IdOf(engine, "int undeclared(int)")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("variadic"), IdOf(engine, "int sumv(int ...)")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("raises"), IdOf(engine, "int checked(int)")) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("fine"), IdOf(engine, "int checked(int)")) ) TEST_FAILED;
+	asITypeInfo *objType = engine->GetTypeInfoByName("Obj");
+	if( !CallsSystem(mod->GetFunctionByName("method"), objType->GetMethodByName("pure")->GetId()) ) TEST_FAILED;
+
+	// A call that raised at build time still raises at run time
+	double v = 0;
+	if( Run(engine, mod->GetFunctionByName("raises"), v) != asEXECUTION_EXCEPTION ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("fine"), v) != asEXECUTION_FINISHED || v != 5 ) TEST_FAILED;
+
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+static bool TestSaveLoad()
+{
+	bool fail = false;
+	COutStream out;
+	int sqrtId = 0;
+	asIScriptEngine *engine = MakeEngine(out, sqrtId);
+	asIScriptModule *mod = Build(engine, "double f() { return fsqrt(2.0) * 2.0; }");
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+	CBytecodeStream stream(__FILE__"1");
+	if( mod->SaveByteCode(&stream) < 0 ) TEST_FAILED;
+	engine->ShutDownAndRelease();
+
+	// Load into an engine that does not fold: the constant comes with the bytecode
+	engine = MakeEngine(out, sqrtId);
+	engine->SetEngineProperty(asEP_FOLD_PURE_CALLS, 0);
+	mod = engine->GetModule("m", asGM_ALWAYS_CREATE);
+	if( mod->LoadByteCode(&stream) < 0 ) TEST_FAILED;
+	g_calls = 0;
+	double v = 0;
+	if( Run(engine, mod->GetFunctionByName("f"), v) != asEXECUTION_FINISHED ) TEST_FAILED;
+	if( v != sqrt(2.0) * 2.0 ) TEST_FAILED;
+	if( g_calls != 0 ) TEST_FAILED;
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
 bool Test()
 {
 	bool fail = false;
 	fail = TestProperty() || fail;
+	fail = TestFolds() || fail;
+	fail = TestConversion() || fail;
+	fail = TestNesting() || fail;
+	fail = TestConstGlobal() || fail;
+	fail = TestNotFolded() || fail;
+	fail = TestSaveLoad() || fail;
 	if( fail )
 	{
 		PRINTF("TestPureFold failed\n");

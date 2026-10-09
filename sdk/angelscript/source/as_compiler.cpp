@@ -15347,9 +15347,45 @@ int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType
 	asCByteCode objBC(engine);
 	objBC.AddCode(&ctx->bc);
 
-	int r = PrepareFunctionCall(funcId, &ctx->bc, args);
+	// PrepareFunctionCall moves each constant argument into a temporary variable,
+	// so a call that may fold keeps each argument's value from before it
+	asCArray<asCExprValue> argsBefore;
+	bool mayFold = objBC.GetLastInstr() == -1 && CanFoldCall(descr);
+	for( asUINT a = 0; mayFold && a < args.GetLength(); a++ )
+	{
+		// Folding drops the argument code, which must then have had nothing to drop
+		if( args[a]->bc.GetLastInstr() != -1 )
+		{
+			mayFold = false;
+		}
+		else
+		{
+			argsBefore.PushLast(args[a]->type);
+
+			// An ambiguous enum value is resolved only against the parameter type, which
+			// the copy of the value cannot do on its own
+			if( args[a]->enumValue != "" )
+			{
+				argsBefore[a].isConstant = false;
+			}
+		}
+	}
+
+	// The argument code is held apart so that a folded call can discard it
+	asCByteCode argBC(engine);
+	int r = PrepareFunctionCall(funcId, &argBC, args);
 	if (r < 0)
+	{
+		ctx->bc.AddCode(&argBC);
 		return r;
+	}
+
+	if( mayFold && TryFoldCall(ctx, descr, args, argsBefore) )
+	{
+		return 0;
+	}
+
+	ctx->bc.AddCode(&argBC);
 
 	if (descr->IsVariadic())
 	{
@@ -15404,6 +15440,171 @@ int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType
 	PerformFunctionCall(funcId, ctx, false, &args, 0, useVariable, stackOffset, funcPtrVar);
 	
 	return 0;
+}
+
+// The only types a fold reads or produces: a primitive or an enum, whose value fits a qword
+static bool IsFoldableValue(const asCDataType &dt)
+{
+	if( !dt.IsPrimitive() || dt.GetTokenType() == ttQuestion || dt.GetTokenType() == ttVoid )
+	{
+		return false;
+	}
+
+	int size = dt.GetSizeInMemoryBytes();
+	return size == 1 || size == 2 || size == 4 || size == 8;
+}
+
+// Writes value into the first size bytes at dest, as a variable of that size holds it
+static void StoreFoldValue(void *dest, int size, asQWORD value)
+{
+	if( size == 1 )
+	{
+		*(asBYTE*)dest = asBYTE(value);
+	}
+	else if( size == 2 )
+	{
+		*(asWORD*)dest = asWORD(value);
+	}
+	else if( size == 4 )
+	{
+		*(asDWORD*)dest = asDWORD(value);
+	}
+	else
+	{
+		*(asQWORD*)dest = value;
+	}
+}
+
+bool asCCompiler::CanFoldCall(asCScriptFunction *func)
+{
+	// Only {None, None} is pure. State behind a WorldStable read is constant only between
+	// VM stops, so its value at compile time says nothing about its value at run time.
+	return engine->ep.foldPureCalls &&
+		func->funcType == asFUNC_SYSTEM &&
+		asMemoryAccessRead(func->memoryAccess) == asMA_NONE &&
+		asMemoryAccessWrite(func->memoryAccess) == asMA_NONE &&
+		func->objectType == 0 &&
+		!func->IsVariadic() &&
+		!func->returnType.IsReference() &&
+		IsFoldableValue(func->returnType);
+}
+
+bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCArray<asCExprContext*> &args, asCArray<asCExprValue> &argsBefore)
+{
+	asASSERT( args.GetLength() == func->parameterTypes.GetLength() );
+	asASSERT( argsBefore.GetLength() == args.GetLength() );
+
+	// Each argument's value in the parameter's type
+	asCArray<asQWORD> values;
+	values.SetLength(args.GetLength());
+	for( asUINT n = 0; n < args.GetLength(); n++ )
+	{
+		asCDataType param = func->parameterTypes[n];
+		if( !IsFoldableValue(param) )
+		{
+			return false;
+		}
+
+		if( param.IsReference() && func->inOutFlags[n] != asTM_INREF )
+		{
+			return false;
+		}
+
+		// PrepareArgument has moved every constant into a temporary variable, so convert
+		// the constant the argument was with the same implicit conversion it applied
+		asCExprContext conv(engine);
+		conv.type = argsBefore[n];
+		if( !conv.type.isConstant || conv.type.isVariable )
+		{
+			return false;
+		}
+
+		param.MakeReference(false);
+		ImplicitConversion(&conv, param, 0, asIC_IMPLICIT_CONV, false);
+		if( !conv.type.isConstant || !conv.type.dataType.IsEqualExceptRefAndConst(param) )
+		{
+			return false;
+		}
+		values[n] = conv.type.GetConstantData();
+	}
+
+	// The compiler may run on a thread that holds no context, so borrow one from the engine
+	asIScriptContext *exec = engine->RequestContext();
+	if( exec == 0 )
+	{
+		return false;
+	}
+
+	// A by-reference parameter gets the address of its own copy, so the native cannot alter a constant
+	asCArray<asQWORD> copies;
+	copies.SetLength(args.GetLength());
+
+	bool finished = false;
+	asQWORD result = 0;
+	int r = exec->Prepare(func);
+	for( asUINT n = 0; r >= 0 && n < args.GetLength(); n++ )
+	{
+		int size = func->parameterTypes[n].GetSizeInMemoryBytes();
+		if( func->parameterTypes[n].IsReference() )
+		{
+			StoreFoldValue(&copies[n], size, values[n]);
+			r = exec->SetArgAddress(n, &copies[n]);
+		}
+		else if( size == 1 )
+		{
+			r = exec->SetArgByte(n, asBYTE(values[n]));
+		}
+		else if( size == 2 )
+		{
+			r = exec->SetArgWord(n, asWORD(values[n]));
+		}
+		else if( size == 4 )
+		{
+			r = exec->SetArgDWord(n, asDWORD(values[n]));
+		}
+		else
+		{
+			r = exec->SetArgQWord(n, values[n]);
+		}
+	}
+
+	// A call that raises or does not finish is compiled as a call, so it raises at run time as before
+	if( r >= 0 && exec->Execute() == asEXECUTION_FINISHED )
+	{
+		int size = func->returnType.GetSizeInMemoryBytes();
+		if( size == 1 )
+		{
+			result = exec->GetReturnByte();
+		}
+		else if( size == 2 )
+		{
+			result = exec->GetReturnWord();
+		}
+		else if( size == 4 )
+		{
+			result = exec->GetReturnDWord();
+		}
+		else
+		{
+			result = exec->GetReturnQWord();
+		}
+		finished = true;
+	}
+	engine->ReturnContext(exec);
+
+	if( !finished )
+	{
+		return false;
+	}
+
+	// PerformFunctionCall would have released these; a primitive has no destructor to emit
+	for( asUINT n = 0; n < args.GetLength(); n++ )
+	{
+		ReleaseTemporaryVariable(args[n]->type, 0);
+	}
+
+	ctx->type.SetConstantData(func->returnType, result);
+	return true;
 }
 
 int asCCompiler::CompileOperator(asCScriptNode *node, asCExprContext *lctx, asCExprContext *rctx, asCExprContext *ctx, eTokenType op, bool leftToRight)
