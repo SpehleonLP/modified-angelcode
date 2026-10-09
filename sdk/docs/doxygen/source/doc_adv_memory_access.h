@@ -186,8 +186,12 @@ The analysis depends on the application functions behaving as declared.
    and handle subtypes of each instance itself.
  - The read scope of a function covers the memory that any reference returned by the function points into. 
    Taking an address reads nothing, so the analysis cannot see this for an application function.
- - A reference into world-stable state that a function returns must be const. The analysis counts nothing for the 
+ - A reference into world-stable state that a function returns must be const. The analysis counts nothing for the
    memory behind such a reference, as that state does not change while the VM runs.
+ - The resolve function given to \ref asIScriptEngine::RegisterHandle "RegisterHandle" reads only state that
+   functions with a write scope of \ref asMA_PROGRAM change, such as the factories and releases that create and
+   destroy what the handles name. The analysis counts nothing for resolving a handle or testing it for null, and puts
+   the resolved object at the home of its type.
 
 \section doc_adv_memory_access_outside What the analysis does not cover
 

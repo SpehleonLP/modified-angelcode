@@ -1897,6 +1897,55 @@ bool asCMemoryAccessScanner::Step(asUINT pos, State &s, asCArray<asUINT> &succes
 		Push(s, s.valueReg, AS_PTR_SIZE);
 		break;
 
+	// Registered handles: the variable holds handle bits that the type's
+	// resolve callback maps to an object. The host promises that only
+	// functions whose write scope is Program change what a resolve returns,
+	// and Program overlaps everything, so the resolve itself reads nothing.
+	// The object it yields holds no reference and sits at its type's home.
+	case asBC_ResolveHandleV:
+	{
+		if( s.stack.GetLength() < AS_PTR_SIZE )
+		{
+			return false;
+		}
+		asCTypeInfo *type = reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(instr));
+		if( !SetCells(s, 0, TypedPointer(type, asRH_NONE)) )
+		{
+			return false;
+		}
+		break;
+	}
+	case asBC_PshHandlePtr:
+	{
+		if( Var(s, asBC_SWORDARG0(instr)) == 0 )
+		{
+			return false;
+		}
+		asCTypeInfo *type = reinterpret_cast<asCTypeInfo*>(asBC_PTRARG(instr));
+		Push(s, TypedPointer(type, asRH_NONE), AS_PTR_SIZE);
+		break;
+	}
+	case asBC_LoadHRObjR:
+	{
+		// The fused form pops the OBJTYPE its peephole left in place of the
+		// PSF, and drops the field's type id (the dword is always 0), so the
+		// field is read through a base that is only known to be registered
+		if( Var(s, asBC_SWORDARG0(instr)) == 0 || !Pop(s, AS_PTR_SIZE) )
+		{
+			return false;
+		}
+		short offset = asBC_SWORDARG1(instr);
+		s.valueReg = FieldAt(Value(asMA_PROGRAM, asMA_PROGRAM, asRH_NONE), int(asBC_DWORDARG(instr + 1)), offset);
+		break;
+	}
+	case asBC_IsHandleNull:
+		if( Var(s, asBC_SWORDARG0(instr)) == 0 )
+		{
+			return false;
+		}
+		s.valueReg = Unknown();
+		break;
+
 	// Global variables. The address operand is at instr+1 in every one of them
 	case asBC_PGA:
 	{
