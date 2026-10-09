@@ -516,6 +516,87 @@ static bool TestStringInRefCopy()
 	return fail;
 }
 
+static int g_requests = 0;
+static int g_returns = 0;
+static asIScriptContext *RequestCtx(asIScriptEngine *engine, void *) { ++g_requests; return engine->CreateContext(); }
+static void ReturnCtx(asIScriptEngine *, asIScriptContext *ctx, void *) { ++g_returns; ctx->Release(); }
+
+// A fold runs on its own context: the host's context pool, whose return callback may
+// treat an exception as a script crash, never sees it, even for a call that raises
+static bool TestNoContextCallbacks()
+{
+	bool fail = false;
+	COutStream out;
+	int sqrtId = 0;
+	asIScriptEngine *engine = MakeEngine(out, sqrtId);
+	engine->SetContextCallbacks(RequestCtx, ReturnCtx, 0);
+	g_requests = 0;
+	g_returns = 0;
+	g_calls = 0;
+	asIScriptModule *mod = Build(engine,
+		"int fine() { return checked(5); }\n"
+		"int raises() { return checked(-1); }\n");
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+
+	// Both calls ran at build time; only the one that finished folded
+	if( g_calls < 2 ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("fine"), IdOf(engine, "int checked(int)")) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("raises"), IdOf(engine, "int checked(int)")) ) TEST_FAILED;
+	if( g_requests != 0 ) { PRINTF("fold requested %d pooled contexts\n", g_requests); TEST_FAILED; }
+	if( g_returns != 0 ) { PRINTF("fold returned %d pooled contexts\n", g_returns); TEST_FAILED; }
+
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
+// A fold must not change engine state, so the garbage collection step that follows an
+// Execute does not run for it: garbage left before a build survives the build
+static bool TestNoGarbageCollect()
+{
+	bool fail = false;
+	COutStream out;
+	int sqrtId = 0;
+	asIScriptEngine *engine = MakeEngine(out, sqrtId);
+	if( engine->GetEngineProperty(asEP_AUTO_GARBAGE_COLLECT) != 1 ) TEST_FAILED;
+
+	// A self-referencing object left unreferenced is garbage only the collector can free
+	asIScriptModule *gmod = engine->GetModule("g", asGM_ALWAYS_CREATE);
+	gmod->AddScriptSection("g", "class Node { Node @next; }\n void make() { Node n; @n.next = n; }\n");
+	if( gmod->Build() < 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+	asIScriptContext *ctx = engine->CreateContext();
+	ctx->Prepare(gmod->GetFunctionByName("make"));
+	if( ctx->Execute() != asEXECUTION_FINISHED ) TEST_FAILED;
+	ctx->Release();
+
+	asUINT sizeBefore = 0, destroyedBefore = 0;
+	engine->GetGCStatistics(&sizeBefore, &destroyedBefore);
+	if( sizeBefore == 0 ) TEST_FAILED;
+
+	// Enough folds that one collection step each would free the garbage
+	std::string script = "int f() { return 0";
+	for( int n = 0; n < 200; n++ )
+	{
+		script += " + imax(" + std::to_string(n) + ", 1)";
+	}
+	script += "; }\n";
+	asIScriptModule *mod = Build(engine, script.c_str());
+	if( mod == 0 ) TEST_FAILED;
+	else if( CallsSystem(mod->GetFunctionByName("f"), IdOf(engine, "int imax(int, int)")) ) TEST_FAILED;
+
+	asUINT sizeAfter = 0, destroyedAfter = 0;
+	engine->GetGCStatistics(&sizeAfter, &destroyedAfter);
+	if( destroyedAfter != destroyedBefore ) { PRINTF("folds collected %u objects\n", destroyedAfter - destroyedBefore); TEST_FAILED; }
+	if( sizeAfter != sizeBefore ) TEST_FAILED;
+
+	// The garbage was real: a full cycle frees it
+	engine->GarbageCollect(asGC_FULL_CYCLE);
+	engine->GetGCStatistics(0, &destroyedAfter);
+	if( destroyedAfter == destroyedBefore ) TEST_FAILED;
+
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
 bool Test()
 {
 	bool fail = false;
@@ -529,6 +610,8 @@ bool Test()
 	fail = TestSaveLoad() || fail;
 	fail = TestStringArguments() || fail;
 	fail = TestStringInRefCopy() || fail;
+	fail = TestNoContextCallbacks() || fail;
+	fail = TestNoGarbageCollect() || fail;
 	if( fail )
 	{
 		PRINTF("TestPureFold failed\n");
