@@ -8360,6 +8360,8 @@ asUINT asCCompiler::ImplicitConversion(asCExprContext *ctx, const asCDataType &t
 	return asCC_NO_CONV;
 }
 
+static void *StringLiteralOf(asCScriptEngine *engine, asCExprContext *arg);
+
 asUINT asCCompiler::ImplicitConvObjectToPrimitive(asCExprContext *ctx, const asCDataType &to, asCScriptNode *node, EImplicitConv convType, bool generateCode)
 {
 	if( ctx->type.isExplicitHandle )
@@ -8490,13 +8492,27 @@ asUINT asCCompiler::ImplicitConvObjectToPrimitive(asCExprContext *ctx, const asC
 		asCScriptFunction *descr = builder->GetFunctionDescription(funcId);
 		if( generateCode )
 		{
-			Dereference(ctx, true);
-			if( ot && ot->resolveHandle )                                                                                               
-			{                                                                                                                           
-				ctx->bc.InstrPTR(asBC_ResolveHandleV, ot);                                                                                
-				ctx->bc.Instr(asBC_CHKREF);                                                                                               
-			}    
-			PerformFunctionCall(funcId, ctx);
+			// A pure conversion of a string literal is a constant
+			void *literal = StringLiteralOf(engine, ctx);
+			asCArray<asQWORD> noValues;
+			asCArray<void*>   noLiterals;
+			asQWORD           folded = 0;
+			if( literal && CanFoldCall(descr, true) &&
+				RunFoldedCall(descr, literal, noValues, noLiterals, &folded) )
+			{
+				ctx->bc.ClearAll();
+				SetFoldedResult(ctx, descr, folded);
+			}
+			else
+			{
+				Dereference(ctx, true);
+				if( ot && ot->resolveHandle )
+				{
+					ctx->bc.InstrPTR(asBC_ResolveHandleV, ot);
+					ctx->bc.Instr(asBC_CHKREF);
+				}
+				PerformFunctionCall(funcId, ctx);
+			}
 		}
 		else
 			ctx->type.Set(descr->returnType);
@@ -16145,6 +16161,10 @@ static void *StringLiteralOf(asCScriptEngine *engine, asCExprContext *arg)
 
 int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType *objectType, asCArray<asCExprContext*> &args, asCScriptNode *node, bool useVariable, int stackOffset, int funcPtrVar)
 {
+	// A method on a string literal folds like a global function; the literal's PGA is the
+	// whole object expression, so dropping it drops nothing else
+	void *objectLiteral = objectType ? StringLiteralOf(engine, ctx) : 0;
+
 	if( objectType )
 		Dereference(ctx, true);
 
@@ -16169,7 +16189,7 @@ int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType
 	// each string literal, which a non-const &in parameter likewise turns into a temporary
 	asCArray<asCExprValue> argsBefore;
 	asCArray<void*> literalsBefore;
-	bool mayFold = objBC.GetLastInstr() == -1 && CanFoldCall(descr);
+	bool mayFold = (objBC.GetLastInstr() == -1 || objectLiteral != 0) && CanFoldCall(descr, objectLiteral != 0);
 	for( asUINT a = 0; mayFold && a < args.GetLength(); a++ )
 	{
 		// Folding drops the argument code, which must then have had nothing to drop. The
@@ -16204,7 +16224,7 @@ int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType
 		return r;
 	}
 
-	if( mayFold && TryFoldCall(ctx, descr, args, argsBefore, literalsBefore) )
+	if( mayFold && TryFoldCall(ctx, descr, objectLiteral, args, argsBefore, literalsBefore) )
 	{
 		return 0;
 	}
@@ -16299,7 +16319,7 @@ static void StoreFoldValue(void *dest, int size, asQWORD value)
 	}
 }
 
-bool asCCompiler::CanFoldCall(asCScriptFunction *func)
+bool asCCompiler::CanFoldCall(asCScriptFunction *func, bool objectIsLiteral)
 {
 	// Only {None, None} is pure. State behind a WorldStable read is constant only between
 	// VM stops, so its value at compile time says nothing about its value at run time.
@@ -16307,65 +16327,17 @@ bool asCCompiler::CanFoldCall(asCScriptFunction *func)
 		func->funcType == asFUNC_SYSTEM &&
 		asMemoryAccessRead(func->memoryAccess) == asMA_NONE &&
 		asMemoryAccessWrite(func->memoryAccess) == asMA_NONE &&
-		// No test reaches this: a method call always has object code, which already
-		// stops the fold in MakeFunctionCall. It is kept so a method can never fold.
-		func->objectType == 0 &&
+		// A method folds only on a string literal: any other object is a run-time value
+		(func->objectType == 0 || (objectIsLiteral && func->objectType == engine->stringType.GetTypeInfo())) &&
 		!func->IsVariadic() &&
 		!func->returnType.IsReference() &&
 		IsFoldableValue(func->returnType);
 }
 
-bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCArray<asCExprContext*> &args, asCArray<asCExprValue> &argsBefore, asCArray<void*> &literalsBefore)
+// Runs func on a context of its own and stores its primitive result in *result. `object` is the
+// string literal a method runs on, or 0. False when it raises or does not finish.
+bool asCCompiler::RunFoldedCall(asCScriptFunction *func, void *object, asCArray<asQWORD> &values, asCArray<void*> &literalsBefore, asQWORD *result)
 {
-	asASSERT( args.GetLength() == func->parameterTypes.GetLength() );
-	asASSERT( argsBefore.GetLength() == args.GetLength() );
-	asASSERT( literalsBefore.GetLength() == args.GetLength() );
-
-	// Each argument's value in the parameter's type
-	asCArray<asQWORD> values;
-	values.SetLength(args.GetLength());
-	for( asUINT n = 0; n < args.GetLength(); n++ )
-	{
-		asCDataType param = func->parameterTypes[n];
-		if( param.IsReference() && func->inOutFlags[n] != asTM_INREF )
-		{
-			return false;
-		}
-
-		// A string literal goes to a string parameter as an object, set up below
-		if( literalsBefore[n] != 0 )
-		{
-			if( !param.IsEqualExceptRefAndConst(engine->stringType) )
-			{
-				return false;
-			}
-			values[n] = 0;
-			continue;
-		}
-
-		if( !IsFoldableValue(param) )
-		{
-			return false;
-		}
-
-		// PrepareArgument has moved every constant into a temporary variable, so convert
-		// the constant the argument was with the same implicit conversion it applied
-		asCExprContext conv(engine);
-		conv.type = argsBefore[n];
-		if( !conv.type.isConstant || conv.type.isVariable )
-		{
-			return false;
-		}
-
-		param.MakeReference(false);
-		ImplicitConversion(&conv, param, 0, asIC_IMPLICIT_CONV, false);
-		if( !conv.type.isConstant || !conv.type.dataType.IsEqualExceptRefAndConst(param) )
-		{
-			return false;
-		}
-		values[n] = conv.type.GetConstantData();
-	}
-
 	// The fold runs on a context of its own: a pooled one would run the host's context callbacks,
 	// and the garbage collection step after Execute could run script destructors mid-compile
 	asIScriptContext *exec = 0;
@@ -16377,7 +16349,7 @@ bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCA
 
 	// A by-reference parameter gets the address of its own copy, so the native cannot alter a constant
 	asCArray<asQWORD> copies;
-	copies.SetLength(args.GetLength());
+	copies.SetLength(literalsBefore.GetLength());
 
 	// A non-const &in string gets its own copy of the literal, which the fold releases;
 	// the factory's object is shared by every use of the literal and must not change
@@ -16385,9 +16357,12 @@ bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCA
 	asCArray<void*> stringCopies;
 
 	bool finished = false;
-	asQWORD result = 0;
 	int r = exec->Prepare(func);
-	for( asUINT n = 0; r >= 0 && n < args.GetLength(); n++ )
+	if( r >= 0 && object )
+	{
+		r = exec->SetObject(object);
+	}
+	for( asUINT n = 0; r >= 0 && n < literalsBefore.GetLength(); n++ )
 	{
 		int size = func->parameterTypes[n].GetSizeInMemoryBytes();
 		if( literalsBefore[n] != 0 )
@@ -16450,19 +16425,19 @@ bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCA
 		int size = func->returnType.GetSizeInMemoryBytes();
 		if( size == 1 )
 		{
-			result = exec->GetReturnByte();
+			*result = exec->GetReturnByte();
 		}
 		else if( size == 2 )
 		{
-			result = exec->GetReturnWord();
+			*result = exec->GetReturnWord();
 		}
 		else if( size == 4 )
 		{
-			result = exec->GetReturnDWord();
+			*result = exec->GetReturnDWord();
 		}
 		else
 		{
-			result = exec->GetReturnQWord();
+			*result = exec->GetReturnQWord();
 		}
 		finished = true;
 	}
@@ -16474,7 +16449,69 @@ bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCA
 		engine->ReleaseScriptObject(stringCopies[n], stringInfo);
 	}
 
-	if( !finished )
+	return finished;
+}
+
+// Types ctx as the constant result, as func returns it. The caller has already dropped
+// the code that would have made the call.
+void asCCompiler::SetFoldedResult(asCExprContext *ctx, asCScriptFunction *func, asQWORD result)
+{
+	ctx->type.SetConstantData(func->returnType, result);
+}
+
+bool asCCompiler::TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, void *object, asCArray<asCExprContext*> &args, asCArray<asCExprValue> &argsBefore, asCArray<void*> &literalsBefore)
+{
+	asASSERT( args.GetLength() == func->parameterTypes.GetLength() );
+	asASSERT( argsBefore.GetLength() == args.GetLength() );
+	asASSERT( literalsBefore.GetLength() == args.GetLength() );
+
+	// Each argument's value in the parameter's type
+	asCArray<asQWORD> values;
+	values.SetLength(args.GetLength());
+	for( asUINT n = 0; n < args.GetLength(); n++ )
+	{
+		asCDataType param = func->parameterTypes[n];
+		if( param.IsReference() && func->inOutFlags[n] != asTM_INREF )
+		{
+			return false;
+		}
+
+		// A string literal goes to a string parameter as an object, set up below
+		if( literalsBefore[n] != 0 )
+		{
+			if( !param.IsEqualExceptRefAndConst(engine->stringType) )
+			{
+				return false;
+			}
+			values[n] = 0;
+			continue;
+		}
+
+		if( !IsFoldableValue(param) )
+		{
+			return false;
+		}
+
+		// PrepareArgument has moved every constant into a temporary variable, so convert
+		// the constant the argument was with the same implicit conversion it applied
+		asCExprContext conv(engine);
+		conv.type = argsBefore[n];
+		if( !conv.type.isConstant || conv.type.isVariable )
+		{
+			return false;
+		}
+
+		param.MakeReference(false);
+		ImplicitConversion(&conv, param, 0, asIC_IMPLICIT_CONV, false);
+		if( !conv.type.isConstant || !conv.type.dataType.IsEqualExceptRefAndConst(param) )
+		{
+			return false;
+		}
+		values[n] = conv.type.GetConstantData();
+	}
+
+	asQWORD result = 0;
+	if( !RunFoldedCall(func, object, values, literalsBefore, &result) )
 	{
 		return false;
 	}
@@ -17609,9 +17646,41 @@ void asCCompiler::CompileBitwiseOperator(asCScriptNode *node, asCExprContext *lc
 	}
 }
 
+// Converts ctx to exactly `to` (an enum) when an implicit conversion reaches it; otherwise
+// leaves ctx for the best-math-type rule.
+void asCCompiler::ConvertObjectToEnumOf(asCExprContext *ctx, const asCDataType &to, asCScriptNode *node)
+{
+	asCExprContext probe(engine);
+	probe.type = ctx->type;
+	ImplicitConversion(&probe, to, node, asIC_IMPLICIT_CONV, false);
+	if( !probe.type.dataType.IsEqualExceptRefAndConst(to) )
+	{
+		return;
+	}
+
+	ImplicitConversion(ctx, to, node, asIC_IMPLICIT_CONV, true);
+}
+
 void asCCompiler::CompileComparisonOperator(asCScriptNode *node, asCExprContext *lctx, asCExprContext *rctx, asCExprContext *ctx, eTokenType op)
 {
 	// Both operands must be of the same type
+
+	// A conversion to the other side's exact enum wins: an object with several enum-returning
+	// opImplConv cannot be ranked by precision, and the first registered would win silently
+	if( !lctx->type.dataType.IsPrimitive() && rctx->type.dataType.IsEnumType() )
+	{
+		int l = int(reservedVariables.GetLength());
+		rctx->bc.GetVarsUsed(reservedVariables);
+		ConvertObjectToEnumOf(lctx, rctx->type.dataType, node);
+		reservedVariables.SetLength(l);
+	}
+	if( !rctx->type.dataType.IsPrimitive() && lctx->type.dataType.IsEnumType() )
+	{
+		int l = int(reservedVariables.GetLength());
+		lctx->bc.GetVarsUsed(reservedVariables);
+		ConvertObjectToEnumOf(rctx, lctx->type.dataType, node);
+		reservedVariables.SetLength(l);
+	}
 
 	// If either operand is a non-primitive then first convert them to the best number type
 	if( !lctx->type.dataType.IsPrimitive() )

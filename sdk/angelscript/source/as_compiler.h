@@ -326,8 +326,11 @@ protected:
 	void MoveArgsToStack(int funcId, asCByteCode *bc, asCArray<asCExprContext *> &args, bool addOneToOffset);
 	int  MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType *objectType, asCArray<asCExprContext*> &args, asCScriptNode *node, bool useVariable = false, int stackOffset = 0, int funcPtrVar = 0);
 	int  PrepareFunctionCall(int funcId, asCByteCode *bc, asCArray<asCExprContext *> &args);
-	bool CanFoldCall(asCScriptFunction *func);
-	bool TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, asCArray<asCExprContext*> &args, asCArray<asCExprValue> &argsBefore, asCArray<void*> &literalsBefore);
+	bool CanFoldCall(asCScriptFunction *func, bool objectIsLiteral);
+	bool TryFoldCall(asCExprContext *ctx, asCScriptFunction *func, void *object, asCArray<asCExprContext*> &args, asCArray<asCExprValue> &argsBefore, asCArray<void*> &literalsBefore);
+	bool RunFoldedCall(asCScriptFunction *func, void *object, asCArray<asQWORD> &values, asCArray<void*> &literalsBefore, asQWORD *result);
+	void SetFoldedResult(asCExprContext *ctx, asCScriptFunction *func, asQWORD result);
+	void ConvertObjectToEnumOf(asCExprContext *ctx, const asCDataType &to, asCScriptNode *node);
 	void AfterFunctionCall(int funcId, asCArray<asCExprContext*> &args, asCExprContext *ctx, bool deferAll);
 	void ProcessDeferredParams(asCExprContext *ctx, bool processOnlyOutRef = false);
 	int  PrepareArgument(asCDataType *paramType, asCExprContext *ctx, asCScriptNode *node, bool isFunction = false, int refType = 0, bool isMakingCopy = false);
