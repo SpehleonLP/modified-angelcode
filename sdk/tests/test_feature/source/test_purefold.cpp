@@ -255,6 +255,56 @@ static bool TestNesting()
 	return fail;
 }
 
+static int NSum3(int a, int b, int c) { ++g_calls; return a * 100 + b * 10 + c; }
+static int NSeed() { ++g_calls; return 7; }
+static int NMix(int a, int b) { ++g_calls; return a * 100 + b * 10; }
+
+// Default arguments are compiled into the call before the fold sees it, so a call that
+// leaves some arguments to their defaults, positionally or by name, folds when the
+// defaults are constant too. The digits of the result show which value reached which parameter.
+static bool TestDefaults()
+{
+	bool fail = false;
+	COutStream out;
+	int sqrtId = 0;
+	asIScriptEngine *engine = MakeEngine(out, sqrtId);
+	Declare(engine, engine->RegisterGlobalFunction("int sum3(int a = 1, int b = 2, int c = 3)", asFUNCTION(NSum3), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	// seed() is not declared pure, so a default that calls it is not a constant
+	engine->RegisterGlobalFunction("int seed()", asFUNCTION(NSeed), asCALL_CDECL);
+	Declare(engine, engine->RegisterGlobalFunction("int mix(int a, int b = seed())", asFUNCTION(NMix), asCALL_CDECL), asMA_NONE, asMA_NONE);
+	g_calls = 0;
+	asIScriptModule *mod = Build(engine,
+		"int none() { return sum3(); }\n"
+		"int named() { return sum3(b: 4); }\n"
+		"int namedOutOfOrder() { return sum3(c: 9, a: 5); }\n"
+		"int positional() { return sum3(7); }\n"
+		"int mixed() { return sum3(6, c: 8); }\n"
+		"int seeded() { return mix(1); }\n");
+	if( mod == 0 ) { TEST_FAILED; engine->ShutDownAndRelease(); return fail; }
+	int sum3Id = IdOf(engine, "int sum3(int a = 1, int b = 2, int c = 3)");
+
+	if( CallsSystem(mod->GetFunctionByName("none"), sum3Id) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("named"), sum3Id) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("namedOutOfOrder"), sum3Id) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("positional"), sum3Id) ) TEST_FAILED;
+	if( CallsSystem(mod->GetFunctionByName("mixed"), sum3Id) ) TEST_FAILED;
+	if( !CallsSystem(mod->GetFunctionByName("seeded"), IdOf(engine, "int mix(int a, int b = seed())")) ) TEST_FAILED;
+
+	int afterBuild = g_calls;
+	double q = 0;
+	if( Run(engine, mod->GetFunctionByName("none"), q) != asEXECUTION_FINISHED || q != 123 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("named"), q) != asEXECUTION_FINISHED || q != 143 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("namedOutOfOrder"), q) != asEXECUTION_FINISHED || q != 529 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("positional"), q) != asEXECUTION_FINISHED || q != 723 ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("mixed"), q) != asEXECUTION_FINISHED || q != 628 ) TEST_FAILED;
+	// The folded calls ran no native; seeded() ran seed() and mix()
+	if( g_calls != afterBuild ) TEST_FAILED;
+	if( Run(engine, mod->GetFunctionByName("seeded"), q) != asEXECUTION_FINISHED || q != 170 ) TEST_FAILED;
+	if( g_calls != afterBuild + 2 ) TEST_FAILED;
+	engine->ShutDownAndRelease();
+	return fail;
+}
+
 static bool TestConstGlobal()
 {
 	bool fail = false;
@@ -681,6 +731,7 @@ bool Test()
 	fail = TestFolds() || fail;
 	fail = TestConversion() || fail;
 	fail = TestNesting() || fail;
+	fail = TestDefaults() || fail;
 	fail = TestConstGlobal() || fail;
 	fail = TestNotFolded() || fail;
 	fail = TestWidths() || fail;
