@@ -64,6 +64,25 @@ TEST(AngelScriptParseCondition, AssignOperatorParsesForTheWalkerToRefuse)
 	EXPECT_EQ(ChildCount(p.root()), 3);   // CONDITION ASSIGNOP ASSIGN
 }
 
+TEST(AngelScriptParseCondition, LessThanAtTheEndReadsNothingPastTheCode)
+{
+	// After a dot, the template-list lookahead decides call or property: `a.hp < limit` reaches
+	// the end of the code and checked the byte there for '>'. Sharing a buffer whose next byte IS
+	// '>' made that over-read read `hp<limit>` as a template call (an ASan build reports the read
+	// whatever the byte).
+	static char const buffer[] = "a.hp < limit>";
+	asCScriptEngine* engine = static_cast<asCScriptEngine*>(asCreateScriptEngine());
+	{
+		asCScriptCode           code;
+		asCArray<sParseMessage> messages;
+		code.SetCode("condition", buffer, std::strlen(buffer) - 1, false);
+		asCParser parser(engine, &messages);
+		EXPECT_EQ(parser.ParseAssignmentExpression(&code), 0);
+		EXPECT_EQ(messages.GetLength(), 0u);
+	}
+	engine->ShutDownAndRelease();
+}
+
 TEST(AngelScriptParseCondition, TrailingTokensAreAnError)
 {
 	Parsed p("a b");
