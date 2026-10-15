@@ -164,3 +164,45 @@ TEST_F(InitCtor, DiscardReleasesTheNewFunctions) {
 	Mod()->Discard();
 	engine->GarbageCollect();   // a missing release shows as a LeakSanitizer report at exit
 }
+
+namespace {
+struct Pinned { int v; };
+void PinnedCtor(int x, Pinned* self) { self->v = x; }
+
+struct NPinned { int v; explicit NPinned(int x) : v(x) {} ~NPinned() {} };
+void NPinnedCtor(int x, NPinned* self) { new (self) NPinned(x); }
+void NPinnedDtor(NPinned* self) { self->~NPinned(); }
+}
+
+TEST_F(InitCtor, RefusesAMemberWithNoDefaultConstructorAndNoInitializer) {
+	EXPECT_LT(Build("m",
+		"class Bar { Bar(int x) {} }\n"
+		"class Foo { Bar b; Foo() { b = Bar(3); } }\n"), 0);
+	EXPECT_NE(messages.find("member 'b' has no default constructor; give it a declaration initializer"), std::string::npos) << messages;
+}
+
+TEST_F(InitCtor, RefusesARegisteredValueTypeWithNoDefaultConstructor) {
+	ASSERT_GE(engine->RegisterObjectType("Pinned", sizeof(Pinned), asOBJ_VALUE | asOBJ_POD | asOBJ_APP_PRIMITIVE), 0);
+	ASSERT_GE(engine->RegisterObjectBehaviour("Pinned", asBEHAVE_CONSTRUCT, "void f(int)", asFUNCTION(PinnedCtor), asCALL_CDECL_OBJLAST), 0);
+	// asOBJ_POD makes Pinned zero-constructible, so this must build:
+	ASSERT_GE(Build("m", "class Foo { Pinned p; Foo() { p = Pinned(3); } }\n"), 0) << messages;
+}
+
+TEST_F(InitCtor, RefusesANonPodValueTypeWithNoDefaultConstructor) {
+	ASSERT_GE(engine->RegisterObjectType("NPinned", sizeof(NPinned), asOBJ_VALUE | asOBJ_APP_CLASS_CD), 0);
+	ASSERT_GE(engine->RegisterObjectBehaviour("NPinned", asBEHAVE_CONSTRUCT, "void f(int)", asFUNCTION(NPinnedCtor), asCALL_CDECL_OBJLAST), 0);
+	ASSERT_GE(engine->RegisterObjectBehaviour("NPinned", asBEHAVE_DESTRUCT, "void f()", asFUNCTION(NPinnedDtor), asCALL_CDECL_OBJLAST), 0);
+	EXPECT_LT(Build("m", "class Foo { NPinned p; Foo() { p = NPinned(3); } }\n"), 0);
+	EXPECT_NE(messages.find("member 'p' has no default constructor; give it a declaration initializer"), std::string::npos) << messages;
+}
+
+TEST_F(InitCtor, AcceptsAnInitializerOrAHandle) {
+	ASSERT_GE(Build("m",
+		"class Bar { int v; Bar(int x) { v = x; } }\n"
+		"class WithInit { Bar b = Bar(3); }\n"
+		"class WithHandle { Bar@ b; WithHandle() { @b = Bar(3); } }\n"), 0) << messages;
+	asIScriptObject* o = MakeWithInitializer("WithHandle");
+	ASSERT_NE(o, nullptr);
+	EXPECT_EQ(*static_cast<void**>(o->GetAddressOfProperty(0)), nullptr);
+	o->Release();
+}

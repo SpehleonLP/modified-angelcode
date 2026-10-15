@@ -277,6 +277,72 @@ int asCCompiler::CompileDefaultCopyConstructor(asCBuilder* in_builder, asCScript
 	return 0;
 }
 
+// The initializer constructor builds every member without running a
+// constructor body, so a member it cannot build from its declaration is
+// refused rather than left zeroed: the instance is destroyed afterwards, and
+// destroying a zeroed value object is a memory bug.
+static bool HasDefaultConstruction(asCScriptEngine *engine, const asCDataType &type)
+{
+	asSTypeBehaviour *beh = type.GetBehaviour();
+	bool const isRef = (type.GetTypeInfo()->flags & asOBJ_REF) != 0;
+	if( !isRef && (type.GetTypeInfo()->flags & asOBJ_POD) )
+	{
+		return true;
+	}
+	if( beh == 0 )
+	{
+		return false;
+	}
+	if( isRef ? beh->factory != 0 : beh->construct != 0 )
+	{
+		return true;
+	}
+	const asCArray<int> &candidates = isRef ? beh->factories : beh->constructors;
+	for( asUINT n = 0; n < candidates.GetLength(); n++ )
+	{
+		asCScriptFunction *f = engine->scriptFunctions[candidates[n]];
+		if( f->parameterTypes.GetLength() > 0 &&
+			f->defaultArgs.GetLength() == f->parameterTypes.GetLength() &&
+			f->defaultArgs[0] != 0 )
+		{
+			return true;
+		}
+	}
+	return false;
+}
+
+bool asCCompiler::CheckMembersDefaultInitializable()
+{
+	bool ok = true;
+	for( asUINT n = 0; n < outFunc->objectType->properties.GetLength(); n++ )
+	{
+		asCObjectProperty *prop = outFunc->objectType->properties[n];
+		if( prop->isInherited || !prop->type.IsObject() || prop->type.IsObjectHandle() )
+		{
+			continue;
+		}
+		for( asUINT m = 0; m < m_classDecl->propInits.GetLength(); m++ )
+		{
+			if( m_classDecl->propInits[m].name != prop->name )
+			{
+				continue;
+			}
+			if( m_classDecl->propInits[m].initNode == 0 && !HasDefaultConstruction(engine, prop->type) )
+			{
+				asCString msg;
+				msg.Format(TXT_MEMBER_s_NO_DEFAULT_CONSTR, prop->name.AddressOf());
+				asCScriptCode *origScript = script;
+				script = m_classDecl->propInits[m].file;
+				Error(msg, m_classDecl->propInits[m].declNode);
+				script = origScript;
+				ok = false;
+			}
+			break;
+		}
+	}
+	return ok;
+}
+
 int asCCompiler::CompileDefaultConstructor(asCBuilder *in_builder, asCScriptCode *in_script, asCScriptNode *in_node, asCScriptFunction *in_outFunc, sClassDeclaration *in_classDecl, bool in_initializerOnly)
 {
 	Reset(in_builder, in_script, in_outFunc);
@@ -289,6 +355,12 @@ int asCCompiler::CompileDefaultConstructor(asCBuilder *in_builder, asCScriptCode
 	// Add a variable scope that might be needed to declare dummy variables
 	// in case the member initialization refers to undefined symbols.
 	AddVariableScope();
+
+	// Report the member, not the generated constructor's generic failure
+	if( in_initializerOnly && !CheckMembersDefaultInitializable() )
+	{
+		return -1;
+	}
 
 	// Initialize the class members that have no explicit expression first. This will allow the
 	// base class' constructor to access these members without worry they will be uninitialized.

@@ -247,6 +247,9 @@ public:
 	int CompileGlobalVariable(asCBuilder *builder, asCScriptCode *script, asCScriptNode *expr, sGlobalVariableDescription *gvar, asCScriptFunction *outFunc);
 
 protected:
+	// Initializer-constructor member check (CompileDefaultConstructor only)
+	bool CheckMembersDefaultInitializable();
+
 	friend class asCBuilder;
 
 	void Reset(asCBuilder *builder, asCScriptCode *script, asCScriptFunction *outFunc);
