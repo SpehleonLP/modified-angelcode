@@ -206,6 +206,8 @@ public:
 	virtual void  SetFunctionUserDataCleanupCallback(asCLEANFUNCTIONFUNC_t callback, asPWORD type);
 	virtual void  SetTypeInfoUserDataCleanupCallback(asCLEANTYPEINFOFUNC_t callback, asPWORD type);
 	virtual void  SetScriptObjectUserDataCleanupCallback(asCLEANSCRIPTOBJECTFUNC_t callback, asPWORD type);
+	virtual void  SetScriptObjectCreatedCallback(asSCRIPTOBJECTLIFECYCLEFUNC_t callback);
+	virtual void  SetScriptObjectDestroyedCallback(asSCRIPTOBJECTLIFECYCLEFUNC_t callback);
 
 	// Exception handling
 	virtual int SetTranslateAppExceptionCallback(const asSFuncPtr &callback, void *param, int callConv);
@@ -486,6 +488,8 @@ public:
 	asCArray<STypeInfoClean>  cleanTypeInfoFuncs;
 	struct SScriptObjClean { asPWORD type; asCLEANSCRIPTOBJECTFUNC_t cleanFunc; };
 	asCArray<SScriptObjClean> cleanScriptObjectFuncs;
+	asSCRIPTOBJECTLIFECYCLEFUNC_t scriptObjectCreatedFunc;
+	asSCRIPTOBJECTLIFECYCLEFUNC_t scriptObjectDestroyedFunc;
 
 	// Synchronization for threads
 	DECLAREREADWRITELOCK(mutable engineRWLock)

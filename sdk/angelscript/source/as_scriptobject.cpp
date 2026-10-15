@@ -336,6 +336,7 @@ void RegisterScriptObject(asCScriptEngine *engine)
 	engine->scriptFunctions[ot.beh.construct]->SetMemoryAccess(asMA_PROGRAM, asMA_PROGRAM);
 #else
 	// Construct only zeroes the memory of a fresh object that just the caller holds
+	// The created callback reaches host state, but a host that registers objects keeps that state thread-safe, so construction still touches only this
 	engine->scriptFunctions[ot.beh.construct]->SetMemoryAccess(asMA_THIS, asMA_THIS);
 #endif
 	// Assignment reads the source object and may release handle members it overwrites
@@ -365,6 +366,7 @@ asCScriptObject::asCScriptObject(asCObjectType *ot, bool doInitialize)
 	objType->AddRef();
 	isDestructCalled = false;
 	extra = 0;
+	hostHandle = 0;
 	hasRefCountReachedZero = false;
 
 	// Notify the garbage collector of this object
@@ -374,6 +376,13 @@ asCScriptObject::asCScriptObject(asCObjectType *ot, bool doInitialize)
 	// Initialize members to zero. Technically we only need to zero the pointer
 	// members, but just the memset is faster than having to loop and check the datatypes
 	memset((void*)(this+1), 0, objType->size - sizeof(asCScriptObject));
+
+	// Members are zeroed but not yet initialized: a host that registers
+	// objects sees this one before any field initializer can reach it.
+	if( objType->engine->scriptObjectCreatedFunc )
+	{
+		objType->engine->scriptObjectCreatedFunc(this);
+	}
 
 	if( doInitialize )
 	{
@@ -433,6 +442,11 @@ void asCScriptObject::Destruct()
 
 asCScriptObject::~asCScriptObject()
 {
+	if( objType->engine && objType->engine->scriptObjectDestroyedFunc )
+	{
+		objType->engine->scriptObjectDestroyedFunc(this);
+	}
+
 	if( extra )
 	{
 		if( extra->weakRefFlag )
@@ -602,6 +616,22 @@ void *asCScriptObject::SetUserData(void *data, asPWORD type)
 	asReleaseExclusiveLock();
 
 	return 0;
+}
+
+asQWORD asCScriptObject::GetHostHandle() const
+{
+	return hostHandle;
+}
+
+void asCScriptObject::SetHostHandle(asQWORD handle)
+{
+	hostHandle = handle;
+}
+
+void asCScriptObject::ReleaseUnconstructed()
+{
+	isDestructCalled = true;
+	Release();
 }
 
 asIScriptEngine *asCScriptObject::GetEngine() const

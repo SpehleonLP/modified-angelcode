@@ -3154,8 +3154,27 @@ static const void *const dispatch_table[256] = {
 				// Pre-allocate the memory
 				asDWORD *mem = (asDWORD*)m_engine->CallAlloc(objType);
 
-				// Pre-initialize the memory by calling the constructor for asCScriptObject
+				// Pre-initialize the memory by calling the constructor for asCScriptObject.
+				// That is the registered construct behaviour, run inline, so the host's
+				// created callback may raise through SetException as from any system function.
+				m_callingSystemFunction = m_engine->scriptFunctions[m_engine->scriptTypeBehaviours.beh.construct];
 				ScriptObject_Construct(objType, (asCScriptObject*)mem);
+				m_callingSystemFunction = 0;
+
+				// The host's created callback refused this object: drop it before
+				// its constructor runs, so nothing else ever holds it. The constructor's
+				// arguments are already pushed, so lay the stack out as for the call and
+				// let the exception handler clean them as for any failed call.
+				if( m_status != asEXECUTION_ACTIVE )
+				{
+					((asCScriptObject*)mem)->ReleaseUnconstructed();
+
+					m_regs.stackPointer -= AS_PTR_SIZE;
+					*(asPWORD*)m_regs.stackPointer = 0;
+					m_regs.programPointer += 2+AS_PTR_SIZE;
+					m_needToCleanupArgs = true;
+					return;
+				}
 
 				// Call the constructor to initalize the memory
 				asCScriptFunction *f = m_engine->scriptFunctions[func];
@@ -5483,6 +5502,12 @@ void asCContext::CleanArgsOnStack()
 	{
 		int funcId = asBC_INTARG(prevInstr);
 		func = m_engine->importedFunctions[funcId & ~FUNC_IMPORTED]->importedFunctionSignature;
+	}
+	else if( bc == asBC_ALLOC )
+	{
+		// A script object refused by the host's created callback before its constructor ran
+		int funcId = asBC_INTARG(prevInstr+AS_PTR_SIZE);
+		func = m_engine->scriptFunctions[funcId];
 	}
 	else if( bc == asBC_CallPtr )
 	{

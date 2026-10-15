@@ -544,10 +544,11 @@ cmake --build <build-dir>
 `AS_SANITIZE` builds with ASan and UBSan. UBSan's `vptr` findings abort, because
 `AppContext.AppExceptionCaughtByEngineIsReportedToIt` pins a type confusion that
 only that check sees reliably. Other UBSan findings only print: the bytecode
-stores pointers at dword alignment by design, and `as_restore.cpp` passes null
-to `memcpy` with a zero size.
+stores pointers at dword alignment by design, `as_restore.cpp` passes null
+to `memcpy` with a zero size, and `as_context.cpp`'s live-object scan passes
+null to `memset` with a zero size for a function without object variables.
 
-All 112 tests should pass. 95 of them live in `tests/test_as_halting.cpp`,
+All 161 tests should pass. 95 of them live in `tests/test_as_halting.cpp`,
 across three fixtures that differ only in engine properties: `AsHalting`
 enables `asEP_ALLOW_UNSAFE_REFERENCES` (one test needs `int &inout` on a script
 function); `AsHaltingConstGlobalFuncdef` leaves it at its default of off,
@@ -555,7 +556,10 @@ which is the precondition for const-global funcdef resolution to fire at all
 (see that section above); and `AsHaltingNoOptimizer` turns
 `asEP_OPTIMIZE_BYTECODE` off. This is the suite every later halting-analysis
 change adds to. `tests/test_as_app_context.cpp` and
-`tests/test_as_compile_method.cpp` cover the two upstream-bound features.
+`tests/test_as_compile_method.cpp` cover the two upstream-bound features;
+`tests/test_as_initializer_constructor.cpp` and
+`tests/test_as_script_object_lifecycle.cpp` cover the initializer constructor
+and the script-object created/destroyed callbacks with the host handle.
 
 ### The obviousness audit
 

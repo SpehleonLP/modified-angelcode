@@ -100,6 +100,10 @@ public:
 	void *SetUserData(void *data, asPWORD type = 0);
 	void *GetUserData(asPWORD type = 0) const;
 
+	// Host handle
+	asQWORD GetHostHandle() const;
+	void    SetHostHandle(asQWORD handle);
+
 //====================================
 // Internal
 //====================================
@@ -124,6 +128,10 @@ public:
 	int  CopyFromAs(const asCScriptObject *other, asCObjectType *objType);
 
 	void CallDestructor();
+
+	// Drops the creator's reference to an object the host's created callback
+	// refused, without running a script destructor for a constructor that never ran
+	void ReleaseUnconstructed();
 
 //=============================================
 // Properties
@@ -150,6 +158,7 @@ protected:
 		asCArray<asPWORD>      userData;
 	};
 	mutable SExtra *extra;
+	asQWORD         hostHandle;
 };
 
 void ScriptObject_Construct(asCObjectType *objType, asCScriptObject *self);

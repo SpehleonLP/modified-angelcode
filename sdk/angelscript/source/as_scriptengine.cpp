@@ -775,6 +775,9 @@ asCScriptEngine::asCScriptEngine()
 
 	defaultArrayObjectType = 0;
 
+	scriptObjectCreatedFunc   = 0;
+	scriptObjectDestroyedFunc = 0;
+
 	RegisterScriptObject(this);
 	RegisterScriptFunction(this);
 
@@ -5759,8 +5762,20 @@ void *asCScriptEngine::CreateUninitializedScriptObject(const asITypeInfo *type)
 	// The initialization will be done by the application afterwards, e.g. through serialization.
 	asCScriptObject *obj = reinterpret_cast<asCScriptObject*>(CallAlloc(objType));
 
+	// A created callback can only refuse the object through a context that is
+	// calling this from a system function; it must not mistake an exception
+	// that was already pending for its own.
+	asIScriptContext *ctx = asGetActiveContext();
+	bool wasRaised = ctx && ctx->GetState() == asEXECUTION_EXCEPTION;
+
 	// Pre-initialize the memory so there are no invalid pointers
 	ScriptObject_ConstructUnitialized(objType, obj);
+
+	if( ctx && !wasRaised && ctx->GetState() == asEXECUTION_EXCEPTION )
+	{
+		obj->ReleaseUnconstructed();
+		return 0;
+	}
 
 	return obj;
 }
@@ -6894,6 +6909,18 @@ void asCScriptEngine::SetScriptObjectUserDataCleanupCallback(asCLEANSCRIPTOBJECT
 	cleanScriptObjectFuncs.PushLast(soc);
 
 	RELEASEEXCLUSIVE(engineRWLock);
+}
+
+// interface
+void asCScriptEngine::SetScriptObjectCreatedCallback(asSCRIPTOBJECTLIFECYCLEFUNC_t callback)
+{
+	scriptObjectCreatedFunc = callback;
+}
+
+// interface
+void asCScriptEngine::SetScriptObjectDestroyedCallback(asSCRIPTOBJECTLIFECYCLEFUNC_t callback)
+{
+	scriptObjectDestroyedFunc = callback;
 }
 
 // interface

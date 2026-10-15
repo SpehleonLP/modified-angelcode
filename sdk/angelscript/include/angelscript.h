@@ -440,6 +440,7 @@ typedef void (*asCLEANCONTEXTFUNC_t)(asIScriptContext *);
 typedef void (*asCLEANFUNCTIONFUNC_t)(asIScriptFunction *);
 typedef void (*asCLEANTYPEINFOFUNC_t)(asITypeInfo *);
 typedef void (*asCLEANSCRIPTOBJECTFUNC_t)(asIScriptObject *);
+typedef void (*asSCRIPTOBJECTLIFECYCLEFUNC_t)(asIScriptObject *);
 typedef asIScriptContext *(*asREQUESTCONTEXTFUNC_t)(asIScriptEngine *, void *);
 typedef void (*asRETURNCONTEXTFUNC_t)(asIScriptEngine *, asIScriptContext *, void *);
 typedef void (*asCIRCULARREFFUNC_t)(asITypeInfo *, const void *, void *);
@@ -831,6 +832,12 @@ public:
 	virtual void  SetFunctionUserDataCleanupCallback(asCLEANFUNCTIONFUNC_t callback, asPWORD type = 0) = 0;
 	virtual void  SetTypeInfoUserDataCleanupCallback(asCLEANTYPEINFOFUNC_t callback, asPWORD type = 0) = 0;
 	virtual void  SetScriptObjectUserDataCleanupCallback(asCLEANSCRIPTOBJECTFUNC_t callback, asPWORD type = 0) = 0;
+	// Fork: called for every script object, on the constructing thread, before
+	// any member initializer runs; and first thing in its destruction. Set both
+	// before any script object exists: they are read without a lock. A created
+	// callback may raise a script exception, which abandons the allocation.
+	virtual void  SetScriptObjectCreatedCallback(asSCRIPTOBJECTLIFECYCLEFUNC_t callback) = 0;
+	virtual void  SetScriptObjectDestroyedCallback(asSCRIPTOBJECTLIFECYCLEFUNC_t callback) = 0;
 
 	// Exception handling
 	virtual int SetTranslateAppExceptionCallback(const asSFuncPtr &callback, void *param, int callConv) = 0;
@@ -1092,6 +1099,11 @@ public:
 	// User data
 	virtual void *SetUserData(void *data, asPWORD type = 0) = 0;
 	virtual void *GetUserData(asPWORD type = 0) const = 0;
+
+	// Fork: one word the host owns, for an id it assigns in the created
+	// callback. Unlocked: write it only before the object is shared.
+	virtual asQWORD GetHostHandle() const = 0;
+	virtual void    SetHostHandle(asQWORD handle) = 0;
 
 protected:
 	virtual ~asIScriptObject() {}
