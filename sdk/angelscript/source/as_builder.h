@@ -67,6 +67,7 @@ struct sFunctionDescription
 	asCArray<asCString>  paramNames;
 	int                  funcId;
 	bool                 isExistingShared;
+	bool                 isInitializerConstructor = false;
 };
 
 struct sGlobalVariableDescription
@@ -240,6 +241,7 @@ protected:
 	void               GetParsedFunctionDetails(asCScriptNode *node, asCScriptCode *file, asCObjectType *objType, asCString &name, asCDataType &returnType, asCArray<asCString> &parameterNames, asCArray<asCDataType> &parameterTypes, asCArray<asETypeModifiers> &inOutFlags, asCArray<asCString *> &defaultArgs, asSFunctionTraits &traits, asSNameSpace *implicitNamespace);
 	bool               DoesMethodExist(asCObjectType *objType, int methodId, asUINT *methodIndex = 0);
 	void               AddDefaultConstructor(asCObjectType *objType, asCScriptCode *file);
+	void               AddInitializerConstructor(asCObjectType *objType, asCScriptCode *file);
 	void               AddDefaultCopyConstructor(asCObjectType *objType, asCScriptCode *file);		
 	asCObjectProperty *AddPropertyToClass(sClassDeclaration *c, const asCString &name, const asCDataType &type, bool isPrivate, bool isProtected, bool isInherited, asCScriptCode *file = 0, asCScriptNode *node = 0);
 	int                CreateVirtualFunction(asCScriptFunction *func, int idx);

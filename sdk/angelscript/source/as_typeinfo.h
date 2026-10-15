@@ -96,6 +96,7 @@ public:
 	asUINT             GetFactoryCount() const { return 0; }
 	asIScriptFunction *GetFactoryByIndex(asUINT index) const { UNUSED_VAR(index); return 0; }
 	asIScriptFunction *GetFactoryByDecl(const char *decl) const { UNUSED_VAR(decl); return 0; }
+	asIScriptFunction *GetInitializerFactory() const { return 0; }
 
 	// Methods
 	asUINT             GetMethodCount() const { return 0; }

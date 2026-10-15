@@ -831,6 +831,9 @@ void asCBuilder::ParseScripts()
 					 ((engine->ep.alwaysImplDefaultCopyConstruct == 0 && !copyConstructExists) || engine->ep.alwaysImplDefaultCopyConstruct == 1) )
 					AddDefaultCopyConstructor(ot, decl->script);
 
+				// Needs the class to be a script class with final flags; interfaces never reach here
+				AddInitializerConstructor(ot, decl->script);
+
 				// If the default constructor has not been generated now, then release the dummy 
 				if (ot->beh.construct == engine->scriptTypeBehaviours.beh.construct)
 				{
@@ -1096,7 +1099,7 @@ void asCBuilder::CompileFunctions()
 
 				// This is the default constructor that is generated
 				// automatically if not implemented by the user.
-				r = compiler.CompileDefaultConstructor(this, current->script, node, func, classDecl);
+				r = compiler.CompileDefaultConstructor(this, current->script, node, func, classDecl, current->isInitializerConstructor);
 			}
 			else
 			{
@@ -4721,6 +4724,59 @@ void asCBuilder::AddDefaultConstructor(asCObjectType *objType, asCScriptCode *fi
 	// If the object is shared, then the factory must also be marked as shared
 	if( objType->flags & asOBJ_SHARED )
 		engine->scriptFunctions[funcId]->SetShared(true);
+}
+
+void asCBuilder::AddInitializerConstructor(asCObjectType *objType, asCScriptCode *file)
+{
+	asASSERT( objType->beh.initConstruct == 0 );
+
+	int funcId = engine->GetNextScriptFunctionId();
+
+	asCDataType returnType = asCDataType::CreatePrimitive(ttVoid, false);
+	asCArray<asCDataType> parameterTypes;
+	asCArray<asETypeModifiers> inOutFlags;
+	asCArray<asCString *> defaultArgs;
+	asCArray<asCString> parameterNames;
+
+	module->AddScriptFunction(file->idx, 0, funcId, objType->name, returnType, parameterTypes, parameterNames, inOutFlags, defaultArgs, false, objType, false, asSFunctionTraits(), objType->nameSpace);
+	objType->beh.initConstruct = funcId;
+	engine->scriptFunctions[funcId]->AddRefInternal();
+
+	// Compiled with the other functions, once inheritance is established
+	sFunctionDescription *func = asNEW(sFunctionDescription);
+	if( func == 0 )
+	{
+		return;
+	}
+	functions.PushLast(func);
+	func->script                   = file;
+	func->node                     = 0;
+	func->name                     = objType->name;
+	func->objType                  = objType;
+	func->funcId                   = funcId;
+	func->isExistingShared         = false;
+	func->isInitializerConstructor = true;
+
+	// An abstract class is only ever reached through a derived class's
+	// initializer constructor, so it gets no factory.
+	if( objType->flags & asOBJ_ABSTRACT )
+	{
+		return;
+	}
+
+	funcId = engine->GetNextScriptFunctionId();
+	returnType = asCDataType::CreateObjectHandle(objType, false);
+	module->AddScriptFunction(file->idx, 0, funcId, objType->name, returnType, parameterTypes, parameterNames, inOutFlags, defaultArgs, false);
+	objType->beh.initFactory = funcId;
+	functions.PushLast(0);
+	asCCompiler compiler(engine);
+	compiler.CompileFactory(this, file, engine->scriptFunctions[funcId], objType->beh.initConstruct);
+	engine->scriptFunctions[funcId]->AddRefInternal();
+
+	if( objType->flags & asOBJ_SHARED )
+	{
+		engine->scriptFunctions[funcId]->SetShared(true);
+	}
 }
 
 int asCBuilder::RegisterEnum(asCScriptNode *node, asCScriptCode *file, asSNameSpace *ns)

@@ -57,6 +57,8 @@ struct asSTypeBehaviour
 		copyfactory = 0;
 		construct = 0; 
 		copyconstruct = 0;
+		initConstruct = 0;
+		initFactory = 0;
 		destruct = 0; 
 		copy = 0; 
 		addref = 0; 
@@ -75,6 +77,11 @@ struct asSTypeBehaviour
 	int copyfactory;
 	int construct;
 	int copyconstruct;
+	// Fork: field initializers only, no constructor body. Hot reload diffs
+	// declared defaults against an instance built this way. Kept out of
+	// constructors/factories so overload resolution never sees them.
+	int initConstruct;
+	int initFactory;
 	int destruct;
 	int copy;
 	int addref;
@@ -112,6 +119,7 @@ public:
 	asUINT             GetFactoryCount() const;
 	asIScriptFunction *GetFactoryByIndex(asUINT index) const;
 	asIScriptFunction *GetFactoryByDecl(const char *decl) const;
+	asIScriptFunction *GetInitializerFactory() const;
 	asUINT             GetMethodCount() const;
 	asIScriptFunction *GetMethodByIndex(asUINT index, bool getVirtual) const;
 	asIScriptFunction *GetMethodByName(const char *name, bool getVirtual) const;

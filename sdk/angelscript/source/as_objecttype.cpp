@@ -245,6 +245,16 @@ asIScriptFunction *asCObjectType::GetFactoryByIndex(asUINT index) const
 }
 
 // interface
+asIScriptFunction *asCObjectType::GetInitializerFactory() const
+{
+	if( beh.initFactory == 0 )
+	{
+		return 0;
+	}
+	return engine->GetFunctionById(beh.initFactory);
+}
+
+// interface
 asIScriptFunction *asCObjectType::GetFactoryByDecl(const char *decl) const
 {
 	if( beh.factories.GetLength() == 0 )
@@ -638,6 +648,18 @@ void asCObjectType::ReleaseAllFunctions()
 			engine->scriptFunctions[beh.constructors[b]]->ReleaseInternal();
 	}
 	beh.constructors.SetLength(0);
+
+	if( beh.initFactory )
+	{
+		engine->scriptFunctions[beh.initFactory]->ReleaseInternal();
+	}
+	beh.initFactory = 0;
+
+	if( beh.initConstruct )
+	{
+		engine->scriptFunctions[beh.initConstruct]->ReleaseInternal();
+	}
+	beh.initConstruct = 0;
 
 	if( beh.templateCallback )
 		engine->scriptFunctions[beh.templateCallback]->ReleaseInternal();

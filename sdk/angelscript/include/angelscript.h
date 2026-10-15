@@ -1131,6 +1131,11 @@ public:
 	virtual asUINT             GetFactoryCount() const = 0;
 	virtual asIScriptFunction *GetFactoryByIndex(asUINT index) const = 0;
 	virtual asIScriptFunction *GetFactoryByDecl(const char *decl) const = 0;
+	// Fork: a fresh object holding only the class's field initializers' values;
+	// no constructor body runs at any level of the base chain. Null for an
+	// abstract class, a type that is not a script class, or a type restored
+	// from bytecode.
+	virtual asIScriptFunction *GetInitializerFactory() const = 0;
 
 	// Methods
 	virtual asUINT             GetMethodCount() const = 0;

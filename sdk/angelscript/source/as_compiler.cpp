@@ -277,7 +277,7 @@ int asCCompiler::CompileDefaultCopyConstructor(asCBuilder* in_builder, asCScript
 	return 0;
 }
 
-int asCCompiler::CompileDefaultConstructor(asCBuilder *in_builder, asCScriptCode *in_script, asCScriptNode *in_node, asCScriptFunction *in_outFunc, sClassDeclaration *in_classDecl)
+int asCCompiler::CompileDefaultConstructor(asCBuilder *in_builder, asCScriptCode *in_script, asCScriptNode *in_node, asCScriptFunction *in_outFunc, sClassDeclaration *in_classDecl, bool in_initializerOnly)
 {
 	Reset(in_builder, in_script, in_outFunc);
 
@@ -298,14 +298,20 @@ int asCCompiler::CompileDefaultConstructor(asCBuilder *in_builder, asCScriptCode
 	// If the class is derived from another, then the base class' default constructor must be called
 	if( outFunc->objectType->derivedFrom )
 	{
+		// The initializer variant chains to the base's initializer constructor,
+		// so no constructor body runs anywhere along the base chain.
+		int const baseConstruct = in_initializerOnly
+			? outFunc->objectType->derivedFrom->beh.initConstruct
+			: outFunc->objectType->derivedFrom->beh.construct;
+
 		// Make sure the base class really has a default constructor
-		if( outFunc->objectType->derivedFrom->beh.construct == 0 )
+		if( baseConstruct == 0 )
 			Error(TXT_BASE_DOESNT_HAVE_DEF_CONSTR, in_node);
 
 		// Call the base class' default constructor
 		byteCode.InstrSHORT(asBC_PSF, 0);
 		byteCode.Instr(asBC_RDSPtr);
-		byteCode.Call(asBC_CALL, outFunc->objectType->derivedFrom->beh.construct, AS_PTR_SIZE);
+		byteCode.Call(asBC_CALL, baseConstruct, AS_PTR_SIZE);
 	}
 
 	// Initialize the class members that explicit expressions afterwards. This allow the expressions
@@ -334,7 +340,7 @@ int asCCompiler::CompileDefaultConstructor(asCBuilder *in_builder, asCScriptCode
 	return 0;
 }
 
-int asCCompiler::CompileFactory(asCBuilder *in_builder, asCScriptCode *in_script, asCScriptFunction *in_outFunc)
+int asCCompiler::CompileFactory(asCBuilder *in_builder, asCScriptCode *in_script, asCScriptFunction *in_outFunc, int in_constructor)
 {
 	Reset(in_builder, in_script, in_outFunc);
 
@@ -343,13 +349,16 @@ int asCCompiler::CompileFactory(asCBuilder *in_builder, asCScriptCode *in_script
 
 	// Find the corresponding constructor
 	asCDataType dt = asCDataType::CreateType(outFunc->returnType.GetTypeInfo(), false);
-	int constructor = 0;
-	for( unsigned int n = 0; n < dt.GetBehaviour()->factories.GetLength(); n++ )
+	int constructor = in_constructor;
+	if( constructor == 0 )
 	{
-		if( dt.GetBehaviour()->factories[n] == outFunc->id )
+		for( unsigned int n = 0; n < dt.GetBehaviour()->factories.GetLength(); n++ )
 		{
-			constructor = dt.GetBehaviour()->constructors[n];
-			break;
+			if( dt.GetBehaviour()->factories[n] == outFunc->id )
+			{
+				constructor = dt.GetBehaviour()->constructors[n];
+				break;
+			}
 		}
 	}
 
