@@ -86,6 +86,7 @@
 #define TXT_CLASS_CANT_BE_FINAL_AND_ABSTRACT       "A class cannot be both abstract and final"
 #define TXT_COMPILING_s                            "Compiling %s"
 #define TXT_COMPILING_AUTO_s                       "Compiling auto generated %s"
+#define TXT_COMPILING_FIELD_INITIALIZERS_s         "Compiling field initializers of %s"
 #define TXT_COMPOUND_ASGN_ON_VALUE_TYPE            "Compound assignments with property accessors on value types are not supported"
 #define TXT_COMPOUND_ASGN_WITH_IDX_PROP            "Compound assignments with indexed property accessors are not supported"
 #define TXT_COMPOUND_ASGN_REQUIRE_GET_SET          "Compound assignments with property accessors require both get and set accessors"

@@ -141,6 +141,7 @@ void asCCompiler::Reset(asCBuilder *in_builder, asCScriptCode *in_script, asCScr
 	m_isConstructorCalled = false;
 	m_hasReturned         = false;
 	m_classDecl           = 0;
+	m_initializerOnly     = false;
 	m_globalVar           = 0;
 
 	nextLabel = 0;
@@ -355,6 +356,8 @@ int asCCompiler::CompileDefaultConstructor(asCBuilder *in_builder, asCScriptCode
 	// Add a variable scope that might be needed to declare dummy variables
 	// in case the member initialization refers to undefined symbols.
 	AddVariableScope();
+
+	m_initializerOnly = in_initializerOnly;
 
 	// Report the member, not the generated constructor's generic failure
 	if( in_initializerOnly && !CheckMembersDefaultInitializable() )
@@ -1373,13 +1376,15 @@ void asCCompiler::CompileMemberInitialization(asCByteCode *bc, bool onlyDefaults
 		asCScriptNode *declNode = 0;
 		asCScriptNode *initNode = 0;
 		asCScriptCode *initScript = 0;
+		sPropertyInitializer *propInit = 0;
 		for( asUINT m = 0; m < m_classDecl->propInits.GetLength(); m++ )
 		{
 			if( m_classDecl->propInits[m].name == prop->name )
 			{
-				declNode   = m_classDecl->propInits[m].declNode;
-				initNode   = m_classDecl->propInits[m].initNode;
-				initScript = m_classDecl->propInits[m].file;
+				propInit   = &m_classDecl->propInits[m];
+				declNode   = propInit->declNode;
+				initNode   = propInit->initNode;
+				initScript = propInit->file;
 				break;
 			}
 		}
@@ -1388,11 +1393,34 @@ void asCCompiler::CompileMemberInitialization(asCByteCode *bc, bool onlyDefaults
 		// it was already initialized by the base class' constructor
 		if( declNode )
 		{
+			if( initNode ? onlyDefaults : !onlyDefaults )
+			{
+				continue;
+			}
+
+			// The initializer constructor compiles every initializer again, and an
+			// author must see each diagnostic once. The build still fails: a silent
+			// error is still counted.
+			struct SSilence
+			{
+				asCBuilder *builder;
+				bool        wasSilent;
+				~SSilence() { builder->silent = wasSilent; }
+			} silence = { builder, builder->silent };
+			if( m_initializerOnly )
+			{
+				if( propInit->compiledByConstructor )
+				{
+					builder->silent = true;
+				}
+			}
+			else
+			{
+				propInit->compiledByConstructor = true;
+			}
+
 			if( initNode )
 			{
-				if( onlyDefaults )
-					continue;
-
 #ifdef AS_NO_MEMBER_INIT
 				// Give an error as the initialization in the declaration has been disabled
 				asCScriptCode *origScript = script;
@@ -1411,11 +1439,6 @@ void asCCompiler::CompileMemberInitialization(asCByteCode *bc, bool onlyDefaults
 
 				initNode = parser.GetScriptNode();
 #endif
-			}
-			else
-			{
-				if( !onlyDefaults )
-					continue;
 			}
 
 #ifdef AS_NO_MEMBER_INIT

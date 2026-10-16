@@ -206,3 +206,39 @@ TEST_F(InitCtor, AcceptsAnInitializerOrAHandle) {
 	EXPECT_EQ(*static_cast<void**>(o->GetAddressOfProperty(0)), nullptr);
 	o->Release();
 }
+
+namespace {
+size_t CountOf(const std::string& haystack, const std::string& needle) {
+	size_t count = 0;
+	for (size_t at = haystack.find(needle); at != std::string::npos; at = haystack.find(needle, at + needle.size())) {
+		++count;
+	}
+	return count;
+}
+}
+
+// The initializer constructor compiles every field initializer a second time;
+// an author must still see each diagnostic once.
+TEST_F(InitCtor, AnInitializerWarningIsReportedOnce) {
+	ASSERT_GE(Build("m", "class Foo { int x = 1.5f; Foo() {} }\n"), 0) << messages;
+	EXPECT_EQ(CountOf(messages, "Implicit conversion"), 1u) << messages;
+}
+
+TEST_F(InitCtor, AnInitializerErrorIsReportedOnceAndStillFailsTheBuild) {
+	EXPECT_LT(Build("m", "class Foo { int x = noSuchSymbol; Foo() {} }\n"), 0);
+	EXPECT_EQ(CountOf(messages, "No matching symbol 'noSuchSymbol'"), 1u) << messages;
+}
+
+// Under member-init mode 1 a constructor that assigns the field in its body skips
+// the initializer, so the initializer constructor is the only one to report it.
+TEST_F(InitCtor, AnInitializerOnlyTheInitializerConstructorCompilesIsStillReported) {
+	ASSERT_GE(engine->SetEngineProperty(asEP_MEMBER_INIT_MODE, 1), 0);
+	EXPECT_LT(Build("m", "class Foo { int x = noSuchSymbol; Foo() { x = 2; } }\n"), 0);
+	EXPECT_EQ(CountOf(messages, "No matching symbol 'noSuchSymbol'"), 1u) << messages;
+}
+
+TEST_F(InitCtor, NamesTheFieldInitializersInItsPreMessage) {
+	ASSERT_GE(engine->SetEngineProperty(asEP_MEMBER_INIT_MODE, 1), 0);
+	EXPECT_LT(Build("m", "class Foo { int x = noSuchSymbol; Foo() { x = 2; } }\n"), 0);
+	EXPECT_NE(messages.find("Compiling field initializers of Foo"), std::string::npos) << messages;
+}

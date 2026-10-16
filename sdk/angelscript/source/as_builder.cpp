@@ -1093,8 +1093,18 @@ void asCBuilder::CompileFunctions()
 				if (node)
 					current->script->ConvertPosToRowCol(node->tokenPos, &r, &c);
 
-				asCString str = func->GetDeclarationStr();
-				str.Format(TXT_COMPILING_AUTO_s, str.AddressOf());
+				// Its declaration reads exactly like the default constructor's, so
+				// name what it compiles instead.
+				asCString str;
+				if( current->isInitializerConstructor )
+				{
+					str.Format(TXT_COMPILING_FIELD_INITIALIZERS_s, current->objType->name.AddressOf());
+				}
+				else
+				{
+					str = func->GetDeclarationStr();
+					str.Format(TXT_COMPILING_AUTO_s, str.AddressOf());
+				}
 				WriteInfo(current->script->name, str, r, c, true);
 
 				// This is the default constructor that is generated

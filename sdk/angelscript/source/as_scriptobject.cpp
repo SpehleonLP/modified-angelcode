@@ -1114,7 +1114,21 @@ void *asCScriptObject::AllocateUninitializedObject(asCObjectType *in_objType, as
 	if( in_objType->flags & asOBJ_SCRIPT_OBJECT )
 	{
 		ptr = engine->CallAlloc(in_objType);
+
+		// As in CreateUninitializedScriptObject: a created callback refuses the
+		// member through the calling context, and an exception already pending
+		// is not its refusal. The owner sees the same exception and unwinds too,
+		// and its destructor skips the null member.
+		asIScriptContext *ctx = asGetActiveContext();
+		bool wasRaised = ctx && ctx->GetState() == asEXECUTION_EXCEPTION;
+
 		ScriptObject_ConstructUnitialized(in_objType, reinterpret_cast<asCScriptObject*>(ptr));
+
+		if( ctx && !wasRaised && ctx->GetState() == asEXECUTION_EXCEPTION )
+		{
+			reinterpret_cast<asCScriptObject*>(ptr)->ReleaseUnconstructed();
+			return 0;
+		}
 	}
 	else if( in_objType->flags & asOBJ_TEMPLATE )
 	{

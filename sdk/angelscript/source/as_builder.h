@@ -90,12 +90,15 @@ struct sPropertyInitializer
 {
 	sPropertyInitializer() : declNode(0), initNode(0), file(0) {}
 	sPropertyInitializer(const asCString &nm, asCScriptNode *decl, asCScriptNode *init, asCScriptCode *f) : name(nm), declNode(decl), initNode(init), file(f) {}
-	sPropertyInitializer &operator=(const sPropertyInitializer &o) {name = o.name; declNode = o.declNode; initNode = o.initNode; file = o.file; return *this;}
+	sPropertyInitializer &operator=(const sPropertyInitializer &o) {name = o.name; declNode = o.declNode; initNode = o.initNode; file = o.file; compiledByConstructor = o.compiledByConstructor; return *this;}
 
 	asCString      name;
 	asCScriptNode *declNode;
 	asCScriptNode *initNode;
 	asCScriptCode *file;
+	// The initializer constructor compiles every initializer again; one an
+	// ordinary constructor already compiled has already reported its diagnostics.
+	bool           compiledByConstructor = false;
 };
 
 struct sClassDeclaration

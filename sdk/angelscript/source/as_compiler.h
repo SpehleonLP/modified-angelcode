@@ -427,6 +427,7 @@ protected:
 	asCMap<asCObjectProperty*, asUINT> m_propertyAccessCount; // Doesn't hold reference
 	asCMap<asCObjectProperty*, asCScriptNode*> m_inheritedPropertyAccess; // Doesn't hold reference
 	sClassDeclaration           *m_classDecl;
+	bool                         m_initializerOnly;
 	sGlobalVariableDescription  *m_globalVar;
 
 	asCArray<int> breakLabels;

@@ -22,6 +22,7 @@ int                           g_failAfter = -1;   // -1 = never raise
 
 asIScriptEngine* g_engine = nullptr;
 asITypeInfo*     g_fooType = nullptr;
+asITypeInfo*     g_outerType = nullptr;
 void*            g_uninitResult = nullptr;
 
 void OnCreated(asIScriptObject* o) {
@@ -41,6 +42,9 @@ int CreatedCount() { return int(g_created.size()); }
 void CreateUninitializedFoo() {
 	g_uninitResult = g_engine->CreateUninitializedScriptObject(g_fooType);
 }
+void CreateUninitializedOuter() {
+	g_uninitResult = g_engine->CreateUninitializedScriptObject(g_outerType);
+}
 
 struct Lifecycle : ::testing::Test {
 	asIScriptEngine* engine = nullptr;
@@ -59,6 +63,7 @@ struct Lifecycle : ::testing::Test {
 		engine->SetScriptObjectDestroyedCallback(OnDestroyed);
 		ASSERT_GE(engine->RegisterGlobalFunction("int createdCount()", asFUNCTION(CreatedCount), asCALL_CDECL), 0);
 		ASSERT_GE(engine->RegisterGlobalFunction("void createUninitializedFoo()", asFUNCTION(CreateUninitializedFoo), asCALL_CDECL), 0);
+		ASSERT_GE(engine->RegisterGlobalFunction("void createUninitializedOuter()", asFUNCTION(CreateUninitializedOuter), asCALL_CDECL), 0);
 		mod = engine->GetModule("m", asGM_ALWAYS_CREATE);
 		mod->AddScriptSection("s",
 			"class Foo { int v = 5; }\n"
@@ -69,15 +74,18 @@ struct Lifecycle : ::testing::Test {
 			"Foo@ makeFoo() { return Foo(); }\n"
 			"void makeOuter() { Outer o; }\n"
 			"void makeHeld() { Inner i; Held h(i); }\n"
-			"void makeUninitialized() { createUninitializedFoo(); }\n");
+			"void makeUninitialized() { createUninitializedFoo(); }\n"
+			"void makeUninitializedOuter() { createUninitializedOuter(); }\n");
 		ASSERT_GE(mod->Build(), 0) << messages;
 		g_engine = engine;
 		g_fooType = Type("Foo");
+		g_outerType = Type("Outer");
 	}
 	void TearDown() override {
 		engine->ShutDownAndRelease();
 		g_engine = nullptr;
 		g_fooType = nullptr;
+		g_outerType = nullptr;
 	}
 
 	asITypeInfo* Type(const char* name) { return mod->GetTypeInfoByName(name); }
@@ -192,6 +200,20 @@ TEST_F(Lifecycle, AnUninitializedCreateThatRaisesReturnsNull) {
 	EXPECT_EQ(g_uninitResult, nullptr);
 	EXPECT_TRUE(g_created.empty());
 	EXPECT_EQ(g_destroyedHandles.size(), 1u);
+}
+
+// An uninitialized owner allocates its members uninitialized too. A refused
+// member is destroyed at the refusal, before its owner unwinds, rather than
+// living on unregistered inside it.
+TEST_F(Lifecycle, AnUninitializedMemberThatRaisesIsDestroyedAtTheRefusal) {
+	g_failAfter = 1;
+	g_uninitResult = reinterpret_cast<void*>(1);
+	Call("void makeUninitializedOuter()", asEXECUTION_EXCEPTION);
+	EXPECT_EQ(g_uninitResult, nullptr);
+	ASSERT_EQ(g_created.size(), 1u);
+	ASSERT_EQ(g_destroyedHandles.size(), 2u);   // AS_SANITIZE reports any leak
+	EXPECT_EQ(g_destroyedHandles[0], 0u);   // the refused Inner, which never got a handle
+	EXPECT_EQ(g_destroyedHandles[1], 1u);   // then Outer
 }
 
 TEST(LifecycleThreads, CallbacksFireOnEveryThread) {
