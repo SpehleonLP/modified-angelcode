@@ -185,8 +185,9 @@ protected:
 	friend class asCObjectType;
 	asCTypeInfo();
 
-	mutable asCAtomic externalRefCount;
-	asCAtomic         internalRefCount;
+	// External and internal reference counts; see asCDualRefCount for why
+	// they share one atomic
+	mutable asCDualRefCount refCounts;
 };
 
 struct asSEnumValue

@@ -79,7 +79,100 @@ asDWORD asCAtomic::atomicDec()
 	// memory that has been overwritten or is being accessed after it was deleted.
 	asASSERT(value.load(std::memory_order_relaxed) < 1000000);
 
-	return value.fetch_sub(1, std::memory_order_seq_cst) - 1;
+	asDWORD prior = value.fetch_sub(1, std::memory_order_seq_cst);
+
+	// Decrementing a zero count means a reference was released twice
+	asASSERT(prior > 0);
+
+	return prior - 1;
+}
+
+static const asQWORD AS_EXTERNAL_ONE = asQWORD(1) << 32;
+
+static asDWORD ExternalPart(asQWORD v)
+{
+	return asDWORD(v >> 32);
+}
+
+static asDWORD InternalPart(asQWORD v)
+{
+	return asDWORD(v & 0xFFFFFFFFu);
+}
+
+asCDualRefCount::asCDualRefCount() : value(0)
+{
+}
+
+asDWORD asCDualRefCount::getExternal() const
+{
+	asQWORD v = value.load(std::memory_order_acquire);
+
+	// A very high ref count is highly unlikely. It most likely a problem with
+	// memory that has been overwritten or is being accessed after it was deleted.
+	asASSERT(ExternalPart(v) < 1000000);
+
+	return ExternalPart(v);
+}
+
+asDWORD asCDualRefCount::getInternal() const
+{
+	asQWORD v = value.load(std::memory_order_acquire);
+
+	// A very high ref count is highly unlikely. It most likely a problem with
+	// memory that has been overwritten or is being accessed after it was deleted.
+	asASSERT(InternalPart(v) < 1000000);
+
+	return InternalPart(v);
+}
+
+void asCDualRefCount::set(asDWORD external, asDWORD internal)
+{
+	value.store((asQWORD(external) << 32) | internal, std::memory_order_relaxed);
+}
+
+// seq_cst for the same reason as asCAtomic::atomicInc
+asDWORD asCDualRefCount::incExternal()
+{
+	asQWORD prior = value.fetch_add(AS_EXTERNAL_ONE, std::memory_order_seq_cst);
+
+	// A very high ref count is highly unlikely. It most likely a problem with
+	// memory that has been overwritten or is being accessed after it was deleted.
+	asASSERT(ExternalPart(prior) < 1000000);
+
+	return ExternalPart(prior) + 1;
+}
+
+asDWORD asCDualRefCount::incInternal()
+{
+	asQWORD prior = value.fetch_add(1, std::memory_order_seq_cst);
+
+	// A very high ref count is highly unlikely. It most likely a problem with
+	// memory that has been overwritten or is being accessed after it was deleted.
+	asASSERT(InternalPart(prior) < 1000000);
+
+	return InternalPart(prior) + 1;
+}
+
+asDWORD asCDualRefCount::decExternal(bool &isLastRef)
+{
+	asQWORD prior = value.fetch_sub(AS_EXTERNAL_ONE, std::memory_order_seq_cst);
+
+	// Decrementing a zero count means a reference was released twice
+	asASSERT(ExternalPart(prior) > 0);
+
+	isLastRef = (prior == AS_EXTERNAL_ONE);
+	return ExternalPart(prior) - 1;
+}
+
+asDWORD asCDualRefCount::decInternal(bool &isLastRef)
+{
+	asQWORD prior = value.fetch_sub(1, std::memory_order_seq_cst);
+
+	// Decrementing a zero count would borrow from the external count
+	asASSERT(InternalPart(prior) > 0);
+
+	isLastRef = (prior == 1);
+	return InternalPart(prior) - 1;
 }
 
 //

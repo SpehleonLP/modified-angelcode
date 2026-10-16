@@ -3774,7 +3774,7 @@ void asCScriptEngine::RemoveTemplateInstanceType(asCObjectType *t)
 		return;
 
 	// Don't remove it if there are external refernces
-	if( t->externalRefCount.get() )
+	if( t->refCounts.getExternal() )
 		return;
 
 	// Only remove the template instance type if no config group is using it
@@ -6058,7 +6058,7 @@ int asCScriptEngine::RemoveConfigGroup(const char *groupName)
 				RemoveTemplateInstanceType(generatedTemplateTypes[g]);
 
 			// Make sure the group isn't referenced by anyone
-			if( group->refCount > 0 )
+			if( group->refCount.get() > 0 )
 				return asCONFIG_GROUP_IS_IN_USE;
 
 			// Verify if any objects registered in this group is still alive

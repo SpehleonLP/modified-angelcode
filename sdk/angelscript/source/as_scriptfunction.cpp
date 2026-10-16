@@ -365,13 +365,11 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	if( funcType == asFUNC_DELEGATE )
 	{
 		// Delegates behave like object instances, rather than script code
-		externalRefCount.set(1);
-		internalRefCount.set(0);
+		refCounts.set(1, 0);
 	}
 	else
 	{
-		internalRefCount.set(1);
-		externalRefCount.set(0);
+		refCounts.set(0, 1);
 	}
 
 	this->engine           = engine;
@@ -444,7 +442,7 @@ asCScriptFunction::~asCScriptFunction()
 {
 	// Dummy functions that are allocated on the stack are not reference counted
 	asASSERT( funcType == asFUNC_DUMMY    ||
-		      (externalRefCount.get() == 0 && internalRefCount.get() == 0) );
+		      (refCounts.getExternal() == 0 && refCounts.getInternal() == 0) );
 
 	// Remove the script function from the engine's scriptFunctions array here
 	// Don't remove it before, because there may still be functions referring to it
@@ -465,7 +463,7 @@ asCScriptFunction::~asCScriptFunction()
 // internal
 void asCScriptFunction::DestroyHalfCreated()
 {
-	asASSERT( externalRefCount.get() == 0 && internalRefCount.get() == 1 );
+	asASSERT( refCounts.getExternal() == 0 && refCounts.getInternal() == 1 );
 
 	// Set the funcType to dummy so the destructor won't complain
 	funcType = asFUNC_DUMMY;
@@ -540,27 +538,25 @@ int asCScriptFunction::GetId() const
 int asCScriptFunction::AddRef() const
 {
 	gcFlag.store(false, std::memory_order_relaxed);
-	return externalRefCount.atomicInc();
+	return refCounts.incExternal();
 }
 
 // interface
 int asCScriptFunction::Release() const
 {
 	gcFlag.store(false, std::memory_order_relaxed);
-	int r = externalRefCount.atomicDec();
-	if( r == 0 &&
+	bool isLastRef;
+	int r = refCounts.decExternal(isLastRef);
+	if( isLastRef &&
 		funcType != asFUNC_DUMMY )    // Dummy functions are allocated on the stack and cannot be deleted
 	{
-		// There are no more external references, if there are also no
-		// internal references then it is time to delete the function
-		if( internalRefCount.get() == 0 )
-		{
-			// If there are no internal references, then no module is owning the function
-			// For example if the function was dynamically compiled without adding it to the scope of the module
-			asASSERT( module == 0 );
+		// There are no more external or internal references, so it is time
+		// to delete the function. With no internal references no module owns
+		// the function, for example if it was dynamically compiled without
+		// adding it to the scope of the module.
+		asASSERT( module == 0 );
 
-			asDELETE(const_cast<asCScriptFunction*>(this),asCScriptFunction);
-		}
+		asDELETE(const_cast<asCScriptFunction*>(this),asCScriptFunction);
 	}
 
 	return r;
@@ -569,22 +565,20 @@ int asCScriptFunction::Release() const
 // internal
 int asCScriptFunction::AddRefInternal()
 {
-	return internalRefCount.atomicInc();
+	return refCounts.incInternal();
 }
 
 // internal
 int asCScriptFunction::ReleaseInternal()
 {
-	int r = internalRefCount.atomicDec();
-	if( r == 0 &&
+	bool isLastRef;
+	int r = refCounts.decInternal(isLastRef);
+	if( isLastRef &&
 		funcType != asFUNC_DUMMY )
 	{
-		// There are no more internal references, if there are also no
-		// external references then it is time to delete the function
-		if( externalRefCount.get() == 0 )
-		{
-			asDELETE(const_cast<asCScriptFunction*>(this),asCScriptFunction);
-		}
+		// There are no more internal or external references, so it is time
+		// to delete the function
+		asDELETE(const_cast<asCScriptFunction*>(this),asCScriptFunction);
 	}
 
 	return r;
@@ -1812,7 +1806,7 @@ int asCScriptFunction::GetRefCount()
 {
 	asASSERT( funcType == asFUNC_DELEGATE );
 
-	return externalRefCount.get();
+	return refCounts.getExternal();
 }
 
 // internal

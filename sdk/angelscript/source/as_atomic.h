@@ -76,6 +76,39 @@ protected:
 // offsets from, so the atomic must not widen the field.
 static_assert(sizeof(asCAtomic) == 4, "asCAtomic must stay one dword");
 
+// The external (application) and internal (engine) reference counts of an
+// object that is deleted only once both are zero. They share one atomic word
+// so that each decrement observes both counts at once: exactly one decrement,
+// the one that takes the combined word to zero, reports the last reference.
+// With two separate counters, two threads that each zero one counter can
+// both see the other at zero and delete twice, and a thread that zeroes its
+// counter and then reads the other can read an object already freed.
+class asCDualRefCount
+{
+public:
+	asCDualRefCount();
+
+	// Acquire loads, for the same reason as asCAtomic::get()
+	asDWORD getExternal() const;
+	asDWORD getInternal() const;
+
+	// Relaxed store; only initializes counts no other thread can see yet
+	void    set(asDWORD external, asDWORD internal);
+
+	// Increase and return the new value of that count
+	asDWORD incExternal();
+	asDWORD incInternal();
+
+	// Decrease and return the new value of that count. isLastRef is set only
+	// for the single decrement that leaves both counts at zero.
+	asDWORD decExternal(bool &isLastRef);
+	asDWORD decInternal(bool &isLastRef);
+
+protected:
+	// External count in the high dword, internal count in the low dword
+	std::atomic<asQWORD> value;
+};
+
 END_AS_NAMESPACE
 
 #endif

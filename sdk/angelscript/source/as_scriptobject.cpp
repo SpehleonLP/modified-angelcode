@@ -365,7 +365,7 @@ asCScriptObject::asCScriptObject(asCObjectType *ot, bool doInitialize)
 	objType = ot;
 	objType->AddRef();
 	isDestructCalled = false;
-	extra = 0;
+	extra.store(0, std::memory_order_relaxed);
 	hostHandle.store(0, std::memory_order_relaxed);
 	hasRefCountReachedZero.store(false, std::memory_order_relaxed);
 	gcFlag.store(false, std::memory_order_relaxed);
@@ -448,29 +448,38 @@ asCScriptObject::~asCScriptObject()
 		objType->engine->scriptObjectDestroyedFunc(this);
 	}
 
-	if( extra )
+	// The last reference is gone, so this thread owns extra exclusively; the
+	// refcount decrement chain orders every earlier write to it before this.
+	SExtra *ex = extra.load(std::memory_order_relaxed);
+	if( ex )
 	{
-		if( extra->weakRefFlag )
+		asCLockableSharedBool *weakRefFlag = ex->weakRefFlag.load(std::memory_order_relaxed);
+		if( weakRefFlag )
 		{
-			extra->weakRefFlag->Release();
-			extra->weakRefFlag = 0;
+			weakRefFlag->Release();
+			ex->weakRefFlag.store(0, std::memory_order_relaxed);
 		}
 
 		if( objType->engine )
 		{
 			// Clean the user data
-			for( asUINT n = 0; n < extra->userData.GetLength(); n += 2 )
+			for( asUINT n = 0; n < ex->userData.GetLength(); n += 2 )
 			{
-				if( extra->userData[n+1] )
+				if( ex->userData[n+1] )
 				{
 					for( asUINT c = 0; c < objType->engine->cleanScriptObjectFuncs.GetLength(); c++ )
-						if( objType->engine->cleanScriptObjectFuncs[c].type == extra->userData[n] )
+					{
+						if( objType->engine->cleanScriptObjectFuncs[c].type == ex->userData[n] )
+						{
 							objType->engine->cleanScriptObjectFuncs[c].cleanFunc(this);
+						}
+					}
 				}
 			}
 		}
 
-		asDELETE(extra, SExtra);
+		extra.store(0, std::memory_order_relaxed);
+		asDELETE(ex, SExtra);
 	}
 
 	// The engine pointer should be available from the objectType
@@ -529,13 +538,30 @@ asCScriptObject::~asCScriptObject()
 	asASSERT( refCount.get() == 0 );
 }
 
+asCScriptObject::SExtra *asCScriptObject::GetOrCreateExtraLocked() const
+{
+	// The caller holds the exclusive lock, so no other thread can be storing
+	// extra and a relaxed load sees the latest value
+	SExtra *ex = extra.load(std::memory_order_relaxed);
+	if( !ex )
+	{
+		ex = asNEW(SExtra);
+		extra.store(ex, std::memory_order_release);
+	}
+	return ex;
+}
+
 asILockableSharedBool *asCScriptObject::GetWeakRefFlag() const
 {
 	// If the object's refCount has already reached zero then the object is already
 	// about to be destroyed so it's ok to return null if the weakRefFlag doesn't already
 	// exist
-	if( (extra && extra->weakRefFlag) || hasRefCountReachedZero.load(std::memory_order_relaxed) )
-		return extra->weakRefFlag;
+	SExtra *ex = extra.load(std::memory_order_acquire);
+	asCLockableSharedBool *weakRefFlag = ex ? ex->weakRefFlag.load(std::memory_order_acquire) : 0;
+	if( weakRefFlag || hasRefCountReachedZero.load(std::memory_order_relaxed) )
+	{
+		return weakRefFlag;
+	}
 
 	// Lock globally so no other thread can attempt
 	// to create a shared bool at the same time.
@@ -546,31 +572,37 @@ asILockableSharedBool *asCScriptObject::GetWeakRefFlag() const
 
 	// Make sure another thread didn't create the 
 	// flag while we waited for the lock
-	if( !extra )
-		extra = asNEW(SExtra);
-	if( !extra->weakRefFlag )
-		extra->weakRefFlag = asNEW(asCLockableSharedBool);
+	ex = GetOrCreateExtraLocked();
+	weakRefFlag = ex->weakRefFlag.load(std::memory_order_relaxed);
+	if( !weakRefFlag )
+	{
+		weakRefFlag = asNEW(asCLockableSharedBool);
+		ex->weakRefFlag.store(weakRefFlag, std::memory_order_release);
+	}
 
 	asReleaseExclusiveLock();
 
-	return extra->weakRefFlag;
+	return weakRefFlag;
 }
 
 void *asCScriptObject::GetUserData(asPWORD type) const
 {
-	if( !extra )
+	SExtra *ex = extra.load(std::memory_order_acquire);
+	if( !ex )
+	{
 		return 0;
+	}
 
 	// There may be multiple threads reading, but when
 	// setting the user data nobody must be reading.
 	// TODO: runtime optimize: Would it be worth it to have a rwlock per object type?
 	asAcquireSharedLock();
 
-	for( asUINT n = 0; n < extra->userData.GetLength(); n += 2 )
+	for( asUINT n = 0; n < ex->userData.GetLength(); n += 2 )
 	{
-		if( extra->userData[n] == type )
+		if( ex->userData[n] == type )
 		{
-			void *userData = reinterpret_cast<void*>(extra->userData[n+1]);
+			void *userData = reinterpret_cast<void*>(ex->userData[n+1]);
 			asReleaseSharedLock();
 			return userData;
 		}
@@ -592,18 +624,17 @@ void *asCScriptObject::SetUserData(void *data, asPWORD type)
 
 	// Make sure another thread didn't create the 
 	// flag while we waited for the lock
-	if( !extra )
-		extra = asNEW(SExtra);
+	SExtra *ex = GetOrCreateExtraLocked();
 
 	// It is not intended to store a lot of different types of userdata,
 	// so a more complex structure like a associative map would just have
 	// more overhead than a simple array.
-	for( asUINT n = 0; n < extra->userData.GetLength(); n += 2 )
+	for( asUINT n = 0; n < ex->userData.GetLength(); n += 2 )
 	{
-		if( extra->userData[n] == type )
+		if( ex->userData[n] == type )
 		{
-			void *oldData = reinterpret_cast<void*>(extra->userData[n+1]);
-			extra->userData[n+1] = reinterpret_cast<asPWORD>(data);
+			void *oldData = reinterpret_cast<void*>(ex->userData[n+1]);
+			ex->userData[n+1] = reinterpret_cast<asPWORD>(data);
 
 			asReleaseExclusiveLock();
 
@@ -611,8 +642,8 @@ void *asCScriptObject::SetUserData(void *data, asPWORD type)
 		}
 	}
 
-	extra->userData.PushLast(type);
-	extra->userData.PushLast(reinterpret_cast<asPWORD>(data));
+	ex->userData.PushLast(type);
+	ex->userData.PushLast(reinterpret_cast<asPWORD>(data));
 
 	asReleaseExclusiveLock();
 
@@ -671,14 +702,16 @@ int asCScriptObject::Release() const
 	// is ok to check the existance of the weakRefFlag without locking here
 	// because if the refCount is 1 then no other thread is currently 
 	// creating the weakRefFlag.
-	if( refCount.get() == 1 && extra && extra->weakRefFlag )
+	SExtra *ex = refCount.get() == 1 ? extra.load(std::memory_order_acquire) : 0;
+	asCLockableSharedBool *weakRefFlag = ex ? ex->weakRefFlag.load(std::memory_order_acquire) : 0;
+	if( weakRefFlag )
 	{
 		// Set the flag to tell others that the object is no longer alive
 		// We must do this before decreasing the refCount to 0 so we don't
 		// end up with a race condition between this thread attempting to 
 		// destroy the object and the other that temporary added a strong
 		// ref from the weak ref.
-		extra->weakRefFlag->Set(true);
+		weakRefFlag->Set(true);
 	}
 
 	// Call the script destructor behaviour if the reference counter is 1.

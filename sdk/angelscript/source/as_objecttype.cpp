@@ -118,7 +118,7 @@ void asCObjectType::DestroyInternal()
 				// Any child funcdefs that have been created as part of the template 
 				// instantiation must be destroyed too
 				// TODO: Before destroying the funcdef, make sure no external references to it is held
-				if (func->externalRefCount.get() == 0)
+				if (func->refCounts.getExternal() == 0)
 				{
 					func->DestroyInternal();
 					engine->RemoveFuncdef(func);

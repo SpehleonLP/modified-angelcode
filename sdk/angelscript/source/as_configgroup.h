@@ -44,6 +44,7 @@
 #include "as_string.h"
 #include "as_array.h"
 #include "as_objecttype.h"
+#include "as_atomic.h"
 
 BEGIN_AS_NAMESPACE
 
@@ -67,7 +68,8 @@ public:
 	void AddReferencesForType(asCScriptEngine *engine, asCTypeInfo *type);
 
 	asCString groupName;
-	int refCount;
+	// Modules on any thread add and drop references to the groups they use
+	asCAtomic refCount;
 
 	asCArray<asCTypeInfo*>       types;
 	asCArray<asCScriptFunction*> scriptFunctions;

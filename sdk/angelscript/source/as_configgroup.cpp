@@ -46,7 +46,7 @@ BEGIN_AS_NAMESPACE
 
 asCConfigGroup::asCConfigGroup()
 {
-	refCount = 0;
+	refCount.set(0);
 }
 
 asCConfigGroup::~asCConfigGroup()
@@ -55,15 +55,13 @@ asCConfigGroup::~asCConfigGroup()
 
 int asCConfigGroup::AddRef()
 {
-	refCount++;
-	return refCount;
+	return refCount.atomicInc();
 }
 
 int asCConfigGroup::Release()
 {
 	// Don't delete the object here, the engine will delete the object when ready
-	refCount--;
-	return refCount;
+	return refCount.atomicDec();
 }
 
 asCTypeInfo *asCConfigGroup::FindType(const char *obj)
@@ -146,7 +144,7 @@ void asCConfigGroup::AddReferencesForType(asCScriptEngine *engine, asCTypeInfo *
 bool asCConfigGroup::HasLiveObjects()
 {
 	for( asUINT n = 0; n < types.GetLength(); n++ )
-		if( types[n]->externalRefCount.get() != 0 )
+		if( types[n]->refCounts.getExternal() != 0 )
 			return true;
 
 	return false;
@@ -154,7 +152,7 @@ bool asCConfigGroup::HasLiveObjects()
 
 void asCConfigGroup::RemoveConfiguration(asCScriptEngine *engine, bool notUsed)
 {
-	asASSERT( refCount == 0 );
+	asASSERT( refCount.get() == 0 );
 
 	asUINT n;
 
@@ -238,7 +236,7 @@ void asCConfigGroup::RemoveConfiguration(asCScriptEngine *engine, bool notUsed)
 
 	// Release other config groups
 	for( n = 0; n < referencedConfigGroups.GetLength(); n++ )
-		referencedConfigGroups[n]->refCount--;
+		referencedConfigGroups[n]->refCount.atomicDec();
 	referencedConfigGroups.SetLength(0);
 }
 

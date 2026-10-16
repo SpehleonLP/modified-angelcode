@@ -158,13 +158,22 @@ protected:
 	// userData so we only allocate this if requested. Even when used it is
 	// not something that will be accessed all the time so having the extra
 	// indirection will not affect the performance significantly.
+	//
+	// extra and weakRefFlag are created under the engine's exclusive lock but
+	// read on lock-free fast paths from any thread, so both are published
+	// with a release store and read with an acquire load. userData is only
+	// accessed under the engine's shared or exclusive lock.
 	struct SExtra
 	{
 		SExtra() : weakRefFlag(0) {};
-		asCLockableSharedBool *weakRefFlag;
-		asCArray<asPWORD>      userData;
+		std::atomic<asCLockableSharedBool*> weakRefFlag;
+		asCArray<asPWORD>                   userData;
 	};
-	mutable SExtra *extra;
+	mutable std::atomic<SExtra*> extra;
+
+	// Returns extra, creating and publishing it if needed; the caller must
+	// hold the engine's exclusive lock
+	SExtra *GetOrCreateExtraLocked() const;
 	// Atomic only so a racing read is never torn or undefined; happens-before
 	// for the value comes from publishing the object pointer itself.
 	std::atomic<asQWORD> hostHandle;

@@ -334,8 +334,9 @@ public:
 	//-----------------------------------
 	// Properties
 
-	mutable asCAtomic            externalRefCount; // Used for external referneces
-	        asCAtomic            internalRefCount; // Used for internal references
+	// External and internal reference counts; see asCDualRefCount for why
+	// they share one atomic
+	mutable asCDualRefCount      refCounts;
 	// Stored by AddRef and Release on every thread; only an activity hint for
 	// the GC, so relaxed access is enough.
 	mutable std::atomic<bool>    gcFlag;

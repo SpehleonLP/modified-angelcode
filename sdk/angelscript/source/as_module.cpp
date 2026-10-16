@@ -546,7 +546,7 @@ bool asCModule::HasExternalReferences(bool shuttingDown)
 	while (it)
 	{
 		asCGlobalProperty *desc = *it;
-		if (desc->GetInitFunc() && desc->GetInitFunc()->externalRefCount.get())
+		if (desc->GetInitFunc() && desc->GetInitFunc()->refCounts.getExternal())
 		{
 			if( !shuttingDown )
 				return true;
@@ -568,7 +568,7 @@ bool asCModule::HasExternalReferences(bool shuttingDown)
 	for (asUINT n = 0; n < m_scriptFunctions.GetLength(); n++)
 	{
 		asCScriptFunction *func = m_scriptFunctions[n];
-		if (func && func->externalRefCount.get())
+		if (func && func->refCounts.getExternal())
 		{
 			// If the func is shared and can be moved to another module then this is not a reason to keep the module alive
 			if (func->IsShared() && m_engine->FindNewOwnerForSharedFunc(func, this) != this)
@@ -591,7 +591,7 @@ bool asCModule::HasExternalReferences(bool shuttingDown)
 	for (asUINT n = 0; n < m_classTypes.GetLength(); n++)
 	{
 		asCObjectType *obj = m_classTypes[n];
-		if (obj && obj->externalRefCount.get())
+		if (obj && obj->refCounts.getExternal())
 		{
 			// If the obj is shared and can be moved to another module then this is not a reason to keep the module alive
 			if (obj->IsShared() && m_engine->FindNewOwnerForSharedType(obj, this) != this)
@@ -614,7 +614,7 @@ bool asCModule::HasExternalReferences(bool shuttingDown)
 	for (asUINT n = 0; n < m_funcDefs.GetLength(); n++)
 	{
 		asCFuncdefType *func = m_funcDefs[n];
-		if (func && func->externalRefCount.get())
+		if (func && func->refCounts.getExternal())
 		{
 			// If the funcdef is shared and can be moved to another module then this is not a reason to keep the module alive
 			if (func->IsShared() && m_engine->FindNewOwnerForSharedType(func, this) != this)
@@ -637,7 +637,7 @@ bool asCModule::HasExternalReferences(bool shuttingDown)
 	for (asUINT n = 0; n < m_templateInstances.GetLength(); n++)
 	{
 		asCObjectType *obj = m_templateInstances[n];
-		if (obj && obj->externalRefCount.get())
+		if (obj && obj->refCounts.getExternal())
 		{
 			// If the template can be moved to another module then this is not a reason to keep the module alive
 			if (obj->IsShared() && m_engine->FindNewOwnerForSharedType(obj, this) != this)

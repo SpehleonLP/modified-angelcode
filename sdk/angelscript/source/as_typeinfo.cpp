@@ -42,8 +42,7 @@ BEGIN_AS_NAMESPACE
 
 asCTypeInfo::asCTypeInfo()
 {
-	externalRefCount.set(0);
-	internalRefCount.set(1); // start with one internal ref-count
+	refCounts.set(0, 1); // start with one internal ref-count
 	engine = 0;
 	module = 0;
 	size = 0;
@@ -63,8 +62,7 @@ asCTypeInfo::asCTypeInfo()
 
 asCTypeInfo::asCTypeInfo(asCScriptEngine *in_engine)
 {
-	externalRefCount.set(0);
-	internalRefCount.set(1); // start with one internal ref count
+	refCounts.set(0, 1); // start with one internal ref count
 	engine = in_engine;
 	module = 0;
 	size = 0;
@@ -89,24 +87,22 @@ asCTypeInfo::~asCTypeInfo()
 // interface
 int asCTypeInfo::AddRef() const
 {
-	return externalRefCount.atomicInc();
+	return refCounts.incExternal();
 }
 
 // interface
 int asCTypeInfo::Release() const
 {
-	int r = externalRefCount.atomicDec();
+	bool isLastRef;
+	int r = refCounts.decExternal(isLastRef);
 
-	if (r == 0)
+	// There are no more external or internal references, so it is time to
+	// delete the object type
+	if (isLastRef)
 	{
-		// There are no more external references, if there are also no
-		// internal references then it is time to delete the object type
-		if (internalRefCount.get() == 0)
-		{
-			// If the engine is no longer set, then it has already been
-			// released and we must take care of the deletion ourselves
-			asDELETE(const_cast<asCTypeInfo*>(this), asCTypeInfo);
-		}
+		// If the engine is no longer set, then it has already been
+		// released and we must take care of the deletion ourselves
+		asDELETE(const_cast<asCTypeInfo*>(this), asCTypeInfo);
 	}
 
 	return r;
@@ -114,23 +110,21 @@ int asCTypeInfo::Release() const
 
 int asCTypeInfo::AddRefInternal()
 {
-	return internalRefCount.atomicInc();
+	return refCounts.incInternal();
 }
 
 int asCTypeInfo::ReleaseInternal()
 {
-	int r = internalRefCount.atomicDec();
+	bool isLastRef;
+	int r = refCounts.decInternal(isLastRef);
 
-	if (r == 0)
+	// There are no more internal or external references, so it is time to
+	// delete the object type
+	if (isLastRef)
 	{
-		// There are no more internal references, if there are also no
-		// external references then it is time to delete the object type
-		if (externalRefCount.get() == 0)
-		{
-			// If the engine is no longer set, then it has already been
-			// released and we must take care of the deletion ourselves
-			asDELETE(const_cast<asCTypeInfo*>(this), asCTypeInfo);
-		}
+		// If the engine is no longer set, then it has already been
+		// released and we must take care of the deletion ourselves
+		asDELETE(const_cast<asCTypeInfo*>(this), asCTypeInfo);
 	}
 
 	return r;
