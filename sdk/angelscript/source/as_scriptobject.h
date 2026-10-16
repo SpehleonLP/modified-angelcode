@@ -156,18 +156,24 @@ protected:
 	mutable std::atomic<bool> hasRefCountReachedZero;
 	bool              isDestructCalled;
 
-	// Most script classes instances won't have neither the weakRefFlags nor
-	// userData so we only allocate this if requested. Even when used it is
-	// not something that will be accessed all the time so having the extra
-	// indirection will not affect the performance significantly.
+	// The host handle, weak ref flag and user data live out of line so the
+	// header keeps upstream's size, which host code that addresses member
+	// memory relies on. When lifecycle callbacks are installed the
+	// constructor allocates this for every object, because the created
+	// callback stores the handle and must not take the engine's global lock
+	// on every script `new`. Without callbacks it is allocated on first use.
 	//
-	// extra and weakRefFlag are created under the engine's exclusive lock but
-	// read on lock-free fast paths from any thread, so both are published
-	// with a release store and read with an acquire load. userData is only
-	// accessed under the engine's shared or exclusive lock.
+	// extra and weakRefFlag created after construction are created under the
+	// engine's exclusive lock but read on lock-free fast paths from any
+	// thread, so both are published with a release store and read with an
+	// acquire load. hostHandle is relaxed: the handle's value is ordered by
+	// publishing the object pointer itself, and atomicity only keeps a read
+	// racing a teardown detach from being torn. userData is only accessed
+	// under the engine's shared or exclusive lock.
 	struct SExtra
 	{
-		SExtra() : weakRefFlag(0) {};
+		SExtra() : hostHandle(0), weakRefFlag(0) {};
+		std::atomic<asQWORD>                hostHandle;
 		std::atomic<asCLockableSharedBool*> weakRefFlag;
 		asCArray<asPWORD>                   userData;
 	};
@@ -176,15 +182,12 @@ protected:
 	// Returns extra, creating and publishing it if needed; the caller must
 	// hold the engine's exclusive lock
 	SExtra *GetOrCreateExtraLocked() const;
-	// Atomic only so a racing read is never torn or undefined; happens-before
-	// for the value comes from publishing the object pointer itself.
-	std::atomic<asQWORD> hostHandle;
 };
 
 #if AS_PTR_SIZE == 2
 // Script class members are laid out after the header at sizeof(asCScriptObject),
 // and the engine computes their offsets from it, so the header must not grow.
-static_assert(sizeof(asCScriptObject) == 40, "asCScriptObject header must stay 40 bytes");
+static_assert(sizeof(asCScriptObject) == 32, "asCScriptObject header must stay 32 bytes");
 #endif
 
 void ScriptObject_Construct(asCObjectType *objType, asCScriptObject *self);

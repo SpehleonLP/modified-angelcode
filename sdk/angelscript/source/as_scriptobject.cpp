@@ -366,7 +366,6 @@ asCScriptObject::asCScriptObject(asCObjectType *ot, bool doInitialize)
 	objType->AddRef();
 	isDestructCalled = false;
 	extra.store(0, std::memory_order_relaxed);
-	hostHandle.store(0, std::memory_order_relaxed);
 	hasRefCountReachedZero.store(false, std::memory_order_relaxed);
 	gcFlag.store(false, std::memory_order_relaxed);
 
@@ -382,6 +381,11 @@ asCScriptObject::asCScriptObject(asCObjectType *ot, bool doInitialize)
 	// objects sees this one before any field initializer can reach it.
 	if( objType->engine->scriptObjectCreatedFunc )
 	{
+		// No other thread can see this object until the constructing thread
+		// publishes its pointer, and that publication orders this store, so
+		// neither the engine lock nor a release store is needed. Allocating
+		// here keeps the callback's SetHostHandle off the locked create path.
+		extra.store(asNEW(SExtra), std::memory_order_relaxed);
 		objType->engine->scriptObjectCreatedFunc(this);
 	}
 
@@ -652,12 +656,36 @@ void *asCScriptObject::SetUserData(void *data, asPWORD type)
 
 asQWORD asCScriptObject::GetHostHandle() const
 {
-	return hostHandle.load(std::memory_order_relaxed);
+	// Acquire pairs with the release that publishes an extra created after
+	// construction, so its zero-initialized fields are visible.
+	SExtra *ex = extra.load(std::memory_order_acquire);
+	if( !ex )
+	{
+		return 0;
+	}
+	return ex->hostHandle.load(std::memory_order_relaxed);
 }
 
 void asCScriptObject::SetHostHandle(asQWORD handle)
 {
-	hostHandle.store(handle, std::memory_order_relaxed);
+	SExtra *ex = extra.load(std::memory_order_acquire);
+	if( !ex )
+	{
+		// An object without extra already reads as handle 0, and clearing
+		// one must not cost an allocation and the global lock.
+		if( handle == 0 )
+		{
+			return;
+		}
+
+		// Only reachable when no created callback was installed at
+		// construction, so another thread may be creating extra for user
+		// data or a weak ref at the same time.
+		asAcquireExclusiveLock();
+		ex = GetOrCreateExtraLocked();
+		asReleaseExclusiveLock();
+	}
+	ex->hostHandle.store(handle, std::memory_order_relaxed);
 }
 
 void asCScriptObject::ReleaseUnconstructed()

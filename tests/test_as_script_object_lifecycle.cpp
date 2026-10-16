@@ -5,6 +5,7 @@
 #include <angelscript.h>
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <string>
 #include <thread>
 #include <vector>
@@ -120,7 +121,7 @@ TEST_F(Lifecycle, EveryAllocationPathFiresCreated) {
 	}
 }
 
-// Review focus 5: the header is never copied.
+// The handle lives in the object's own extra block, which copying never touches.
 TEST_F(Lifecycle, ACopyGetsItsOwnHandle) {
 	auto* a = static_cast<asIScriptObject*>(engine->CreateScriptObject(Type("Foo")));
 	auto* c = static_cast<asIScriptObject*>(engine->CreateScriptObjectCopy(a, Type("Foo")));
@@ -130,6 +131,41 @@ TEST_F(Lifecycle, ACopyGetsItsOwnHandle) {
 	EXPECT_EQ(c->GetHostHandle(), before);
 	a->Release();
 	c->Release();
+}
+
+// The initializer factory is a separate allocation path, so it must register
+// its object under a handle of its own.
+TEST_F(Lifecycle, AnInitializerFactoryObjectGetsItsOwnHandle) {
+	auto* a = static_cast<asIScriptObject*>(engine->CreateScriptObject(Type("Foo")));
+	asIScriptFunction* f = Type("Foo")->GetInitializerFactory();
+	ASSERT_NE(f, nullptr);
+	asIScriptContext* ctx = engine->CreateContext();
+	ASSERT_GE(ctx->Prepare(f), 0);
+	ASSERT_EQ(ctx->Execute(), asEXECUTION_FINISHED);
+	auto* i = static_cast<asIScriptObject*>(ctx->GetReturnObject());
+	ASSERT_NE(i, nullptr);
+	i->AddRef();
+	ctx->Release();
+	EXPECT_NE(std::find(g_created.begin(), g_created.end(), i), g_created.end());
+	EXPECT_NE(i->GetHostHandle(), 0u);
+	EXPECT_NE(i->GetHostHandle(), a->GetHostHandle());
+	a->Release();
+	i->Release();
+}
+
+// The handle shares its block with user data and the weak ref flag, so
+// creating either must reuse the block rather than replace it.
+TEST_F(Lifecycle, UserDataAndAWeakRefKeepTheHandle) {
+	auto* a = static_cast<asIScriptObject*>(engine->CreateScriptObject(Type("Foo")));
+	asQWORD const h = a->GetHostHandle();
+	ASSERT_NE(h, 0u);
+	int marker = 0;
+	EXPECT_EQ(a->SetUserData(&marker, 4242), nullptr);
+	EXPECT_EQ(a->GetHostHandle(), h);
+	EXPECT_NE(a->GetWeakRefFlag(), nullptr);
+	EXPECT_EQ(a->GetHostHandle(), h);
+	EXPECT_EQ(a->GetUserData(4242), &marker);
+	a->Release();
 }
 
 TEST_F(Lifecycle, CreatedFiresBeforeFieldInitializers) {
@@ -157,6 +193,41 @@ TEST_F(Lifecycle, HostHandleIsZeroWithoutACallback) {
 	ASSERT_GE(m->Build(), 0);
 	auto* o = static_cast<asIScriptObject*>(plain->CreateScriptObject(m->GetTypeInfoByName("Foo")));
 	EXPECT_EQ(o->GetHostHandle(), 0u);
+	o->Release();
+	plain->ShutDownAndRelease();
+}
+
+namespace {
+std::atomic<int> g_allocations{0};
+void* CountingAlloc(size_t size) {
+	g_allocations.fetch_add(1);
+	return malloc(size);
+}
+void CountingFree(void* p) { free(p); }
+}
+
+// Without a created callback the object has no extra block. Clearing its
+// handle must stay free, while setting one creates the block on demand.
+TEST_F(Lifecycle, ClearingTheHandleWithoutACallbackAllocatesNothing) {
+	asIScriptEngine* plain = asCreateScriptEngine();
+	asIScriptModule* m = plain->GetModule("m", asGM_ALWAYS_CREATE);
+	m->AddScriptSection("s", "class Foo { int v = 5; }\n");
+	ASSERT_GE(m->Build(), 0);
+	auto* o = static_cast<asIScriptObject*>(plain->CreateScriptObject(m->GetTypeInfoByName("Foo")));
+	ASSERT_NE(o, nullptr);
+	ASSERT_GE(asSetGlobalMemoryFunctions(CountingAlloc, CountingFree), 0);
+	g_allocations = 0;
+	o->SetHostHandle(0);
+	int const afterClear = g_allocations.load();
+	o->SetHostHandle(7);
+	int const afterSet = g_allocations.load();
+	asResetGlobalMemoryFunctions();
+	EXPECT_EQ(afterClear, 0);
+	EXPECT_GT(afterSet, 0);   // the counter can see the block being created
+	EXPECT_EQ(o->GetHostHandle(), 7u);
+	int marker = 0;
+	o->SetUserData(&marker, 4242);
+	EXPECT_EQ(o->GetHostHandle(), 7u);
 	o->Release();
 	plain->ShutDownAndRelease();
 }
