@@ -43,6 +43,7 @@
 
 #include "as_config.h"
 #include "as_atomic.h"
+#include <atomic>
 
 BEGIN_AS_NAMESPACE
 
@@ -158,7 +159,9 @@ protected:
 		asCArray<asPWORD>      userData;
 	};
 	mutable SExtra *extra;
-	asQWORD         hostHandle;
+	// Atomic only so a racing read is never torn or undefined; happens-before
+	// for the value comes from publishing the object pointer itself.
+	std::atomic<asQWORD> hostHandle;
 };
 
 void ScriptObject_Construct(asCObjectType *objType, asCScriptObject *self);

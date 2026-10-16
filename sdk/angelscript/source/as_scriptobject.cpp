@@ -366,7 +366,7 @@ asCScriptObject::asCScriptObject(asCObjectType *ot, bool doInitialize)
 	objType->AddRef();
 	isDestructCalled = false;
 	extra = 0;
-	hostHandle = 0;
+	hostHandle.store(0, std::memory_order_relaxed);
 	hasRefCountReachedZero = false;
 
 	// Notify the garbage collector of this object
@@ -620,12 +620,12 @@ void *asCScriptObject::SetUserData(void *data, asPWORD type)
 
 asQWORD asCScriptObject::GetHostHandle() const
 {
-	return hostHandle;
+	return hostHandle.load(std::memory_order_relaxed);
 }
 
 void asCScriptObject::SetHostHandle(asQWORD handle)
 {
-	hostHandle = handle;
+	hostHandle.store(handle, std::memory_order_relaxed);
 }
 
 void asCScriptObject::ReleaseUnconstructed()
