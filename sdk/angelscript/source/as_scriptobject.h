@@ -144,8 +144,14 @@ public:
 
 protected:
 	mutable asCAtomic refCount;
-	mutable asBYTE    gcFlag:1;
-	mutable asBYTE    hasRefCountReachedZero:1;
+	// Separate atomics rather than bitfields in one byte: every AddRef and
+	// Release on any thread stores gcFlag, and a read-modify-write of a shared
+	// byte would erase a concurrent store to hasRefCountReachedZero. gcFlag is
+	// only an activity hint for the GC, so relaxed access is enough.
+	mutable std::atomic<bool> gcFlag;
+	// Stored by the Release that drops the last reference and read by AddRef
+	// and GetWeakRefFlag on whichever thread calls them, to detect resurrection.
+	mutable std::atomic<bool> hasRefCountReachedZero;
 	bool              isDestructCalled;
 
 	// Most script classes instances won't have neither the weakRefFlags nor
@@ -163,6 +169,12 @@ protected:
 	// for the value comes from publishing the object pointer itself.
 	std::atomic<asQWORD> hostHandle;
 };
+
+#if AS_PTR_SIZE == 2
+// Script class members are laid out after the header at sizeof(asCScriptObject),
+// and the engine computes their offsets from it, so the header must not grow.
+static_assert(sizeof(asCScriptObject) == 40, "asCScriptObject header must stay 40 bytes");
+#endif
 
 void ScriptObject_Construct(asCObjectType *objType, asCScriptObject *self);
 asCScriptObject &ScriptObject_Assignment(asCScriptObject *other, asCScriptObject *self);

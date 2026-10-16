@@ -45,6 +45,7 @@
 #include "as_array.h"
 #include "as_datatype.h"
 #include "as_atomic.h"
+#include <atomic>
 
 BEGIN_AS_NAMESPACE
 
@@ -335,7 +336,9 @@ public:
 
 	mutable asCAtomic            externalRefCount; // Used for external referneces
 	        asCAtomic            internalRefCount; // Used for internal references
-	mutable bool                 gcFlag;
+	// Stored by AddRef and Release on every thread; only an activity hint for
+	// the GC, so relaxed access is enough.
+	mutable std::atomic<bool>    gcFlag;
 	asCScriptEngine             *engine;
 	asCModule                   *module;
 

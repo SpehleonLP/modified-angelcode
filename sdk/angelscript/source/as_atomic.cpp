@@ -38,45 +38,48 @@
 
 BEGIN_AS_NAMESPACE
 
-asCAtomic::asCAtomic()
+asCAtomic::asCAtomic() : value(0)
 {
-	value = 0;
 }
 
 asDWORD asCAtomic::get() const
 {
 	// A very high ref count is highly unlikely. It most likely a problem with
 	// memory that has been overwritten or is being accessed after it was deleted.
-	asASSERT(value < 1000000);
+	asASSERT(value.load(std::memory_order_relaxed) < 1000000);
 
-	return value;
+	return value.load(std::memory_order_acquire);
 }
 
 void asCAtomic::set(asDWORD val)
 {
 	// A very high ref count is highly unlikely. It most likely a problem with
 	// memory that has been overwritten or is being accessed after it was deleted.
-	asASSERT(value < 1000000);
+	asASSERT(value.load(std::memory_order_relaxed) < 1000000);
 
-	value = val;
+	value.store(val, std::memory_order_relaxed);
 }
 
+// The increment and decrement are sequentially consistent to match the
+// public asAtomicInc/asAtomicDec below (__sync_*_and_fetch, Interlocked*,
+// OSAtomic*), which are full barriers; a counter must not order more weakly
+// depending on which of the two an object uses.
 asDWORD asCAtomic::atomicInc()
 {
 	// A very high ref count is highly unlikely. It most likely a problem with
 	// memory that has been overwritten or is being accessed after it was deleted.
-	asASSERT(value < 1000000);
+	asASSERT(value.load(std::memory_order_relaxed) < 1000000);
 
-	return asAtomicInc((int&)value);
+	return value.fetch_add(1, std::memory_order_seq_cst) + 1;
 }
 
 asDWORD asCAtomic::atomicDec()
 {
 	// A very high ref count is highly unlikely. It most likely a problem with
 	// memory that has been overwritten or is being accessed after it was deleted.
-	asASSERT(value < 1000000);
+	asASSERT(value.load(std::memory_order_relaxed) < 1000000);
 
-	return asAtomicDec((int&)value);
+	return value.fetch_sub(1, std::memory_order_seq_cst) - 1;
 }
 
 //

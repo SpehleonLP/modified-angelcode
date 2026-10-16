@@ -383,7 +383,7 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	signatureId            = 0;
 	dontCleanUpOnException = false;
 	vfTableIdx             = -1;
-	gcFlag                 = false;
+	gcFlag.store(false, std::memory_order_relaxed);
 	id                     = 0;
 	accessMask             = 0xFFFFFFFF;
 	minLocalAccessMask     = 0;
@@ -539,14 +539,14 @@ int asCScriptFunction::GetId() const
 // interface
 int asCScriptFunction::AddRef() const
 {
-	gcFlag = false;
+	gcFlag.store(false, std::memory_order_relaxed);
 	return externalRefCount.atomicInc();
 }
 
 // interface
 int asCScriptFunction::Release() const
 {
-	gcFlag = false;
+	gcFlag.store(false, std::memory_order_relaxed);
 	int r = externalRefCount.atomicDec();
 	if( r == 0 &&
 		funcType != asFUNC_DUMMY )    // Dummy functions are allocated on the stack and cannot be deleted
@@ -1818,13 +1818,13 @@ int asCScriptFunction::GetRefCount()
 // internal
 void asCScriptFunction::SetFlag()
 {
-	gcFlag = true;
+	gcFlag.store(true, std::memory_order_relaxed);
 }
 
 // internal
 bool asCScriptFunction::GetFlag()
 {
-	return gcFlag;
+	return gcFlag.load(std::memory_order_relaxed);
 }
 
 // internal

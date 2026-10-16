@@ -44,6 +44,8 @@
 
 #include "as_config.h"
 
+#include <atomic>
+
 BEGIN_AS_NAMESPACE
 
 class asCAtomic
@@ -51,7 +53,13 @@ class asCAtomic
 public:
 	asCAtomic();
 
+	// An acquire load: callers test get() == 1 to decide that they hold the
+	// last reference and then run the destructor or delete the object, which
+	// must observe every write the other holders made before their release.
 	asDWORD get() const;
+
+	// A relaxed store: it only initializes a counter that no other thread can
+	// see yet; publishing the owning object provides the ordering.
 	void    set(asDWORD val);
 
 	// Increase and return new value
@@ -61,8 +69,12 @@ public:
 	asDWORD atomicDec();
 
 protected:
-	asDWORD value;
+	std::atomic<asDWORD> value;
 };
+
+// Counters are embedded in objects whose layout the engine and JIT derive
+// offsets from, so the atomic must not widen the field.
+static_assert(sizeof(asCAtomic) == 4, "asCAtomic must stay one dword");
 
 END_AS_NAMESPACE
 

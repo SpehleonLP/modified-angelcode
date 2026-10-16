@@ -367,7 +367,8 @@ asCScriptObject::asCScriptObject(asCObjectType *ot, bool doInitialize)
 	isDestructCalled = false;
 	extra = 0;
 	hostHandle.store(0, std::memory_order_relaxed);
-	hasRefCountReachedZero = false;
+	hasRefCountReachedZero.store(false, std::memory_order_relaxed);
+	gcFlag.store(false, std::memory_order_relaxed);
 
 	// Notify the garbage collector of this object
 	if( objType->flags & asOBJ_GC )
@@ -533,7 +534,7 @@ asILockableSharedBool *asCScriptObject::GetWeakRefFlag() const
 	// If the object's refCount has already reached zero then the object is already
 	// about to be destroyed so it's ok to return null if the weakRefFlag doesn't already
 	// exist
-	if( (extra && extra->weakRefFlag) || hasRefCountReachedZero )
+	if( (extra && extra->weakRefFlag) || hasRefCountReachedZero.load(std::memory_order_relaxed) )
 		return extra->weakRefFlag;
 
 	// Lock globally so no other thread can attempt
@@ -645,7 +646,7 @@ int asCScriptObject::AddRef() const
 	// This may happen for example if the application calls a method on the class while it is
 	// being destroyed. The application shouldn't do this because it may cause application
 	// crashes if members that have already been destroyed are accessed accidentally.
-	if( hasRefCountReachedZero )
+	if( hasRefCountReachedZero.load(std::memory_order_relaxed) )
 	{
 		if( objType && objType->engine )
 		{
@@ -656,14 +657,14 @@ int asCScriptObject::AddRef() const
 	}
 
 	// Increase counter and clear flag set by GC
-	gcFlag = false;
+	gcFlag.store(false, std::memory_order_relaxed);
 	return refCount.atomicInc();
 }
 
 int asCScriptObject::Release() const
 {
 	// Clear the flag set by the GC
-	gcFlag = false;
+	gcFlag.store(false, std::memory_order_relaxed);
 
 	// If the weak ref flag exists it is because someone held a weak ref
 	// and that someone may add a reference to the object at any time. It
@@ -696,9 +697,9 @@ int asCScriptObject::Release() const
 		// during the destructor. This also avoids a recursive call
 		// to the destructor which would crash the application if it
 		// really does resurrect the object.
-		if( !hasRefCountReachedZero )
+		if( !hasRefCountReachedZero.load(std::memory_order_relaxed) )
 		{
-			hasRefCountReachedZero = true;
+			hasRefCountReachedZero.store(true, std::memory_order_relaxed);
 
 			// This cast is OK since we are the last reference
 			const_cast<asCScriptObject*>(this)->Destruct();
@@ -813,12 +814,12 @@ int asCScriptObject::GetRefCount()
 
 void asCScriptObject::SetFlag()
 {
-	gcFlag = true;
+	gcFlag.store(true, std::memory_order_relaxed);
 }
 
 bool asCScriptObject::GetFlag()
 {
-	return gcFlag;
+	return gcFlag.load(std::memory_order_relaxed);
 }
 
 // interface
