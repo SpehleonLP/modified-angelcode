@@ -1266,7 +1266,7 @@ int asCLockableSharedBool::Release() const
 
 bool asCLockableSharedBool::Get() const
 {
-	return value;
+	return value.load(std::memory_order_acquire);
 }
 
 void asCLockableSharedBool::Set(bool v)
@@ -1274,7 +1274,7 @@ void asCLockableSharedBool::Set(bool v)
 	// Make sure the value is not changed while another thread  
 	// is inspecting it and taking a decision on what to do.
 	Lock();
-	value = v;
+	value.store(v, std::memory_order_release);
 	Unlock();
 }
 

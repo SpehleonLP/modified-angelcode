@@ -144,7 +144,10 @@ CScriptWeakRef &CScriptWeakRef::Set(void *newRef)
 	if( newRef )
 	{
 		m_weakRefFlag = m_type->GetEngine()->GetWeakRefFlagOfScriptObject(newRef, m_type->GetSubType());
-		m_weakRefFlag->AddRef();
+		if( m_weakRefFlag )
+		{
+			m_weakRefFlag->AddRef();
+		}
 	}
 	else
 		m_weakRefFlag = 0;

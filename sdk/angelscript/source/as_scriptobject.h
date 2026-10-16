@@ -67,7 +67,9 @@ public:
 
 protected:
 	mutable asCAtomic refCount;
-	bool      value;
+	// Atomic because Get() reads without the lock, while the dying object's
+	// Release sets it under the lock.
+	std::atomic<bool> value;
 	DECLARECRITICALSECTION(mutable lock)
 };
 
