@@ -1503,6 +1503,12 @@ asCScriptFunction *asCReader::ReadFunction(bool &isNew, bool addToModule, bool a
 					ReadData(&isThis, 1);
 					func->scriptData->callReceiverIsThis[n] = isThis != 0;
 				}
+				asUINT copyCount = SanityCheck(ReadEncodedUInt(), 1000000);
+				func->scriptData->defaultCopyTypes.SetLength(0);
+				for( asUINT n = 0; n < copyCount && !error; n++ )
+				{
+					func->scriptData->defaultCopyTypes.PushLast(CastToObjectType(ReadTypeInfo()));
+				}
 			}
 		}
 	}
@@ -2984,6 +2990,9 @@ void asCReader::TranslateFunction(asCScriptFunction *func)
 		Error(TXT_INVALID_BYTECODE_d);
 		return;
 	}
+	// The restored report is what a build without the compiler hands out;
+	// one with it recomputes and republishes only what changed
+	func->PublishPropertyReads();
 
 	// Pre-compute the size of each instruction in order to translate jump offsets
 	asUINT n;
@@ -4602,6 +4611,11 @@ void asCWriter::WriteFunction(asCScriptFunction* func)
 		{
 			asBYTE isThis = func->scriptData->callReceiverIsThis[n] ? 1 : 0;
 			WriteData(&isThis, 1);
+		}
+		WriteEncodedInt64(func->scriptData->defaultCopyTypes.GetLength());
+		for( asUINT n = 0; n < func->scriptData->defaultCopyTypes.GetLength(); n++ )
+		{
+			WriteTypeInfo(func->scriptData->defaultCopyTypes[n]);
 		}
 	}
 	else if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )

@@ -67,6 +67,15 @@ struct asSPropertyRead
 	bool           viaThis;
 };
 
+// One published property-read report. Never modified once published: a new
+// analysis result is a new report, so a host reading one concurrently with a
+// re-analysis (Build, bind, unbind) never sees its storage move.
+struct asSPropertyReadReport
+{
+	asCArray<asSPropertyRead> reads;
+	bool                      complete;
+};
+
 // Adds `read` unless an equal entry is present. Reports whether it was added.
 bool asAddPropertyRead(asCArray<asSPropertyRead> &reads, const asSPropertyRead &read);
 // Puts a report in its canonical order (type name, property, viaThis), so
@@ -409,8 +418,18 @@ public:
 	// pointers, valid for the same reason loopsVia is: the analysing module
 	// holds every function whose bytecode names them.
 	asCArray<asSPropertyRead>    localPropertyReads;
+	// The module pass's working copy of the transitive report, which only
+	// the analysis reads and writes; PublishPropertyReads hands it to hosts.
 	asCArray<asSPropertyRead>    propertyReads;
 	bool                         propertyReadsComplete;
+	// What the interface returns: the last published report, null before
+	// the first. Superseded reports are retired, not freed, until the
+	// function is destroyed, so a pointer a host loaded stays valid.
+	std::atomic<asSPropertyReadReport*> publishedPropertyReads;
+	asCArray<asSPropertyReadReport*>    retiredPropertyReads;
+	// Sorts the working report and publishes it, unless the published one
+	// already has the same contents
+	void                         PublishPropertyReads();
 
 	// Namespace will be null for funcdefs that are declared as child funcdefs
 	// of a class. In this case the namespace shall be taken from the parentClass
@@ -481,6 +500,13 @@ public:
 		// missing or short table reads as "not `this`", which only costs
 		// precision.
 		asCArray<bool>                  callReceiverIsThis;
+
+		// Compile-time metadata: one entry per asBC_CALLSYS to the script
+		// classes' default copy behaviour, in final bytecode order: the
+		// static type of the object assigned to. That native copies every
+		// property of the runtime type, so the property-read fold reads them
+		// from here. Serialized; a missing entry makes the report incomplete.
+		asCArray<asCObjectType*>        defaultCopyTypes;
 
 		// The stack needed to execute the function
 		int                             stackNeeded;

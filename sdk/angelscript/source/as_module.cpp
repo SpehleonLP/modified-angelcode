@@ -2170,10 +2170,17 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
                                 asCArray<asBYTE> &outExternalReceivers,
                                 bool &outUnresolved,
                                 asCArray<asUINT> &outDirectSiteAddr,
-                                asCArray<asUINT> &outDirectSiteIndex)
+                                asCArray<asUINT> &outDirectSiteIndex,
+                                asCArray<asSPropertyRead> &outCopyReads,
+                                bool &outReadsIncomplete)
 {
 	outUnresolved = false;
+	outReadsIncomplete = false;
 	if (!func || !func->scriptData) return;
+
+	// Per-site ordinal into func->scriptData->defaultCopyTypes
+	asUINT copyOrdinal = 0;
+	const asCArray<asCObjectType*> &copyTypes = func->scriptData->defaultCopyTypes;
 
 	// Per-CALL/CALLINTF-site ordinal into func->scriptData->callReceiverIsThis,
 	// which the compiler fills in the same final bytecode order
@@ -2249,6 +2256,24 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			{
 				outExternalCallees.PushLast(calledFunc);
 				outExternalReceivers.PushLast(asRECEIVER_OTHER);
+			}
+			// The one native that reads script properties: the default copy
+			// copies the source object field by field
+			if (op == asBC_CALLSYS && calledFunc && calledFunc->id == m_engine->scriptTypeBehaviours.beh.copy)
+			{
+				asCObjectType *copyType = copyOrdinal < copyTypes.GetLength() ? copyTypes[copyOrdinal] : 0;
+				copyOrdinal++;
+				if (copyType == 0)
+				{
+					outReadsIncomplete = true;
+				}
+				else
+				{
+					asCArray<asCObjectType*> visited;
+					AddDefaultCopyEffects(copyType, true, funcIdToIndex, outCallees, outCalleeReceivers,
+					                      outExternalCallees, outExternalReceivers, outCopyReads, visited,
+					                      outReadsIncomplete);
+				}
 			}
 		}
 		else if (op == asBC_CALLINTF)
@@ -2459,6 +2484,104 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 	}
 }
 
+void asCModule::AddDefaultCopyEffects(asCObjectType *type, bool staticType,
+                                      const asCMap<int, asUINT> &funcIdToIndex,
+                                      asCArray<asUINT> &outCallees,
+                                      asCArray<asBYTE> &outCalleeReceivers,
+                                      asCArray<asCScriptFunction*> &outExternalCallees,
+                                      asCArray<asBYTE> &outExternalReceivers,
+                                      asCArray<asSPropertyRead> &outCopyReads,
+                                      asCArray<asCObjectType*> &visited,
+                                      bool &outReadsIncomplete)
+{
+	if( type == 0 || !(type->flags & asOBJ_SCRIPT_OBJECT) )
+	{
+		outReadsIncomplete = true;
+		return;
+	}
+
+	if( staticType )
+	{
+		if( type->IsShared() )
+		{
+			outReadsIncomplete = true;
+		}
+		AddDefaultCopyEffects(type, false, funcIdToIndex, outCallees, outCalleeReceivers, outExternalCallees,
+		                      outExternalReceivers, outCopyReads, visited, outReadsIncomplete);
+		for( asUINT c = 0; c < m_classTypes.GetLength(); c++ )
+		{
+			asCObjectType *derived = m_classTypes[c];
+			if( derived && derived != type && derived->DerivesFrom(type) )
+			{
+				AddDefaultCopyEffects(derived, false, funcIdToIndex, outCallees, outCalleeReceivers, outExternalCallees,
+				                      outExternalReceivers, outCopyReads, visited, outReadsIncomplete);
+			}
+		}
+		return;
+	}
+
+	if( visited.IndexOf(type) >= 0 )
+	{
+		return;
+	}
+	visited.PushLast(type);
+
+	// A user-written opAssign runs instead of the field copy, on the object
+	// assigned to, which is not the caller's `this`
+	asCScriptFunction *copy = m_engine->GetScriptFunction(type->beh.copy);
+	if( copy == 0 )
+	{
+		outReadsIncomplete = true;
+		return;
+	}
+	if( copy->funcType != asFUNC_SYSTEM )
+	{
+		asSMapNode<int, asUINT> *cursor = 0;
+		if( funcIdToIndex.MoveTo(&cursor, copy->id) )
+		{
+			outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+			outCalleeReceivers.PushLast(asRECEIVER_OTHER);
+		}
+		else if( copy->funcType == asFUNC_SCRIPT && copy->IsShared() )
+		{
+			outExternalCallees.PushLast(copy);
+			outExternalReceivers.PushLast(asRECEIVER_OTHER);
+		}
+		else
+		{
+			outReadsIncomplete = true;
+		}
+		return;
+	}
+
+	// As asCScriptObject::CopyFromAs: the base class copies the inherited
+	// properties, then this class copies its own
+	asUINT first = 0;
+	if( type->derivedFrom )
+	{
+		AddDefaultCopyEffects(type->derivedFrom, false, funcIdToIndex, outCallees, outCalleeReceivers,
+		                      outExternalCallees, outExternalReceivers, outCopyReads, visited, outReadsIncomplete);
+		first = type->derivedFrom->properties.GetLength();
+	}
+	for( asUINT n = first; n < type->properties.GetLength(); n++ )
+	{
+		asSPropertyRead read;
+		read.objectType = type;
+		read.propertyIndex = n;
+		read.viaThis = false;
+		asAddPropertyRead(outCopyReads, read);
+
+		// A value member of a script class is copied by that class's copy
+		asCObjectProperty *prop = type->properties[n];
+		asCObjectType *memberType = CastToObjectType(prop->type.GetTypeInfo());
+		if( memberType && !prop->type.IsObjectHandle() && (memberType->flags & asOBJ_SCRIPT_OBJECT) )
+		{
+			AddDefaultCopyEffects(memberType, false, funcIdToIndex, outCallees, outCalleeReceivers,
+			                      outExternalCallees, outExternalReceivers, outCopyReads, visited, outReadsIncomplete);
+		}
+	}
+}
+
 // One memory-access round over `order`: rescans every function not yet
 // pinned, and reports whether any result changed. `changedNow` records which
 // ones did.
@@ -2583,7 +2706,7 @@ static void SetLoopsThroughUnresolvedCall(asCScriptFunction *func)
 }
 
 // The transitive fields' starting point, before any callee is joined
-static void InitTransitiveFacts(asCScriptFunction *func, bool unresolved)
+static void InitTransitiveFacts(asCScriptFunction *func, bool unresolved, const asCArray<asSPropertyRead> &copyReads, bool readsIncomplete)
 {
 	func->minTransitiveAccessMask = func->minLocalAccessMask;
 	// localCallsDelegate = the compiler saw a funcdef call site it could
@@ -2595,7 +2718,11 @@ static void InitTransitiveFacts(asCScriptFunction *func, bool unresolved)
 	func->transitiveLoops = func->localLoops;
 	func->loopsVia = 0;
 	func->propertyReads = func->localPropertyReads;
-	func->propertyReadsComplete = true;
+	for( asUINT n = 0; n < copyReads.GetLength(); n++ )
+	{
+		asAddPropertyRead(func->propertyReads, copyReads[n]);
+	}
+	func->propertyReadsComplete = !readsIncomplete;
 	if( func->transitiveCallsDelegate )
 	{
 		SetLoopsThroughUnresolvedCall(func);
@@ -2694,14 +2821,17 @@ void asCModule::FoldSourceFunctionMetadata(asCScriptFunction *func, const asCMap
 	asCArray<asCScriptFunction*> sourceExternalCallees;
 	asCArray<asBYTE> sourceExternalReceivers;
 	bool sourceUnresolved = false;
+	asCArray<asSPropertyRead> sourceCopyReads;
+	bool sourceReadsIncomplete = false;
 	// Nothing calls a source, so an accurate NO on one would propagate
 	// nowhere. Its site table is collected and dropped rather than run
 	// through phase 4b.
 	asCArray<asUINT> siteAddr, siteIndex;
 	BuildCalleeList(func, funcIdToIndex, sourceCallees, sourceCalleeReceivers, sourceExternalCallees,
-	                sourceExternalReceivers, sourceUnresolved, siteAddr, siteIndex);
+	                sourceExternalReceivers, sourceUnresolved, siteAddr, siteIndex,
+	                sourceCopyReads, sourceReadsIncomplete);
 
-	InitTransitiveFacts(func, sourceUnresolved);
+	InitTransitiveFacts(func, sourceUnresolved, sourceCopyReads, sourceReadsIncomplete);
 
 	// External fixed callees: same constant fold as phase 2 (shared
 	// functions are frozen at first compile, so this cannot form a
@@ -2728,7 +2858,7 @@ void asCModule::FoldSourceFunctionMetadata(asCScriptFunction *func, const asCMap
 			JoinCalleeFacts(func, callee, sourceCalleeReceivers[j]);
 		}
 	}
-	asSortPropertyReads(func->propertyReads);
+	func->PublishPropertyReads();
 }
 
 // The module's one metadata pass. It settles every per-function result
@@ -2758,6 +2888,8 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	asCArray<asCArray<asCScriptFunction*>> externalCallees;
 	asCArray<asCArray<asBYTE>> externalReceivers;
 	asCArray<bool> unresolved;
+	asCArray<asCArray<asSPropertyRead>> copyReads;
+	asCArray<bool> readsIncomplete;
 	asCArray<asCArray<asUINT>> directSiteAddr;
 	asCArray<asCArray<asUINT>> directSiteIndex;
 	callees.SetLength(funcCount);
@@ -2765,13 +2897,17 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	externalCallees.SetLength(funcCount);
 	externalReceivers.SetLength(funcCount);
 	unresolved.SetLength(funcCount);
+	copyReads.SetLength(funcCount);
+	readsIncomplete.SetLength(funcCount);
 	directSiteAddr.SetLength(funcCount);
 	directSiteIndex.SetLength(funcCount);
 	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		unresolved[i] = false;
+		readsIncomplete[i] = false;
 		BuildCalleeList(m_scriptFunctions[i], funcIdToIndex, callees[i], calleeReceivers[i], externalCallees[i],
-		                externalReceivers[i], unresolved[i], directSiteAddr[i], directSiteIndex[i]);
+		                externalReceivers[i], unresolved[i], directSiteAddr[i], directSiteIndex[i],
+		                copyReads[i], readsIncomplete[i]);
 	}
 
 	// Phase 2: init transitive fields from local
@@ -2782,7 +2918,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		{
 			continue;
 		}
-		InitTransitiveFacts(func, unresolved[i]);
+		InitTransitiveFacts(func, unresolved[i], copyReads[i], readsIncomplete[i]);
 
 		// External fixed callees: targets outside this module whose metadata
 		// is already final (shared functions are frozen at first compile).
@@ -3100,7 +3236,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		asCScriptFunction *func = m_scriptFunctions[i];
 		if( func && func->scriptData )
 		{
-			asSortPropertyReads(func->propertyReads);
+			func->PublishPropertyReads();
 		}
 	}
 
@@ -3148,7 +3284,6 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 					func->propertyReadsComplete = false;
 				}
 			}
-			asSortPropertyReads(func->propertyReads);
 			for( asUINT n = 0; n < targets.GetLength() && !func->transitiveLoops; n++ )
 			{
 				if( targets[n]->transitiveLoops )
@@ -3173,6 +3308,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 				}
 			}
 		}
+		func->PublishPropertyReads();
 		asBYTE packed = asPackMemoryAccess(r, w);
 		if( func->memoryAccess != packed )
 		{

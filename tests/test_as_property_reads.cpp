@@ -307,3 +307,86 @@ TEST_F(AsPropertyReads, ImplicitPropertyAccessorStaysViaThis) {
 	EXPECT_FALSE(Has(report, Read("G", "b", false)));
 	EXPECT_TRUE(Has(Report(Method(mod, "G", "n")), Read("G", "a", false)));
 }
+
+// The default value assignment is a native that copies every field of the
+// source, which is not `this`
+TEST_F(AsPropertyReads, DefaultAssignmentReadsTheSourceFields) {
+	asIScriptFunction* m = BuildMethod("float m() const { G t; t = other; return 0; }");
+	ASSERT_NE(m, nullptr);
+	std::vector<Read> report = Report(m);
+	EXPECT_TRUE(Has(report, Read("G", "other", true)));
+	EXPECT_TRUE(Has(report, Read("G", "other", false)));
+	EXPECT_TRUE(Has(report, Read("G", "a", false)));
+	EXPECT_TRUE(Has(report, Read("G", "b", false)));
+	EXPECT_TRUE(Has(report, Read("G", "p", false)));
+	EXPECT_FALSE(Has(report, Read("G", "a", true)));
+	EXPECT_TRUE(m->GetPropertyReadsComplete());
+}
+
+// The generated copy constructor reads the source's fields with its own code
+TEST_F(AsPropertyReads, DefaultCopyConstructorReadsTheSourceFields) {
+	asIScriptFunction* m = BuildMethod("float m() const { G t(other); return 0; }");
+	ASSERT_NE(m, nullptr);
+	std::vector<Read> report = Report(m);
+	EXPECT_TRUE(Has(report, Read("G", "other", true)));
+	EXPECT_TRUE(Has(report, Read("G", "a", false)));
+	EXPECT_TRUE(Has(report, Read("G", "b", false)));
+	EXPECT_TRUE(Has(report, Read("G", "p", false)));
+	EXPECT_FALSE(Has(report, Read("G", "a", true)));
+	EXPECT_TRUE(m->GetPropertyReadsComplete());
+}
+
+// Control: a user-written opAssign replaces the field copy, and reads only
+// what its body reads
+TEST_F(AsPropertyReads, UserOpAssignKeepsAnExactReport) {
+	ASSERT_TRUE(Build(
+		"class H { float x; float y; H& opAssign(const H&in o) { return this; } }\n"
+		"float f() { H t; H u; t = u; return 0; }\n")) << messages;
+	asIScriptFunction* f = mod->GetFunctionByName("f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_EQ(Report(f), std::vector<Read>{});
+	EXPECT_TRUE(f->GetPropertyReadsComplete());
+}
+
+// The assigned object may be of any class deriving from the static type, whose
+// fields the copy reads too; a value member is copied by its own class's copy
+TEST_F(AsPropertyReads, DefaultAssignmentCoversDerivedClassesAndValueMembers) {
+	ASSERT_TRUE(Build(
+		"class W { float w; }\n"
+		"class V { W inner; float v; }\n"
+		"class D : V { float d; }\n"
+		"float f(V@ dst, V@ src) { dst = src; return 0; }\n")) << messages;
+	asIScriptFunction* f = mod->GetFunctionByName("f");
+	ASSERT_NE(f, nullptr);
+	std::vector<Read> report = Report(f);
+	EXPECT_TRUE(Has(report, Read("V", "inner", false)));
+	EXPECT_TRUE(Has(report, Read("V", "v", false)));
+	EXPECT_TRUE(Has(report, Read("W", "w", false)));
+	EXPECT_TRUE(Has(report, Read("D", "d", false)));
+	EXPECT_TRUE(f->GetPropertyReadsComplete());
+}
+
+// A shared class can gain derived classes in modules built later
+TEST_F(AsPropertyReads, DefaultAssignmentOfASharedClassIsIncomplete) {
+	ASSERT_TRUE(Build(
+		"shared class S { float s; }\n"
+		"float f(S@ dst, S@ src) { dst = src; return 0; }\n")) << messages;
+	asIScriptFunction* f = mod->GetFunctionByName("f");
+	ASSERT_NE(f, nullptr);
+	EXPECT_TRUE(Has(Report(f), Read("S", "s", false)));
+	EXPECT_FALSE(f->GetPropertyReadsComplete());
+}
+
+TEST_F(AsPropertyReads, DefaultAssignmentReadsSurviveSaveAndLoad) {
+	ASSERT_TRUE(Build(std::string(kClassHead) + "float m() const { G t; t = other; return 0; } }\n")) << messages;
+	std::vector<Read> before = Report(Method(mod, "G", "m"));
+	ASSERT_TRUE(Has(before, Read("G", "a", false)));
+
+	MemStream stream;
+	ASSERT_GE(mod->SaveByteCode(&stream), 0);
+	asIScriptModule* restored = engine->GetModule("restored", asGM_ALWAYS_CREATE);
+	ASSERT_GE(restored->LoadByteCode(&stream), 0) << messages;
+	asIScriptFunction* m = Method(restored, "G", "m");
+	EXPECT_EQ(Report(m), before);
+	EXPECT_TRUE(m->GetPropertyReadsComplete());
+}

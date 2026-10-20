@@ -54,6 +54,7 @@ BEGIN_AS_NAMESPACE
 
 class asCScriptEngine;
 class asCScriptFunction;
+class asCObjectType;
 class asCByteInstruction;
 
 class asCByteCode
@@ -79,6 +80,7 @@ public:
 	void ExtractFuncdefCallTargets(asCScriptFunction *outFunc);
 	void ExtractCallReceivers(asCScriptFunction *outFunc);
 	void MarkLastCallReceiverIsThis();
+	void MarkLastCallCopyType(asCObjectType *type);
 	int  ResolveJumpAddresses();
 	int  FindLabel(int label, asCByteInstruction *from, asCByteInstruction **dest, int *positionDelta);
 
@@ -210,6 +212,10 @@ public:
 	// For asBC_CALL and asBC_CALLINTF only: the call's receiver is the
 	// compiled method's own `this`
 	bool receiverIsThis;
+
+	// For an asBC_CALLSYS to the script classes' default copy behaviour only:
+	// the static type of the object assigned to, or 0 when unknown
+	void *copyType;
 
 	// Testing
 	bool marked;

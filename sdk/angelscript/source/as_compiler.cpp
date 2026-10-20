@@ -1329,6 +1329,9 @@ void asCCompiler::CompileMemberInitializationCopy(asCByteCode* bc)
 			if (prop->type.IsReference())
 				ctx.bc.Instr(asBC_RDSPtr);
 
+			// A read of the copied object's property, which is not `this`
+			RecordPropertyRead(outFunc->objectType, prop, false);
+
 			// Reference to primitive must be stored in the temp register
 			if (prop->type.IsPrimitive())
 				ctx.bc.Instr(asBC_PopRPtr);
@@ -7572,6 +7575,9 @@ int asCCompiler::PerformAssignment(asCExprValue *lvalue, asCExprValue *rvalue, a
 			// TODO: Avoid this special case by implementing a copystub for
 			//       script classes that uses the default copy operator
 			bc->Call(asBC_CALLSYS, beh->copy, 2*AS_PTR_SIZE);
+			// The copy reads the source's properties, which the module pass
+			// derives from this type and the classes that derive from it
+			bc->MarkLastCallCopyType(CastToObjectType(lvalue->dataType.GetTypeInfo()));
 			bc->Instr(asBC_PshRPtr);
 		}
 		else

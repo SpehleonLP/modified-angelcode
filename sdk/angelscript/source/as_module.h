@@ -255,6 +255,11 @@ public:
 	// and outExternalCallees: the asRECEIVER_* bits of every site that
 	// reaches that callee, for the property-read fold. Deduplicating
 	// outCallees merges the bits.
+	//
+	// outCopyReads receives what the script classes' native default copy
+	// reads at each of func's sites, and outReadsIncomplete is set when a
+	// site's reads cannot be derived; a user-written opAssign that copy runs
+	// is appended as a callee instead. See AddDefaultCopyEffects.
 	void BuildCalleeList(asCScriptFunction *func,
 	                     const asCMap<int, asUINT> &funcIdToIndex,
 	                     asCArray<asUINT> &outCallees,
@@ -263,7 +268,24 @@ public:
 	                     asCArray<asBYTE> &outExternalReceivers,
 	                     bool &outUnresolved,
 	                     asCArray<asUINT> &outDirectSiteAddr,
-	                     asCArray<asUINT> &outDirectSiteIndex);
+	                     asCArray<asUINT> &outDirectSiteIndex,
+	                     asCArray<asSPropertyRead> &outCopyReads,
+	                     bool &outReadsIncomplete);
+	// The native default copy (asCScriptObject::CopyFromAs) assigning to an
+	// object of class `type`: it copies every property of the runtime class,
+	// recursing into value members, and runs a user-written opAssign where
+	// the class has one. With `staticType` the runtime class is `type` or any
+	// class deriving from it; a shared type can gain those in other modules,
+	// so it is incomplete.
+	void AddDefaultCopyEffects(asCObjectType *type, bool staticType,
+	                           const asCMap<int, asUINT> &funcIdToIndex,
+	                           asCArray<asUINT> &outCallees,
+	                           asCArray<asBYTE> &outCalleeReceivers,
+	                           asCArray<asCScriptFunction*> &outExternalCallees,
+	                           asCArray<asBYTE> &outExternalReceivers,
+	                           asCArray<asSPropertyRead> &outCopyReads,
+	                           asCArray<asCObjectType*> &visited,
+	                           bool &outReadsIncomplete);
 	int  AddScriptFunction(int sectionIdx, int declaredAt, int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asCString> &paramNames, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, bool isInterface, asCObjectType *objType = 0, bool isGlobalFunction = false, asSFunctionTraits funcTraits = asSFunctionTraits(), asSNameSpace *ns = 0);
 	int  AddScriptFunction(asCScriptFunction *func);
 	int  AddImportedFunction(int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, asSFunctionTraits funcTraits, asSNameSpace *ns, const asCString &moduleName);
