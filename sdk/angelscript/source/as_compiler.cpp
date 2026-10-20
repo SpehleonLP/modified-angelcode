@@ -11432,7 +11432,7 @@ asCCompiler::SYMBOLTYPE asCCompiler::SymbolLookupMember(const asCString &name, a
 		asCScriptFunction *f = engine->scriptFunctions[ot->methods[n]];
 		if (f->name == name)
 		{
-			if((builder->module->m_accessMask & f->accessMask) == false)
+			if((builder->accessMask & f->accessMask) == false)
 				candidate = f;
 			else
 			{
@@ -11465,7 +11465,7 @@ asCCompiler::SYMBOLTYPE asCCompiler::SymbolLookupMember(const asCString &name, a
 		asCString msg;
 		asCString smbl;
 		
-		msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, name.AddressOf(), candidate->accessMask, builder->module ? builder->module->m_accessMask : 0);
+		msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, name.AddressOf(), candidate->accessMask, builder->accessMask);
 		builder->WriteError(script->name, msg, 0, 0);
 	}
 
@@ -11888,7 +11888,7 @@ int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &s
 				smbl = scope + "::";
 			smbl += name;
 			if (missedAccessMask)
-				msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->module ? builder->module->m_accessMask : 0);
+				msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->accessMask);
 			else
 				msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
 			Error(msg, errNode);
@@ -12164,7 +12164,7 @@ int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &s
 			{
 				asCScriptFunction *f = engine->scriptFunctions[ot->methods[n]];
 				if (f->name == name &&
-					(builder->module->m_accessMask & f->accessMask))
+					(builder->accessMask & f->accessMask))
 				{
 					func = f;
 					break;
@@ -13660,7 +13660,7 @@ int asCCompiler::CompileFunctionCall(asCScriptNode *node, asCExprContext *ctx, a
 			smbl = scope + "::";
 		smbl += name;
 		if (missedAccessMask)
-			msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->module ? builder->module->m_accessMask : 0);
+			msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->accessMask);
 		else
 			msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
 		Error(msg, node);
@@ -15352,7 +15352,7 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 					{
 						asCString str;
 						if( maskedPropAccessMask )
-							str.Format(TXT_s_NOT_MEMBER_OF_s_MASK_x_vs_x, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf(), maskedPropAccessMask, builder->module ? builder->module->m_accessMask : 0);
+							str.Format(TXT_s_NOT_MEMBER_OF_s_MASK_x_vs_x, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf(), maskedPropAccessMask, builder->accessMask);
 						else
 							str.Format(TXT_s_NOT_MEMBER_OF_s, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
 						Error(str, node);
@@ -16107,7 +16107,7 @@ int asCCompiler::CompileOverloadedDualOperator2(asCScriptNode *node, const char 
 				(!isConst || func->IsReadOnly()) )
 			{
 				// Make sure the method is accessible by the module
-				if( builder->module->m_accessMask & func->accessMask )
+				if( builder->accessMask & func->accessMask )
 				{
 					// Skip script-defined-class methods (owning type is asOBJ_SCRIPT_OBJECT).
 					// Their accessMask is module-default 0xFFFFFFFF visibility noise; real usage

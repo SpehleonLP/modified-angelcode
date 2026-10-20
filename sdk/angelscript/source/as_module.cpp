@@ -1819,6 +1819,12 @@ int asCModule::CompileGlobalVar(const char *sectionName, const char *code, int l
 // See asCBuilder::CompileMethod
 int asCModule::CompileMethod(asITypeInfo *objectType, const char *sectionName, const char *code, int lineOffset, asIScriptFunction **outFunc)
 {
+	return CompileMethod(objectType, sectionName, code, lineOffset, m_accessMask, outFunc);
+}
+
+// interface
+int asCModule::CompileMethod(asITypeInfo *objectType, const char *sectionName, const char *code, int lineOffset, asDWORD accessMask, asIScriptFunction **outFunc)
+{
 	if (outFunc)
 		*outFunc = 0;
 
@@ -1854,6 +1860,7 @@ int asCModule::CompileMethod(asITypeInfo *objectType, const char *sectionName, c
 	}
 
 	asCBuilder methodBuilder(m_engine, this);
+	methodBuilder.accessMask = accessMask;
 	asCString str = code;
 	asCScriptFunction* func = 0;
 	r = methodBuilder.CompileMethod(ot, sectionName, str.AddressOf(), lineOffset, &func);
@@ -1886,6 +1893,12 @@ int asCModule::CompileMethod(asITypeInfo *objectType, const char *sectionName, c
 
 // interface
 int asCModule::CompileFunction(const char* sectionName, const char* code, int lineOffset, asDWORD compileFlags, asIScriptFunction** outFunc)
+{
+	return CompileFunction(sectionName, code, lineOffset, compileFlags, m_accessMask, outFunc);
+}
+
+// interface
+int asCModule::CompileFunction(const char* sectionName, const char* code, int lineOffset, asDWORD compileFlags, asDWORD accessMask, asIScriptFunction** outFunc)
 {
 	// Make sure the outFunc is null if the function fails, so the
 	// application doesn't attempt to release a non-existent function
@@ -1921,6 +1934,7 @@ int asCModule::CompileFunction(const char* sectionName, const char* code, int li
 
 	// Compile the single function
 	asCBuilder funcBuilder(m_engine, this);
+	funcBuilder.accessMask = accessMask;
 	asCString str = code;
 	asCScriptFunction* func = 0;
 	r = funcBuilder.CompileFunction(sectionName, str.AddressOf(), lineOffset, compileFlags, &func);

@@ -877,6 +877,11 @@ public:
 	virtual int         CompileFunction(const char *sectionName, const char *code, int lineOffset, asDWORD compileFlags, asIScriptFunction **outFunc) = 0;
 	virtual int         CompileGlobalVar(const char *sectionName, const char *code, int lineOffset) = 0;
 	virtual int         CompileMethod(asITypeInfo *objectType, const char *sectionName, const char *code, int lineOffset, asIScriptFunction **outFunc) = 0;
+	// As above, but names resolve under accessMask instead of the module's mask, which
+	// is neither read nor changed: a compile needs no SetAccessMask round trip, which
+	// would race every other compile in the module.
+	virtual int         CompileFunction(const char *sectionName, const char *code, int lineOffset, asDWORD compileFlags, asDWORD accessMask, asIScriptFunction **outFunc) = 0;
+	virtual int         CompileMethod(asITypeInfo *objectType, const char *sectionName, const char *code, int lineOffset, asDWORD accessMask, asIScriptFunction **outFunc) = 0;
 	virtual asDWORD     SetAccessMask(asDWORD accessMask) = 0;
 	virtual int         SetDefaultNamespace(const char *nameSpace) = 0;
 	virtual const char *GetDefaultNamespace() const = 0;

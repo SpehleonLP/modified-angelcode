@@ -101,6 +101,12 @@ this maps to). Grouped by theme, citing the primary files:
     call `asCScriptEngine::HandleAppException(asIScriptContext*)`, which uses
     only the interface (translate callback, `GetState`, `SetException`). The
     VM context delegates to it as well.
+- **Per-compile access mask.** `CompileFunction` and `CompileMethod` each have
+  an overload taking `asDWORD accessMask`: names resolve under that mask (the
+  builder carries it as `asCBuilder::accessMask`) and the module's stored mask is
+  neither read nor changed. A host that compiled under a different mask used to
+  bracket the compile with `SetAccessMask`, a plain write racing every other
+  compile in the module. The original signatures pass the module's mask.
 - **Anonymous methods**, on the same upstream branch.
   `asIScriptModule::CompileMethod(type, section, code, lineOffset, &func)`
   compiles one method against a script class this module declares. The
