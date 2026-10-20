@@ -282,6 +282,42 @@ int asCCompiler::CompileDefaultCopyConstructor(asCBuilder* in_builder, asCScript
 // constructor body, so a member it cannot build from its declaration is
 // refused rather than left zeroed: the instance is destroyed afterwards, and
 // destroying a zeroed value object is a memory bug.
+// The usage mask a registered type contributes when a call's signature names it.
+// Only engine-registered types carry a meaningful mask: script classes, enums, funcdefs and
+// template subtype placeholders keep the all-ones default that means "visible to every
+// module", which would saturate the tally. A template instance requested by a module is
+// owned by it but still takes its mask from the registered template.
+static asDWORD asRegisteredTypeUsageMask(const asCDataType &dt)
+{
+	asCTypeInfo *ti = dt.GetTypeInfo();
+	if( ti == 0 )
+	{
+		return 0;
+	}
+
+	if( ti->flags & (asOBJ_SCRIPT_OBJECT | asOBJ_ENUM | asOBJ_FUNCDEF | asOBJ_TEMPLATE_SUBTYPE | asOBJ_TYPEDEF) )
+	{
+		return 0;
+	}
+
+	if( ti->module && !(ti->flags & asOBJ_TEMPLATE) )
+	{
+		return 0;
+	}
+
+	return ti->accessMask == 0xFFFFFFFF ? 0 : ti->accessMask;
+}
+
+static asDWORD asSignatureAccessMask(const asCScriptFunction *func)
+{
+	asDWORD mask = asRegisteredTypeUsageMask(func->returnType);
+	for( asUINT n = 0; n < func->parameterTypes.GetLength(); n++ )
+	{
+		mask |= asRegisteredTypeUsageMask(func->parameterTypes[n]);
+	}
+	return mask;
+}
+
 static bool HasDefaultConstruction(asCScriptEngine *engine, const asCDataType &type)
 {
 	asSTypeBehaviour *beh = type.GetBehaviour();
@@ -18791,7 +18827,10 @@ void asCCompiler::PerformFunctionCall(int funcId, asCExprContext *ctx, bool isCo
 	if (descr->funcType == asFUNC_SYSTEM ||
 	    descr->funcType == asFUNC_IMPORTED)
 	{
-		m_usedAccessMask |= descr->accessMask;
+		// The function's own mask is only the gate on who may call it; the capabilities its
+		// signature stands for (a string parameter is Strings usage) are tallied here instead
+		// of being OR'd into that gate at registration, where they could only widen visibility.
+		m_usedAccessMask |= descr->accessMask | asSignatureAccessMask(descr);
 	}
 
 	if( (descr->returnType.IsObject() || descr->returnType.IsFuncdef()) && !descr->returnType.IsReference() )
