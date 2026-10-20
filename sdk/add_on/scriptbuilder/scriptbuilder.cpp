@@ -210,6 +210,7 @@ struct CScriptBuilder::Impl
 	int  LoadScriptSection(const char *filename, int flags);
 	bool IncludeIfNotAlreadyIncluded(const char *filename);
 	static void InternalMessageCallback(const asSMessageInfo *msg, void *param);
+	void Translate(asSMessageInfo &msg, string &sectionStorage) const;
 };
 
 // ---------------------------------------------------------------------------
@@ -792,32 +793,34 @@ void CScriptBuilder::Impl::InternalMessageCallback(const asSMessageInfo *msg, vo
 	Impl *self = static_cast<Impl*>(param);
 	if( !self->msgCallback ) return;
 
-	asSMessageInfo translated;
-	translated.section = msg->section;
-	translated.row     = msg->row;
-	translated.col     = msg->col;
-	translated.type    = msg->type;
-	translated.message = msg->message;
-
+	asSMessageInfo translated = *msg;
 	string translatedSection;
+	self->Translate(translated, translatedSection);
+	self->msgCallback(&translated, self->msgParam);
+}
 
-	const vector<SourceMapping> &sourceMap = self->splice.GetSourceMap();
+void CScriptBuilder::Impl::Translate(asSMessageInfo &msg, string &sectionStorage) const
+{
+	const vector<SourceMapping> &sourceMap = splice.GetSourceMap();
 	for( size_t i = 0; i < sourceMap.size(); i++ )
 	{
 		const SourceMapping &mapping = sourceMap[i];
-		if( mapping.synthSection == msg->section &&
-		    msg->row >= mapping.synthLineStart &&
-		    msg->row <= mapping.synthLineEnd )
+		if( msg.section && mapping.synthSection == msg.section &&
+		    msg.row >= mapping.synthLineStart &&
+		    msg.row <= mapping.synthLineEnd )
 		{
-			int offset = msg->row - mapping.synthLineStart;
-			translatedSection = mapping.origSection;
-			translated.section = translatedSection.c_str();
-			translated.row = mapping.origLine + offset;
-			break;
+			int offset = msg.row - mapping.synthLineStart;
+			sectionStorage = mapping.origSection;
+			msg.section = sectionStorage.c_str();
+			msg.row = mapping.origLine + offset;
+			return;
 		}
 	}
+}
 
-	self->msgCallback(&translated, self->msgParam);
+void CScriptBuilder::TranslateMessage(asSMessageInfo &msg, string &sectionStorage) const
+{
+	impl_->Translate(msg, sectionStorage);
 }
 
 // ---------------------------------------------------------------------------
