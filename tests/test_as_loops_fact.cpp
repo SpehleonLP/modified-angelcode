@@ -166,6 +166,25 @@ TEST_F(AsLoopsFact, NativeMarkedLoopingFoldsThroughAMethodCall) {
 	EXPECT_EQ(Fn("h")->GetLoopsVia(), scan);
 }
 
+TEST_F(AsLoopsFact, TemplateInstanceMethodInheritsTheNativeLoopsFact) {
+	ASSERT_GE(engine->RegisterObjectType("Box<class T>", 0, asOBJ_REF | asOBJ_NOCOUNT | asOBJ_TEMPLATE), 0);
+	ASSERT_GE(engine->RegisterObjectMethod("Box<T>", "int scan()", asFUNCTION(Scan), asCALL_CDECL_OBJLAST), 0);
+	ASSERT_GE(engine->RegisterObjectMethod("Box<T>", "int plain()", asFUNCTION(Scan), asCALL_CDECL_OBJLAST), 0);
+	asITypeInfo* tmpl = engine->GetTypeInfoByName("Box");
+	ASSERT_NE(tmpl, nullptr);
+	ASSERT_EQ(tmpl->GetMethodByName("scan")->SetLoops(true), asSUCCESS);
+
+	ASSERT_TRUE(Build(
+		"int h(Box<int>@ b) { return b.scan(); }\n"
+		"int k(Box<int>@ b) { return b.plain(); }\n")) << messages;
+	asITypeInfo* inst = engine->GetTypeInfoByDecl("Box<int>");
+	ASSERT_NE(inst, nullptr);
+	EXPECT_TRUE(inst->GetMethodByName("scan")->GetTransitiveLoops());
+	EXPECT_FALSE(inst->GetMethodByName("plain")->GetTransitiveLoops());
+	EXPECT_TRUE(Fn("h")->GetTransitiveLoops());
+	EXPECT_FALSE(Fn("k")->GetTransitiveLoops());
+}
+
 TEST_F(AsLoopsFact, SetLoopsOnAScriptFunctionIsRefused) {
 	ASSERT_TRUE(Build("int f() { return 1; }\n")) << messages;
 	asIScriptFunction* f = Fn("f");

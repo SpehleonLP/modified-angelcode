@@ -4462,6 +4462,12 @@ bool asCScriptEngine::GenerateFunctionForTemplateObjectInstance(asCObjectType *t
 	func2->inOutFlags = func->inOutFlags;
 	func2->traits = func->traits;
 	func2->memoryAccess = func->memoryAccess;
+	// A native's loops fact is set by the host on the template's method; the instance is a
+	// fresh function the host never sees, so it must inherit the fact or it reads as O(1).
+	// Native property reads are empty and complete by default, so there is nothing else to copy.
+	func2->localLoops = func->localLoops;
+	func2->transitiveLoops = func->transitiveLoops;
+	func2->loopsVia = func->loopsVia;
 	func2->SetReadOnly(func->IsReadOnly());
 	func2->objectType = ot;
 	func2->objectType->AddRefInternal();
