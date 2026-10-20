@@ -892,19 +892,6 @@ public:
 	virtual asIScriptFunction *GetFunctionByDecl(const char *decl) const = 0;
 	virtual asIScriptFunction *GetFunctionByName(const char *name) const = 0;
 	virtual int                RemoveFunction(asIScriptFunction *func) = 0;
-	// The registered (asFUNC_SYSTEM) functions `func` may call, directly or through
-	// the script functions it calls, as this module's transitive analysis follows
-	// calls: direct and virtual or interface calls, constructors and factories,
-	// constant function-pointer and bound-import targets, and the script opAssign
-	// a default copy runs. Implicit behaviour calls (addref, release, destructors)
-	// are not followed. `func` is one of this module's functions or a detached
-	// CompileFunction/CompileMethod product compiled against it. Fills up to
-	// `capacity` entries of `out` (which may be null to count), without
-	// duplicates, and returns how many there are. `complete`, when given, is
-	// false when a call cannot be followed (a delegate, an open dispatch, an
-	// unbound import or an unmapped target): the list is then a lower bound.
-	// Computed on each call; not safe while the module builds or is discarded.
-	virtual asUINT             GetTransitiveSystemCallees(asIScriptFunction *func, asIScriptFunction **out, asUINT capacity, bool *complete = 0) = 0;
 
 	// Global variables
 	virtual int         ResetGlobalVars(asIScriptContext *ctx = 0) = 0;
