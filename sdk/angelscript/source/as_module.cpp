@@ -1989,6 +1989,91 @@ int asCModule::RemoveFunction(asIScriptFunction *func)
 	return asNO_FUNCTION;
 }
 
+asUINT asCModule::GetTransitiveSystemCallees(asIScriptFunction *in_func, asIScriptFunction **out, asUINT capacity, bool *complete)
+{
+	bool followed = true;
+	asCArray<asCScriptFunction*> natives;
+#ifndef AS_NO_COMPILER
+	asCScriptFunction *root = static_cast<asCScriptFunction*>(in_func);
+	if( root == 0 || root->scriptData == 0 )
+	{
+		// A native or a declaration has no body to follow
+		followed = false;
+	}
+	else
+	{
+		// The same edges the transitive fold takes, so this list and the folded
+		// facts describe one call graph
+		asCMap<int, asUINT> funcIdToIndex;
+		BuildFuncIdToIndex(funcIdToIndex);
+		asCArray<asCScriptFunction*> work, seen;
+		work.PushLast(root);
+		seen.PushLast(root);
+		while( work.GetLength() )
+		{
+			asCScriptFunction *func = work.PopLast();
+			asCArray<asUINT> callees;
+			asCArray<asBYTE> calleeReceivers;
+			asCArray<asCScriptFunction*> externals;
+			asCArray<asBYTE> externalReceivers;
+			bool unresolved = false;
+			asCArray<asUINT> siteAddr, siteIndex;
+			asCArray<asSPropertyRead> copyReads;
+			bool readsIncomplete = false;
+			BuildCalleeList(func, funcIdToIndex, callees, calleeReceivers, externals, externalReceivers, unresolved,
+			                siteAddr, siteIndex, copyReads, readsIncomplete);
+			if( unresolved )
+			{
+				followed = false;
+			}
+			for( asUINT n = 0; n < callees.GetLength(); n++ )
+			{
+				asCScriptFunction *callee = m_scriptFunctions[callees[n]];
+				if( callee && !seen.Exists(callee) )
+				{
+					seen.PushLast(callee);
+					work.PushLast(callee);
+				}
+			}
+			for( asUINT n = 0; n < externals.GetLength(); n++ )
+			{
+				asCScriptFunction *callee = externals[n];
+				if( callee->funcType == asFUNC_SYSTEM )
+				{
+					if( !natives.Exists(callee) )
+					{
+						natives.PushLast(callee);
+					}
+				}
+				else if( callee->scriptData == 0 )
+				{
+					followed = false;
+				}
+				else if( !seen.Exists(callee) )
+				{
+					// A shared function, or an engine-made stub such as a template
+					// factory: its body is final, so it is followed like a callee
+					seen.PushLast(callee);
+					work.PushLast(callee);
+				}
+			}
+		}
+	}
+#else
+	UNUSED_VAR(in_func);
+	followed = false;
+#endif
+	if( complete )
+	{
+		*complete = followed;
+	}
+	for( asUINT n = 0; out != 0 && n < natives.GetLength() && n < capacity; n++ )
+	{
+		out[n] = natives[n];
+	}
+	return natives.GetLength();
+}
+
 #ifndef AS_NO_COMPILER
 // internal
 int asCModule::AddFuncDef(const asCString &funcName, asSNameSpace *ns, asCObjectType *parent)

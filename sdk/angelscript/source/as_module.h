@@ -133,6 +133,7 @@ public:
 	virtual asIScriptFunction *GetFunctionByDecl(const char *decl) const;
 	virtual asIScriptFunction *GetFunctionByName(const char *name) const;
 	virtual int                RemoveFunction(asIScriptFunction *func);
+	virtual asUINT             GetTransitiveSystemCallees(asIScriptFunction *func, asIScriptFunction **out, asUINT capacity, bool *complete);
 
 	// Script global variables
 	// TODO: interface: Should be called InitGlobalVars, and should have a bool to reset in case already initialized
