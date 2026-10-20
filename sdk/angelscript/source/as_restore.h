@@ -49,8 +49,10 @@
 // the format incompatible with stock AngelScript long before this header
 // existed; version 1 is the first self-identifying format. Version 2 adds
 // a memory-access byte to each script function (after its halting and
-// access-mask metadata) and to each virtual or interface function.
-#define AS_BYTECODE_FORMAT_VERSION 2
+// access-mask metadata) and to each virtual or interface function. Version
+// 3 adds the loops facts to the metadata flags byte; an older blob would
+// read them as "does not loop".
+#define AS_BYTECODE_FORMAT_VERSION 3
 
 BEGIN_AS_NAMESPACE
 

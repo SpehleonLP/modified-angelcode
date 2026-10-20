@@ -35,6 +35,7 @@ void MessageCallback(const asSMessageInfo* msg, void* param) {
 }
 
 int Scan() { return 0; }
+void Construct(void*) {}
 
 const char* kLoopingHelper =
 	"int f() { int s = 0; for (int i = 0; i < 4; ++i) { s += i; } return s; }\n";
@@ -200,6 +201,99 @@ TEST_F(AsLoopsFact, MethodCalledThroughAnInterfaceOrVirtualFoldsEveryOverride) {
 	EXPECT_FALSE(viaInterface->GetLocalLoops());
 	EXPECT_TRUE(viaInterface->GetTransitiveLoops());
 	EXPECT_EQ(viaInterface->GetLoopsVia(), qn);
+
+	// GetMethodByName defaults to the virtual stub, which has no body: it
+	// answers with the join over everything a call through it can reach.
+	asITypeInfo* b = mod->GetTypeInfoByName("B");
+	EXPECT_FALSE(b->GetMethodByName("m", false)->GetTransitiveLoops());
+	asIScriptFunction* bStub = b->GetMethodByName("m");
+	ASSERT_NE(bStub, nullptr);
+	EXPECT_EQ(bStub->GetFuncType(), asFUNC_VIRTUAL);
+	EXPECT_TRUE(bStub->GetTransitiveLoops());
+	EXPECT_EQ(bStub->GetLoopsVia(), dm);
+
+	asIScriptFunction* iStub = mod->GetTypeInfoByName("I")->GetMethodByName("n");
+	ASSERT_NE(iStub, nullptr);
+	EXPECT_EQ(iStub->GetFuncType(), asFUNC_INTERFACE);
+	EXPECT_TRUE(iStub->GetTransitiveLoops());
+
+	// A stub whose every target is straight-line does not loop
+	asIScriptFunction* pStub = mod->GetTypeInfoByName("P")->GetMethodByName("n");
+	ASSERT_NE(pStub, nullptr);
+	EXPECT_EQ(pStub->GetFuncType(), asFUNC_VIRTUAL);
+	EXPECT_FALSE(pStub->GetTransitiveLoops());
+}
+
+// A shared type can gain overrides in modules built later, so a call through
+// it cannot be closed now.
+TEST_F(AsLoopsFact, OpenDispatchLoops) {
+	ASSERT_TRUE(Build(
+		"shared class S { int m() { return 1; } }\n"
+		"int viaShared(S@ s) { return s.m(); }\n")) << messages;
+	EXPECT_TRUE(Fn("viaShared")->GetTransitiveLoops());
+	EXPECT_EQ(Fn("viaShared")->GetLoopsVia(), nullptr);
+	EXPECT_TRUE(mod->GetTypeInfoByName("S")->GetMethodByName("m")->GetTransitiveLoops());
+}
+
+// The callee behind a funcdef handle is unknown, so the call may loop
+TEST_F(AsLoopsFact, FuncdefCallLoops) {
+	ASSERT_TRUE(Build(
+		"funcdef int CB();\n"
+		"int call(CB@ cb) { return cb(); }\n"
+		"int outer(CB@ cb) { return call(cb); }\n")) << messages;
+	asIScriptFunction* call = Fn("call");
+	EXPECT_FALSE(call->GetLocalLoops());
+	EXPECT_TRUE(call->GetTransitiveLoops());
+	EXPECT_EQ(call->GetLoopsVia(), nullptr);
+	EXPECT_TRUE(Fn("outer")->GetTransitiveLoops());
+	EXPECT_EQ(Fn("outer")->GetLoopsVia(), call);
+}
+
+// A local value is built by CALLSYS on its native constructor; a non-POD
+// value member is heap-allocated through asBC_ALLOC. Both must see it.
+TEST_F(AsLoopsFact, NativeConstructorMarkedLoopingLoopsTheConstructingCaller) {
+	ASSERT_GE(engine->RegisterObjectType("V", 4, asOBJ_VALUE | asOBJ_APP_CLASS_CD), 0);
+	ASSERT_GE(engine->RegisterObjectBehaviour("V", asBEHAVE_CONSTRUCT, "void f()", asFUNCTION(Construct), asCALL_CDECL_OBJLAST), 0);
+	ASSERT_GE(engine->RegisterObjectBehaviour("V", asBEHAVE_DESTRUCT, "void f()", asFUNCTION(Construct), asCALL_CDECL_OBJLAST), 0);
+	ASSERT_GE(engine->RegisterObjectType("W", 4, asOBJ_VALUE | asOBJ_APP_CLASS_CD), 0);
+	ASSERT_GE(engine->RegisterObjectBehaviour("W", asBEHAVE_CONSTRUCT, "void f()", asFUNCTION(Construct), asCALL_CDECL_OBJLAST), 0);
+	ASSERT_GE(engine->RegisterObjectBehaviour("W", asBEHAVE_DESTRUCT, "void f()", asFUNCTION(Construct), asCALL_CDECL_OBJLAST), 0);
+	asITypeInfo* v = engine->GetTypeInfoByName("V");
+	ASSERT_NE(v, nullptr);
+	asIScriptFunction* construct = nullptr;
+	for (asUINT n = 0; n < v->GetBehaviourCount(); n++) {
+		asEBehaviours beh;
+		asIScriptFunction* f = v->GetBehaviourByIndex(n, &beh);
+		if (beh == asBEHAVE_CONSTRUCT) {
+			construct = f;
+		}
+	}
+	ASSERT_NE(construct, nullptr);
+	ASSERT_EQ(construct->SetLoops(true), asSUCCESS);
+
+	ASSERT_TRUE(Build(
+		"int local() { V v; return 0; }\n"
+		"class HoldsV { V v; }\n"
+		"int member() { HoldsV h; return 0; }\n"
+		"int localW() { W w; return 0; }\n"
+		"class HoldsW { W w; }\n"
+		"int memberW() { HoldsW h; return 0; }\n")) << messages;
+	EXPECT_TRUE(Fn("local")->GetTransitiveLoops());
+	EXPECT_TRUE(Fn("member")->GetTransitiveLoops());
+	EXPECT_FALSE(Fn("localW")->GetTransitiveLoops());
+	EXPECT_FALSE(Fn("memberW")->GetTransitiveLoops());
+}
+
+// Kinds the analysis never visits must not claim "does not loop"
+TEST_F(AsLoopsFact, UnanalysedKindsDefaultToLooping) {
+	ASSERT_TRUE(Build("funcdef int CB();\n")) << messages;
+	asITypeInfo* cb = mod->GetTypeInfoByName("CB");
+	ASSERT_NE(cb, nullptr);
+	asIScriptFunction* sig = cb->GetFuncdefSignature();
+	ASSERT_NE(sig, nullptr);
+	EXPECT_EQ(sig->GetFuncType(), asFUNC_FUNCDEF);
+	EXPECT_TRUE(sig->GetLocalLoops());
+	EXPECT_TRUE(sig->GetTransitiveLoops());
 }
 
 TEST_F(AsLoopsFact, CompileMethodProductHasTransitiveFacts) {

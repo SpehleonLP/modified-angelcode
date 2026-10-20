@@ -377,7 +377,9 @@ public:
 	bool                         localLoops;
 	bool                         transitiveLoops;
 	// The direct callee the transitive fold took transitiveLoops from; null
-	// when the function loops locally or not at all. Not counted, because a
+	// when the function loops locally, through a call the analysis cannot
+	// follow (a delegate, an import, an open dispatch), or not at all.
+	// Not counted, because a
 	// recursive function would then hold itself: it is valid while the module
 	// that analysed this function lives, which owns every script callee
 	// (dispatch targets included) and recomputes it on bind and unbind.

@@ -394,9 +394,12 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	// runs must not claim YES.
 	localHalts             = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
 	transitiveHalts        = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
-	// A native cannot be analysed: it does not loop until SetLoops says so
-	localLoops             = false;
-	transitiveLoops        = false;
+	// A native cannot be analysed: it does not loop until SetLoops says so.
+	// Every other kind loops until the compiler or the module pass proves
+	// otherwise, so a kind the analysis never visits (an import, a delegate,
+	// a funcdef signature) cannot read as "does not loop".
+	localLoops             = (funcType != asFUNC_SYSTEM);
+	transitiveLoops        = (funcType != asFUNC_SYSTEM);
 	loopsVia               = 0;
 	// Zero would be None, the most permissive scope; an undeclared function must not look safe
 	memoryAccess           = asPackMemoryAccess(asMA_UNSET, asMA_UNSET);

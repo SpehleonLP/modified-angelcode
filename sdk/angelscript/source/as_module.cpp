@@ -2383,9 +2383,13 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 				{
 					// Same reasoning as the CALL branch: a shared class's
 					// constructor/factory living in another module is frozen
-					// too, so fold it as a constant instead of poisoning.
+					// too, so fold it as a constant instead of poisoning. A
+					// heap-allocated value type's native constructor is final
+					// for the same reason a CALLSYS target is.
 					asCScriptFunction *calledFunc = m_engine->GetScriptFunction(funcId);
 					if (calledFunc && calledFunc->funcType == asFUNC_SCRIPT && calledFunc->IsShared())
+						outExternalCallees.PushLast(calledFunc);
+					else if (calledFunc && calledFunc->funcType == asFUNC_SYSTEM)
 						outExternalCallees.PushLast(calledFunc);
 					else
 						outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
@@ -2442,9 +2446,72 @@ static bool ScanMemoryAccessRound(asCMemoryAccessScanner &scanner, const asCArra
 	return changed;
 }
 
-// One round of the transitive fold over `order`: joins each function's access
-// mask, calls-delegate flag, halting verdict and loops fact with its callees'.
-// Reports whether any field moved.
+// Joins one callee's transitive facts into func's: the access mask, the
+// calls-delegate flag, the halting verdict and the loops fact. Reports whether
+// any of func's fields moved.
+static bool JoinCalleeFacts(asCScriptFunction *func, asCScriptFunction *callee)
+{
+	bool changed = false;
+
+	asDWORD newMask = func->minTransitiveAccessMask | callee->minTransitiveAccessMask;
+	if( newMask != func->minTransitiveAccessMask )
+	{
+		func->minTransitiveAccessMask = newMask;
+		changed = true;
+	}
+
+	if( callee->transitiveCallsDelegate )
+	{
+		if( !func->transitiveCallsDelegate )
+		{
+			func->transitiveCallsDelegate = true;
+			changed = true;
+		}
+		// The flag can newly appear on a caller already settled at YES from
+		// an earlier iteration; cap it here so no propagation ordering leaves
+		// a flagged function at YES.
+		if( func->transitiveHalts == asHALTS_YES )
+		{
+			func->transitiveHalts = asHALTS_UNKNOWN;
+			changed = true;
+		}
+	}
+
+	// NO must not cross a call edge: whether the caller halts then depends on
+	// whether this call site is reached, which the graph doesn't track. A
+	// never-halting callee contributes UNKNOWN; a function is NO only by its
+	// own control flow.
+	int calleeHalts = callee->transitiveHalts == asHALTS_NO
+		? (int)asHALTS_UNKNOWN : (int)callee->transitiveHalts;
+	if( calleeHalts > (int)func->transitiveHalts )
+	{
+		func->transitiveHalts = calleeHalts;
+		changed = true;
+	}
+
+	if( !func->transitiveLoops && callee->transitiveLoops )
+	{
+		func->transitiveLoops = true;
+		func->loopsVia = callee;
+		changed = true;
+	}
+
+	return changed;
+}
+
+// An unmodelled call site (a delegate, an import, an open dispatch, an
+// unmapped target) may reach anything, so it loops with no callee to name.
+static void SetLoopsThroughUnresolvedCall(asCScriptFunction *func)
+{
+	if( !func->transitiveLoops )
+	{
+		func->transitiveLoops = true;
+		func->loopsVia = 0;
+	}
+}
+
+// One round of the transitive fold over `order`: joins each function's facts
+// with its callees'. Reports whether any field moved.
 static bool FoldTransitiveMetadataRound(const asCArray<asCScriptFunction*> &funcs, const asCArray<asUINT> &order, const asCArray<asCArray<asUINT>> &callees)
 {
 	bool changed = false;
@@ -2466,44 +2533,8 @@ static bool FoldTransitiveMetadataRound(const asCArray<asCScriptFunction*> &func
 				continue;
 			}
 
-			asDWORD newMask = func->minTransitiveAccessMask | callee->minTransitiveAccessMask;
-			if( newMask != func->minTransitiveAccessMask )
+			if( JoinCalleeFacts(func, callee) )
 			{
-				func->minTransitiveAccessMask = newMask;
-				changed = true;
-			}
-
-			if( !func->transitiveCallsDelegate && callee->transitiveCallsDelegate )
-			{
-				func->transitiveCallsDelegate = true;
-				// The flag can newly appear on a caller already settled
-				// at YES from an earlier iteration; cap it here so no
-				// propagation ordering leaves a flagged function at YES.
-				if( func->transitiveHalts == asHALTS_YES )
-				{
-					func->transitiveHalts = asHALTS_UNKNOWN;
-				}
-				changed = true;
-			}
-
-			// NO must not cross a call edge: whether the caller halts then
-			// depends on whether this call site is reached, which the
-			// graph doesn't track. A never-halting callee contributes
-			// UNKNOWN; a function is NO only by its own control flow.
-			int calleeHalts = callee->transitiveHalts == asHALTS_NO
-				? (int)asHALTS_UNKNOWN : (int)callee->transitiveHalts;
-			int newHalts = func->transitiveHalts > calleeHalts
-				? func->transitiveHalts : calleeHalts;
-			if( newHalts != func->transitiveHalts )
-			{
-				func->transitiveHalts = newHalts;
-				changed = true;
-			}
-
-			if( !func->transitiveLoops && callee->transitiveLoops )
-			{
-				func->transitiveLoops = true;
-				func->loopsVia = callee;
 				changed = true;
 			}
 		}
@@ -2581,30 +2612,17 @@ void asCModule::FoldSourceFunctionMetadata(asCScriptFunction *func, const asCMap
 	func->transitiveHalts = func->localHalts;
 	func->transitiveLoops = func->localLoops;
 	func->loopsVia = 0;
+	if( func->transitiveCallsDelegate )
+	{
+		SetLoopsThroughUnresolvedCall(func);
+	}
 
 	// External fixed callees: same constant fold as phase 2 (shared
 	// functions are frozen at first compile, so this cannot form a
 	// cycle back into this module).
 	for( asUINT j = 0; j < sourceExternalCallees.GetLength(); j++ )
 	{
-		asCScriptFunction *ext = sourceExternalCallees[j];
-		func->minTransitiveAccessMask |= ext->minTransitiveAccessMask;
-		if( ext->transitiveCallsDelegate )
-		{
-			func->transitiveCallsDelegate = true;
-		}
-		// Same NO-doesn't-cross-a-call-edge rule as phase 4.
-		int extHalts = ext->transitiveHalts == asHALTS_NO
-			? (int)asHALTS_UNKNOWN : (int)ext->transitiveHalts;
-		if( extHalts > (int)func->transitiveHalts )
-		{
-			func->transitiveHalts = extHalts;
-		}
-		if( !func->transitiveLoops && ext->transitiveLoops )
-		{
-			func->transitiveLoops = true;
-			func->loopsVia = ext;
-		}
+		JoinCalleeFacts(func, sourceExternalCallees[j]);
 	}
 
 	// BuildCalleeList's poisonings (shared targets, imports,
@@ -2619,31 +2637,9 @@ void asCModule::FoldSourceFunctionMetadata(asCScriptFunction *func, const asCMap
 	for( asUINT j = 0; j < sourceCallees.GetLength(); j++ )
 	{
 		asCScriptFunction *callee = m_scriptFunctions[sourceCallees[j]];
-		if( !callee )
+		if( callee )
 		{
-			continue;
-		}
-
-		func->minTransitiveAccessMask |= callee->minTransitiveAccessMask;
-		if( callee->transitiveCallsDelegate )
-		{
-			func->transitiveCallsDelegate = true;
-			if( func->transitiveHalts == asHALTS_YES )
-			{
-				func->transitiveHalts = asHALTS_UNKNOWN;
-			}
-		}
-		// Same NO-doesn't-cross-a-call-edge rule as phase 4.
-		int calleeHalts = callee->transitiveHalts == asHALTS_NO
-			? (int)asHALTS_UNKNOWN : (int)callee->transitiveHalts;
-		if( calleeHalts > func->transitiveHalts )
-		{
-			func->transitiveHalts = calleeHalts;
-		}
-		if( !func->transitiveLoops && callee->transitiveLoops )
-		{
-			func->transitiveLoops = true;
-			func->loopsVia = callee;
+			JoinCalleeFacts(func, callee);
 		}
 	}
 }
@@ -2704,6 +2700,10 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		func->transitiveHalts = func->localHalts;
 		func->transitiveLoops = func->localLoops;
 		func->loopsVia = 0;
+		if( func->transitiveCallsDelegate )
+		{
+			SetLoopsThroughUnresolvedCall(func);
+		}
 
 		// External fixed callees: targets outside this module whose metadata
 		// is already final (shared functions are frozen at first compile).
@@ -2716,24 +2716,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		// break the idempotence of this pass.
 		for( asUINT j = 0; j < externalCallees[i].GetLength(); j++ )
 		{
-			asCScriptFunction *ext = externalCallees[i][j];
-			func->minTransitiveAccessMask |= ext->minTransitiveAccessMask;
-			if( ext->transitiveCallsDelegate )
-			{
-				func->transitiveCallsDelegate = true;
-			}
-			// Same NO-doesn't-cross-a-call-edge rule as phase 4.
-			int extHalts = ext->transitiveHalts == asHALTS_NO
-				? (int)asHALTS_UNKNOWN : (int)ext->transitiveHalts;
-			if( extHalts > (int)func->transitiveHalts )
-			{
-				func->transitiveHalts = extHalts;
-			}
-			if( !func->transitiveLoops && ext->transitiveLoops )
-			{
-				func->transitiveLoops = true;
-				func->loopsVia = ext;
-			}
+			JoinCalleeFacts(func, externalCallees[i][j]);
 		}
 
 		// BuildCalleeList's poisonings (shared targets, imports,
@@ -3041,7 +3024,8 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	}
 
 	// A virtual or interface method has no body. A host asking about it gets
-	// the join over everything a call through it can reach.
+	// the join over everything a call through it can reach. An open set can
+	// reach code not yet built, so it loops.
 	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		asCScriptFunction *func = m_scriptFunctions[i];
@@ -3050,9 +3034,22 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 			continue;
 		}
 		asEMemoryAccess r = asMA_PROGRAM, w = asMA_PROGRAM;
+		func->localLoops = true;
+		func->transitiveLoops = true;
+		func->loopsVia = 0;
 		asCArray<asCScriptFunction*> targets;
 		if( GetDispatchTargets(func, targets) )
 		{
+			func->localLoops = false;
+			func->transitiveLoops = false;
+			for( asUINT n = 0; n < targets.GetLength() && !func->transitiveLoops; n++ )
+			{
+				if( targets[n]->transitiveLoops )
+				{
+					func->transitiveLoops = true;
+					func->loopsVia = targets[n];
+				}
+			}
 			r = w = asMA_NONE;
 			for( asUINT n = 0; n < targets.GetLength(); n++ )
 			{
