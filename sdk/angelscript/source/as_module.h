@@ -59,6 +59,12 @@ const int FUNC_IMPORTED = 0x40000000;
 // metadata was final before any other module could reference it.
 const asUINT asMODULE_SITE_DIVERGES = 0xFFFFFFFF;
 
+// A call site's receiver, for the property-read fold: the caller's own
+// `this`, or anything else (another object, a constructed one, none, or a
+// site the compiler did not mark)
+const asBYTE asRECEIVER_THIS  = 1;
+const asBYTE asRECEIVER_OTHER = 2;
+
 class asCScriptEngine;
 class asCCompiler;
 class asCBuilder;
@@ -244,10 +250,17 @@ public:
 	// that never returns is on every path to a RET. Only single-target direct
 	// calls appear; virtual dispatch, imports, delegates and unresolved sites
 	// are deliberately absent, so they are always treated as returning.
+	//
+	// outCalleeReceivers and outExternalReceivers run parallel to outCallees
+	// and outExternalCallees: the asRECEIVER_* bits of every site that
+	// reaches that callee, for the property-read fold. Deduplicating
+	// outCallees merges the bits.
 	void BuildCalleeList(asCScriptFunction *func,
 	                     const asCMap<int, asUINT> &funcIdToIndex,
 	                     asCArray<asUINT> &outCallees,
+	                     asCArray<asBYTE> &outCalleeReceivers,
 	                     asCArray<asCScriptFunction*> &outExternalCallees,
+	                     asCArray<asBYTE> &outExternalReceivers,
 	                     bool &outUnresolved,
 	                     asCArray<asUINT> &outDirectSiteAddr,
 	                     asCArray<asUINT> &outDirectSiteIndex);

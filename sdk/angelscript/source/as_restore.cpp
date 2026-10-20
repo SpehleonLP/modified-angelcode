@@ -1479,6 +1479,7 @@ asCScriptFunction *asCReader::ReadFunction(bool &isNew, bool addToModule, bool a
 				func->transitiveCallsDelegate = (metaFlags & 2) != 0;
 				func->localLoops = (metaFlags & 4) != 0;
 				func->transitiveLoops = (metaFlags & 8) != 0;
+				func->propertyReadsComplete = (metaFlags & 16) != 0;
 				asBYTE metaHalts[2];
 				ReadData(metaHalts, 2);
 				func->localHalts = metaHalts[0] <= asHALTS_NO ? metaHalts[0] : asHALTS_UNKNOWN;
@@ -1488,6 +1489,20 @@ asCScriptFunction *asCReader::ReadFunction(bool &isNew, bool addToModule, bool a
 				asBYTE access = 0;
 				ReadData(&access, 1);
 				func->memoryAccess = asSanitizeMemoryAccess(access);
+
+				// The property-read reports and the call receivers they fold
+				// through. The types' properties are read after their methods,
+				// so TranslateFunction validates the indices.
+				ReadPropertyReads(func->localPropertyReads);
+				ReadPropertyReads(func->propertyReads);
+				asUINT receiverCount = SanityCheck(ReadEncodedUInt(), 1000000);
+				func->scriptData->callReceiverIsThis.SetLength(receiverCount);
+				for( asUINT n = 0; n < receiverCount && !error; n++ )
+				{
+					asBYTE isThis = 0;
+					ReadData(&isThis, 1);
+					func->scriptData->callReceiverIsThis[n] = isThis != 0;
+				}
 			}
 		}
 	}
@@ -2926,12 +2941,49 @@ asCScriptFunction *asCReader::FindFunction(int idx)
 	}
 }
 
+void asCReader::ReadPropertyReads(asCArray<asSPropertyRead> &reads)
+{
+	asUINT count = SanityCheck(ReadEncodedUInt(), 1000000);
+	reads.SetLength(0);
+	for( asUINT n = 0; n < count && !error; n++ )
+	{
+		asSPropertyRead read;
+		read.objectType = CastToObjectType(ReadTypeInfo());
+		read.propertyIndex = ReadEncodedUInt();
+		asBYTE viaThis = 0;
+		ReadData(&viaThis, 1);
+		read.viaThis = viaThis != 0;
+		reads.PushLast(read);
+	}
+}
+
+bool asCReader::ArePropertyReadsValid(const asCArray<asSPropertyRead> &reads)
+{
+	for( asUINT n = 0; n < reads.GetLength(); n++ )
+	{
+		asCObjectType *ot = reads[n].objectType;
+		if( ot == 0 || !(ot->flags & asOBJ_SCRIPT_OBJECT) || reads[n].propertyIndex >= ot->properties.GetLength() )
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 void asCReader::TranslateFunction(asCScriptFunction *func)
 {
 	// Skip this if the function is part of an pre-existing shared object
 	if( dontTranslate.MoveTo(0, func) ) return;
 
 	asASSERT( func->scriptData );
+
+	// A report naming a property its type does not have would let the host
+	// order or admit code on a read that cannot happen
+	if( !ArePropertyReadsValid(func->localPropertyReads) || !ArePropertyReadsValid(func->propertyReads) )
+	{
+		Error(TXT_INVALID_BYTECODE_d);
+		return;
+	}
 
 	// Pre-compute the size of each instruction in order to translate jump offsets
 	asUINT n;
@@ -4531,13 +4583,26 @@ void asCWriter::WriteFunction(asCScriptFunction* func)
 		asBYTE flags = (func->localCallsDelegate ? 1 : 0) |
 		               (func->transitiveCallsDelegate ? 2 : 0) |
 		               (func->localLoops ? 4 : 0) |
-		               (func->transitiveLoops ? 8 : 0);
+		               (func->transitiveLoops ? 8 : 0) |
+		               (func->propertyReadsComplete ? 16 : 0);
 		WriteData(&flags, 1);
 		asBYTE halts[2] = { (asBYTE)func->localHalts, (asBYTE)func->transitiveHalts };
 		WriteData(halts, 2);
 		// Memory access, so that an engine without the compiler still knows it.
 		// Written regardless of stripDebugInfo, matching the reader
 		WriteData(&func->memoryAccess, 1);
+
+		// Both reports, so that an engine without the compiler still knows
+		// the transitive one, and the receivers, so that a recompute after
+		// loading folds as precisely as the compile did
+		WritePropertyReads(func->localPropertyReads);
+		WritePropertyReads(func->propertyReads);
+		WriteEncodedInt64(func->scriptData->callReceiverIsThis.GetLength());
+		for( asUINT n = 0; n < func->scriptData->callReceiverIsThis.GetLength(); n++ )
+		{
+			asBYTE isThis = func->scriptData->callReceiverIsThis[n] ? 1 : 0;
+			WriteData(&isThis, 1);
+		}
 	}
 	else if( func->funcType == asFUNC_VIRTUAL || func->funcType == asFUNC_INTERFACE )
 	{
@@ -4842,6 +4907,18 @@ void asCWriter::WriteDataType(const asCDataType *dt)
 	SAVE_TO_BIT(bits, dt->IsReference(), 2);
 	SAVE_TO_BIT(bits, dt->IsReadOnly(), 3);
 	WriteData(&bits, 1);
+}
+
+void asCWriter::WritePropertyReads(const asCArray<asSPropertyRead> &reads)
+{
+	WriteEncodedInt64(reads.GetLength());
+	for( asUINT n = 0; n < reads.GetLength(); n++ )
+	{
+		WriteTypeInfo(reads[n].objectType);
+		WriteEncodedInt64(reads[n].propertyIndex);
+		asBYTE viaThis = reads[n].viaThis ? 1 : 0;
+		WriteData(&viaThis, 1);
+	}
 }
 
 void asCWriter::WriteTypeInfo(asCTypeInfo* ti)

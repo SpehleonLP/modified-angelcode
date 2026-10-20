@@ -1663,6 +1663,36 @@ void asCByteCode::ExtractFuncdefCallTargets(asCScriptFunction *outFunc)
 			outFunc->scriptData->funcdefCallTargets.PushLast((asCScriptFunction*)instr->funcdefTarget);
 }
 
+// The receiver kind of each asBC_CALL and asBC_CALLINTF, in final bytecode
+// order, extracted after the optimizer for the same reason the funcdef
+// targets are
+void asCByteCode::ExtractCallReceivers(asCScriptFunction *outFunc)
+{
+	asASSERT(outFunc->scriptData);
+	for( asCByteInstruction *instr = first; instr; instr = instr->next )
+	{
+		if( instr->op == asBC_CALL || instr->op == asBC_CALLINTF )
+		{
+			outFunc->scriptData->callReceiverIsThis.PushLast(instr->receiverIsThis);
+		}
+	}
+}
+
+// Call() follows the call with a JitEntry, so the call is the last
+// instruction but one
+void asCByteCode::MarkLastCallReceiverIsThis()
+{
+	asCByteInstruction *instr = last;
+	if( instr && instr->op == asBC_JitEntry )
+	{
+		instr = instr->prev;
+	}
+	if( instr && (instr->op == asBC_CALL || instr->op == asBC_CALLINTF) )
+	{
+		instr->receiverIsThis = true;
+	}
+}
+
 void asCByteCode::ExtractTryCatchInfo(asCScriptFunction *outFunc)
 {
 	asASSERT(outFunc->scriptData);
@@ -3035,6 +3065,7 @@ asCByteInstruction::asCByteInstruction()
 	size          = 0;
 	stackInc      = 0;
 	funcdefTarget = 0;
+	receiverIsThis = false;
 	marked        = false;
 	stackSize     = 0;
 }

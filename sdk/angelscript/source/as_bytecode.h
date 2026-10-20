@@ -77,6 +77,8 @@ public:
 	// null) into the function's side table, in final bytecode order. See
 	// definition for the ordering contract.
 	void ExtractFuncdefCallTargets(asCScriptFunction *outFunc);
+	void ExtractCallReceivers(asCScriptFunction *outFunc);
+	void MarkLastCallReceiverIsThis();
 	int  ResolveJumpAddresses();
 	int  FindLabel(int label, asCByteInstruction *from, asCByteInstruction **dest, int *positionDelta);
 
@@ -204,6 +206,10 @@ public:
 	// explicitly in the constructor, never relies on a default member
 	// initializer.
 	void *funcdefTarget;
+
+	// For asBC_CALL and asBC_CALLINTF only: the call's receiver is the
+	// compiled method's own `this`
+	bool receiverIsThis;
 
 	// Testing
 	bool marked;

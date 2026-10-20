@@ -49,6 +49,7 @@
 #include "as_scriptcode.h"
 
 #include <cstdlib> // qsort
+#include <cstring> // strcmp
 
 BEGIN_AS_NAMESPACE
 
@@ -401,6 +402,9 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	localLoops             = (funcType != asFUNC_SYSTEM);
 	transitiveLoops        = (funcType != asFUNC_SYSTEM);
 	loopsVia               = 0;
+	// Same trust as halting: a native reads no script property, and anything
+	// else is incomplete until the analysis says otherwise
+	propertyReadsComplete  = (funcType == asFUNC_SYSTEM);
 	// Zero would be None, the most permissive scope; an undeclared function must not look safe
 	memoryAccess           = asPackMemoryAccess(asMA_UNSET, asMA_UNSET);
 	nameSpace              = engine->nameSpaces[0];
@@ -1594,6 +1598,79 @@ asEHalts asCScriptFunction::GetTransitiveHalts() const { return (asEHalts)transi
 bool    asCScriptFunction::GetLocalLoops() const { return localLoops; }
 bool    asCScriptFunction::GetTransitiveLoops() const { return transitiveLoops; }
 asIScriptFunction *asCScriptFunction::GetLoopsVia() const { return loopsVia; }
+asUINT  asCScriptFunction::GetPropertyReadCount() const { return propertyReads.GetLength(); }
+bool    asCScriptFunction::GetPropertyReadsComplete() const { return propertyReadsComplete; }
+
+// interface
+int asCScriptFunction::GetPropertyRead(asUINT index, asITypeInfo **outObjectType, asUINT *outPropertyIndex, bool *outViaThis) const
+{
+	if( index >= propertyReads.GetLength() )
+	{
+		return asINVALID_ARG;
+	}
+	const asSPropertyRead &read = propertyReads[index];
+	if( outObjectType )
+	{
+		*outObjectType = read.objectType;
+	}
+	if( outPropertyIndex )
+	{
+		*outPropertyIndex = read.propertyIndex;
+	}
+	if( outViaThis )
+	{
+		*outViaThis = read.viaThis;
+	}
+	return asSUCCESS;
+}
+
+bool asAddPropertyRead(asCArray<asSPropertyRead> &reads, const asSPropertyRead &read)
+{
+	for( asUINT n = 0; n < reads.GetLength(); n++ )
+	{
+		if( reads[n].objectType == read.objectType &&
+		    reads[n].propertyIndex == read.propertyIndex &&
+		    reads[n].viaThis == read.viaThis )
+		{
+			return false;
+		}
+	}
+	reads.PushLast(read);
+	return true;
+}
+
+static int ComparePropertyReads(const void *a, const void *b)
+{
+	const asSPropertyRead *x = (const asSPropertyRead*)a;
+	const asSPropertyRead *y = (const asSPropertyRead*)b;
+	if( x->objectType != y->objectType )
+	{
+		int c = strcmp(x->objectType->nameSpace->name.AddressOf(), y->objectType->nameSpace->name.AddressOf());
+		if( c == 0 )
+		{
+			c = strcmp(x->objectType->name.AddressOf(), y->objectType->name.AddressOf());
+		}
+		if( c != 0 )
+		{
+			return c;
+		}
+		// Same name in one report means two modules' types; any fixed order will do
+		return x->objectType < y->objectType ? -1 : 1;
+	}
+	if( x->propertyIndex != y->propertyIndex )
+	{
+		return x->propertyIndex < y->propertyIndex ? -1 : 1;
+	}
+	return int(x->viaThis) - int(y->viaThis);
+}
+
+void asSortPropertyReads(asCArray<asSPropertyRead> &reads)
+{
+	if( reads.GetLength() > 1 )
+	{
+		qsort(reads.AddressOf(), reads.GetLength(), sizeof(asSPropertyRead), ComparePropertyReads);
+	}
+}
 
 // interface
 int asCScriptFunction::SetLoops(bool loops)

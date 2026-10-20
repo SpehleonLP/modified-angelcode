@@ -1220,6 +1220,18 @@ public:
 	// analysed this function lives
 	virtual asIScriptFunction *GetLoopsVia() const = 0;
 	virtual int              SetLoops(bool loops) = 0;
+	// The script-class properties this function reads, transitively, without
+	// duplicates. viaThis is true when the read's object is this function's own
+	// `this`; a callee's `this` reads keep it only when the call's receiver
+	// was `this`. A write is reported as a read. Not references: the types
+	// are valid while the module that analysed this function lives.
+	virtual asUINT           GetPropertyReadCount() const = 0;
+	virtual int              GetPropertyRead(asUINT index, asITypeInfo **objectType, asUINT *propertyIndex, bool *viaThis) const = 0;
+	// False when a call the analysis cannot follow (a delegate, an import, an
+	// open dispatch, an unmapped target) is reachable, here or in a callee:
+	// that call may read anything, so the report is a lower bound only.
+	// Natives are taken to read no script properties.
+	virtual bool             GetPropertyReadsComplete() const = 0;
 	virtual int              SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write) = 0;
 	virtual void             GetMemoryAccess(asEMemoryAccess *read, asEMemoryAccess *write) const = 0;
 	virtual void            *GetAuxiliary() const = 0;

@@ -2165,13 +2165,20 @@ bool asCModule::GetDispatchTargets(asCScriptFunction *called, asCArray<asCScript
 void asCModule::BuildCalleeList(asCScriptFunction *func,
                                 const asCMap<int, asUINT> &funcIdToIndex,
                                 asCArray<asUINT> &outCallees,
+                                asCArray<asBYTE> &outCalleeReceivers,
                                 asCArray<asCScriptFunction*> &outExternalCallees,
+                                asCArray<asBYTE> &outExternalReceivers,
                                 bool &outUnresolved,
                                 asCArray<asUINT> &outDirectSiteAddr,
                                 asCArray<asUINT> &outDirectSiteIndex)
 {
 	outUnresolved = false;
 	if (!func || !func->scriptData) return;
+
+	// Per-CALL/CALLINTF-site ordinal into func->scriptData->callReceiverIsThis,
+	// which the compiler fills in the same final bytecode order
+	asUINT receiverOrdinal = 0;
+	const asCArray<bool> &receiverIsThis = func->scriptData->callReceiverIsThis;
 
 	asDWORD *bc = func->scriptData->byteCode.AddressOf();
 	asUINT bcLen = (asUINT)func->scriptData->byteCode.GetLength();
@@ -2193,11 +2200,15 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 
 		if (op == asBC_CALL)
 		{
+			asBYTE receiver = receiverOrdinal < receiverIsThis.GetLength() && receiverIsThis[receiverOrdinal]
+				? asRECEIVER_THIS : asRECEIVER_OTHER;
+			receiverOrdinal++;
 			int funcId = asBC_INTARG(&bc[n]);
 			asSMapNode<int, asUINT> *cursor = 0;
 			if (funcIdToIndex.MoveTo(&cursor, funcId))
 			{
 				outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+				outCalleeReceivers.PushLast(receiver);
 				// Single resolved target: usable as a must-reach cut point.
 				outDirectSiteAddr.PushLast(n);
 				outDirectSiteIndex.PushLast(funcIdToIndex.GetValue(cursor));
@@ -2215,6 +2226,7 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 				if (calledFunc && calledFunc->funcType == asFUNC_SCRIPT && calledFunc->IsShared())
 				{
 					outExternalCallees.PushLast(calledFunc);
+					outExternalReceivers.PushLast(receiver);
 					// Frozen verdict: if it never returns it never will, so the
 					// site is a permanent cut point.
 					if (calledFunc->transitiveHalts == asHALTS_NO)
@@ -2234,7 +2246,10 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			// constant like any other external callee.
 			asCScriptFunction *calledFunc = m_engine->GetScriptFunction(asBC_INTARG(&bc[n]));
 			if (calledFunc && calledFunc->funcType == asFUNC_SYSTEM)
+			{
 				outExternalCallees.PushLast(calledFunc);
+				outExternalReceivers.PushLast(asRECEIVER_OTHER);
+			}
 		}
 		else if (op == asBC_CALLINTF)
 		{
@@ -2245,6 +2260,9 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			// candidates. An open set (a shared type, whose implementations may
 			// come from other modules, or a vtable without the slot) poisons
 			// the site, and the targets that were found are edges all the same.
+			asBYTE receiver = receiverOrdinal < receiverIsThis.GetLength() && receiverIsThis[receiverOrdinal]
+				? asRECEIVER_THIS : asRECEIVER_OTHER;
+			receiverOrdinal++;
 			int funcId = asBC_INTARG(&bc[n]);
 			asCScriptFunction *calledFunc = m_engine->GetScriptFunction(funcId);
 			asCArray<asCScriptFunction*> targets;
@@ -2258,6 +2276,7 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 				if (funcIdToIndex.MoveTo(&cursor, targets[t]->id))
 				{
 					outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+					outCalleeReceivers.PushLast(receiver);
 				}
 				else
 				{
@@ -2332,7 +2351,11 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			}
 
 			if (foldable)
+			{
+				// An import binds a global function, which has no `this`
 				outExternalCallees.PushLast(target);
+				outExternalReceivers.PushLast(asRECEIVER_OTHER);
+			}
 			else
 				outUnresolved = true;
 		}
@@ -2359,11 +2382,18 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			if (target)
 			{
 				asSMapNode<int, asUINT> *cursor = 0;
+				// A delegate's bound object is not this function's `this`
 				if (funcIdToIndex.MoveTo(&cursor, target->id))
+				{
 					outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+					outCalleeReceivers.PushLast(asRECEIVER_OTHER);
+				}
 				else if (target->funcType == asFUNC_SYSTEM ||
 				         (target->funcType == asFUNC_SCRIPT && target->IsShared()))
+				{
 					outExternalCallees.PushLast(target);   // fixed metadata (Task 6 rules)
+					outExternalReceivers.PushLast(asRECEIVER_OTHER);
+				}
 				else
 					outUnresolved = true;
 			}
@@ -2376,9 +2406,13 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 			int funcId = asBC_INTARG(&bc[n + AS_PTR_SIZE]);
 			if (funcId > 0)
 			{
+				// The receiver of a constructor is the object being built
 				asSMapNode<int, asUINT> *cursor = 0;
 				if (funcIdToIndex.MoveTo(&cursor, funcId))
+				{
 					outCallees.PushLast(funcIdToIndex.GetValue(cursor));
+					outCalleeReceivers.PushLast(asRECEIVER_OTHER);
+				}
 				else
 				{
 					// Same reasoning as the CALL branch: a shared class's
@@ -2387,10 +2421,12 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 					// heap-allocated value type's native constructor is final
 					// for the same reason a CALLSYS target is.
 					asCScriptFunction *calledFunc = m_engine->GetScriptFunction(funcId);
-					if (calledFunc && calledFunc->funcType == asFUNC_SCRIPT && calledFunc->IsShared())
+					if (calledFunc && (calledFunc->funcType == asFUNC_SYSTEM ||
+					                   (calledFunc->funcType == asFUNC_SCRIPT && calledFunc->IsShared())))
+					{
 						outExternalCallees.PushLast(calledFunc);
-					else if (calledFunc && calledFunc->funcType == asFUNC_SYSTEM)
-						outExternalCallees.PushLast(calledFunc);
+						outExternalReceivers.PushLast(asRECEIVER_OTHER);
+					}
 					else
 						outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
 				}
@@ -2412,7 +2448,11 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 		for (asUINT e = d + 1; e < outCallees.GetLength(); )
 		{
 			if (outCallees[e] == outCallees[d])
+			{
+				outCalleeReceivers[d] |= outCalleeReceivers[e];
 				outCallees.RemoveIndex(e);
+				outCalleeReceivers.RemoveIndex(e);
+			}
 			else
 				e++;
 		}
@@ -2447,11 +2487,41 @@ static bool ScanMemoryAccessRound(asCMemoryAccessScanner &scanner, const asCArra
 }
 
 // Joins one callee's transitive facts into func's: the access mask, the
-// calls-delegate flag, the halting verdict and the loops fact. Reports whether
-// any of func's fields moved.
-static bool JoinCalleeFacts(asCScriptFunction *func, asCScriptFunction *callee)
+// calls-delegate flag, the halting verdict, the loops fact and the
+// property-read report. `receivers` holds the asRECEIVER_* bits of the sites
+// that reach the callee. Reports whether any of func's fields moved.
+static bool JoinCalleeFacts(asCScriptFunction *func, asCScriptFunction *callee, asBYTE receivers)
 {
 	bool changed = false;
+
+	// The callee's `this` is func's `this` only through a site whose receiver
+	// is func's `this`; through any other, those reads are of another object
+	bool keepsThis = (receivers & asRECEIVER_THIS) != 0;
+	bool losesThis = !keepsThis || (receivers & asRECEIVER_OTHER) != 0;
+	for( asUINT n = 0; n < callee->propertyReads.GetLength(); n++ )
+	{
+		asSPropertyRead read = callee->propertyReads[n];
+		if( !read.viaThis || keepsThis )
+		{
+			if( asAddPropertyRead(func->propertyReads, read) )
+			{
+				changed = true;
+			}
+		}
+		if( read.viaThis && losesThis )
+		{
+			read.viaThis = false;
+			if( asAddPropertyRead(func->propertyReads, read) )
+			{
+				changed = true;
+			}
+		}
+	}
+	if( func->propertyReadsComplete && !callee->propertyReadsComplete )
+	{
+		func->propertyReadsComplete = false;
+		changed = true;
+	}
 
 	asDWORD newMask = func->minTransitiveAccessMask | callee->minTransitiveAccessMask;
 	if( newMask != func->minTransitiveAccessMask )
@@ -2500,7 +2570,8 @@ static bool JoinCalleeFacts(asCScriptFunction *func, asCScriptFunction *callee)
 }
 
 // An unmodelled call site (a delegate, an import, an open dispatch, an
-// unmapped target) may reach anything, so it loops with no callee to name.
+// unmapped target) may reach anything, so it loops with no callee to name,
+// and it may read any property, so the read report is incomplete.
 static void SetLoopsThroughUnresolvedCall(asCScriptFunction *func)
 {
 	if( !func->transitiveLoops )
@@ -2508,11 +2579,32 @@ static void SetLoopsThroughUnresolvedCall(asCScriptFunction *func)
 		func->transitiveLoops = true;
 		func->loopsVia = 0;
 	}
+	func->propertyReadsComplete = false;
+}
+
+// The transitive fields' starting point, before any callee is joined
+static void InitTransitiveFacts(asCScriptFunction *func, bool unresolved)
+{
+	func->minTransitiveAccessMask = func->minLocalAccessMask;
+	// localCallsDelegate = the compiler saw a funcdef call site it could
+	// not resolve (caps the LOCAL verdict). unresolved = this pass found
+	// a call site it could not model. Either one means the transitive
+	// verdict cannot promise YES.
+	func->transitiveCallsDelegate = func->localCallsDelegate || unresolved;
+	func->transitiveHalts = func->localHalts;
+	func->transitiveLoops = func->localLoops;
+	func->loopsVia = 0;
+	func->propertyReads = func->localPropertyReads;
+	func->propertyReadsComplete = true;
+	if( func->transitiveCallsDelegate )
+	{
+		SetLoopsThroughUnresolvedCall(func);
+	}
 }
 
 // One round of the transitive fold over `order`: joins each function's facts
 // with its callees'. Reports whether any field moved.
-static bool FoldTransitiveMetadataRound(const asCArray<asCScriptFunction*> &funcs, const asCArray<asUINT> &order, const asCArray<asCArray<asUINT>> &callees)
+static bool FoldTransitiveMetadataRound(const asCArray<asCScriptFunction*> &funcs, const asCArray<asUINT> &order, const asCArray<asCArray<asUINT>> &callees, const asCArray<asCArray<asBYTE>> &calleeReceivers)
 {
 	bool changed = false;
 	for( asUINT n = 0; n < order.GetLength(); n++ )
@@ -2533,7 +2625,7 @@ static bool FoldTransitiveMetadataRound(const asCArray<asCScriptFunction*> &func
 				continue;
 			}
 
-			if( JoinCalleeFacts(func, callee) )
+			if( JoinCalleeFacts(func, callee, calleeReceivers[i][j]) )
 			{
 				changed = true;
 			}
@@ -2598,31 +2690,25 @@ void asCModule::BuildFuncIdToIndex(asCMap<int, asUINT> &outFuncIdToIndex) const
 void asCModule::FoldSourceFunctionMetadata(asCScriptFunction *func, const asCMap<int, asUINT> &funcIdToIndex)
 {
 	asCArray<asUINT> sourceCallees;
+	asCArray<asBYTE> sourceCalleeReceivers;
 	asCArray<asCScriptFunction*> sourceExternalCallees;
+	asCArray<asBYTE> sourceExternalReceivers;
 	bool sourceUnresolved = false;
 	// Nothing calls a source, so an accurate NO on one would propagate
 	// nowhere. Its site table is collected and dropped rather than run
 	// through phase 4b.
 	asCArray<asUINT> siteAddr, siteIndex;
-	BuildCalleeList(func, funcIdToIndex, sourceCallees, sourceExternalCallees, sourceUnresolved,
-	                siteAddr, siteIndex);
+	BuildCalleeList(func, funcIdToIndex, sourceCallees, sourceCalleeReceivers, sourceExternalCallees,
+	                sourceExternalReceivers, sourceUnresolved, siteAddr, siteIndex);
 
-	func->minTransitiveAccessMask = func->minLocalAccessMask;
-	func->transitiveCallsDelegate = func->localCallsDelegate || sourceUnresolved;
-	func->transitiveHalts = func->localHalts;
-	func->transitiveLoops = func->localLoops;
-	func->loopsVia = 0;
-	if( func->transitiveCallsDelegate )
-	{
-		SetLoopsThroughUnresolvedCall(func);
-	}
+	InitTransitiveFacts(func, sourceUnresolved);
 
 	// External fixed callees: same constant fold as phase 2 (shared
 	// functions are frozen at first compile, so this cannot form a
 	// cycle back into this module).
 	for( asUINT j = 0; j < sourceExternalCallees.GetLength(); j++ )
 	{
-		JoinCalleeFacts(func, sourceExternalCallees[j]);
+		JoinCalleeFacts(func, sourceExternalCallees[j], sourceExternalReceivers[j]);
 	}
 
 	// BuildCalleeList's poisonings (shared targets, imports,
@@ -2639,9 +2725,10 @@ void asCModule::FoldSourceFunctionMetadata(asCScriptFunction *func, const asCMap
 		asCScriptFunction *callee = m_scriptFunctions[sourceCallees[j]];
 		if( callee )
 		{
-			JoinCalleeFacts(func, callee);
+			JoinCalleeFacts(func, callee, sourceCalleeReceivers[j]);
 		}
 	}
+	asSortPropertyReads(func->propertyReads);
 }
 
 // The module's one metadata pass. It settles every per-function result
@@ -2667,20 +2754,24 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 
 	// Phase 1: build callee lists for regular script functions
 	asCArray<asCArray<asUINT>> callees;
+	asCArray<asCArray<asBYTE>> calleeReceivers;
 	asCArray<asCArray<asCScriptFunction*>> externalCallees;
+	asCArray<asCArray<asBYTE>> externalReceivers;
 	asCArray<bool> unresolved;
 	asCArray<asCArray<asUINT>> directSiteAddr;
 	asCArray<asCArray<asUINT>> directSiteIndex;
 	callees.SetLength(funcCount);
+	calleeReceivers.SetLength(funcCount);
 	externalCallees.SetLength(funcCount);
+	externalReceivers.SetLength(funcCount);
 	unresolved.SetLength(funcCount);
 	directSiteAddr.SetLength(funcCount);
 	directSiteIndex.SetLength(funcCount);
 	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		unresolved[i] = false;
-		BuildCalleeList(m_scriptFunctions[i], funcIdToIndex, callees[i], externalCallees[i], unresolved[i],
-		                directSiteAddr[i], directSiteIndex[i]);
+		BuildCalleeList(m_scriptFunctions[i], funcIdToIndex, callees[i], calleeReceivers[i], externalCallees[i],
+		                externalReceivers[i], unresolved[i], directSiteAddr[i], directSiteIndex[i]);
 	}
 
 	// Phase 2: init transitive fields from local
@@ -2691,19 +2782,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		{
 			continue;
 		}
-		func->minTransitiveAccessMask = func->minLocalAccessMask;
-		// localCallsDelegate = the compiler saw a funcdef call site it could
-		// not resolve (caps the LOCAL verdict). unresolved = this pass found
-		// a call site it could not model. Either one means the transitive
-		// verdict cannot promise YES.
-		func->transitiveCallsDelegate = func->localCallsDelegate || unresolved[i];
-		func->transitiveHalts = func->localHalts;
-		func->transitiveLoops = func->localLoops;
-		func->loopsVia = 0;
-		if( func->transitiveCallsDelegate )
-		{
-			SetLoopsThroughUnresolvedCall(func);
-		}
+		InitTransitiveFacts(func, unresolved[i]);
 
 		// External fixed callees: targets outside this module whose metadata
 		// is already final (shared functions are frozen at first compile).
@@ -2716,7 +2795,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		// break the idempotence of this pass.
 		for( asUINT j = 0; j < externalCallees[i].GetLength(); j++ )
 		{
-			JoinCalleeFacts(func, externalCallees[i][j]);
+			JoinCalleeFacts(func, externalCallees[i][j], externalReceivers[i][j]);
 		}
 
 		// BuildCalleeList's poisonings (shared targets, imports,
@@ -2916,10 +2995,12 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	//   ends.
 	//
 	// - Phase 4 proper: the transitive fold of access masks, calls-delegate
-	//   flags and halting along the call graph. Terminates: each field only
-	//   ever moves up its finite lattice (mask bits set, delegate flag
-	//   false->true, halts YES<UNKNOWN<NO) per round, never back down, so a
-	//   round with no field movement is a true fixpoint.
+	//   flags, halting, loops and property reads along the call graph.
+	//   Terminates: each field only ever moves up its finite lattice (mask
+	//   bits set, delegate flag false->true, halts YES<UNKNOWN<NO, a read
+	//   report gaining entries from the module's finite set, complete
+	//   true->false) per round, never back down, so a round with no field
+	//   movement is a true fixpoint.
 	//
 	// - Phase 4b: the least fixed point on "may return normally", which
 	//   recovers asHALTS_NO across call edges the caller must reach. Phase 4
@@ -2982,7 +3063,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		}
 		if( foldChanged )
 		{
-			foldChanged = FoldTransitiveMetadataRound(m_scriptFunctions, order, callees);
+			foldChanged = FoldTransitiveMetadataRound(m_scriptFunctions, order, callees, calleeReceivers);
 		}
 		if( grew )
 		{
@@ -3017,6 +3098,15 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		asCScriptFunction *func = m_scriptFunctions[i];
+		if( func && func->scriptData )
+		{
+			asSortPropertyReads(func->propertyReads);
+		}
+	}
+
+	for( asUINT i = 0; i < funcCount; i++ )
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
 		if( func && func->scriptData && func->memoryAccess != table.access[i] )
 		{
 			func->memoryAccess = table.access[i];
@@ -3037,11 +3127,28 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		func->localLoops = true;
 		func->transitiveLoops = true;
 		func->loopsVia = 0;
+		// Every target runs on the stub's own receiver, so their `this`
+		// reads stay `this` reads
+		func->propertyReads.SetLength(0);
+		func->propertyReadsComplete = false;
 		asCArray<asCScriptFunction*> targets;
 		if( GetDispatchTargets(func, targets) )
 		{
 			func->localLoops = false;
 			func->transitiveLoops = false;
+			func->propertyReadsComplete = true;
+			for( asUINT n = 0; n < targets.GetLength(); n++ )
+			{
+				for( asUINT k = 0; k < targets[n]->propertyReads.GetLength(); k++ )
+				{
+					asAddPropertyRead(func->propertyReads, targets[n]->propertyReads[k]);
+				}
+				if( !targets[n]->propertyReadsComplete )
+				{
+					func->propertyReadsComplete = false;
+				}
+			}
+			asSortPropertyReads(func->propertyReads);
 			for( asUINT n = 0; n < targets.GetLength() && !func->transitiveLoops; n++ )
 			{
 				if( targets[n]->transitiveLoops )

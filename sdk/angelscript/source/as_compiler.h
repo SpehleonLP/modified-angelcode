@@ -163,6 +163,7 @@ struct asCExprContext
 	int  property_set;
 	bool property_const;   // If the object that is being accessed through property accessor is read-only
 	bool property_handle;  // If the property accessor is called on an object stored in a handle
+	bool property_this;    // If the property accessor is called on the compiled method's own `this`
 	bool property_ref;     // If the property accessor is called on a reference
 	bool isVoidExpression; // Set to true if the expression is an explicit 'void', e.g. used to ignore out parameters in func calls
 	bool isCleanArg;       // Set to true if the expression has only been initialized with default constructor
@@ -325,7 +326,12 @@ protected:
 	asUINT MatchFunctions(asCArray<int>& funcs, asCArray<asCExprContext*>& args, asCScriptNode* node, const char* name, asCArray<asSNamedArgument>* namedArgs = NULL, asCObjectType* objectType = NULL, bool isConstMethod = false, bool silent = false, bool allowObjectConstruct = true, const asCString& scope = "");
 	asUINT MatchArgument(asCArray<int> &funcs, asCArray<asSOverloadCandidate> &matches, const asCExprContext *argExpr, int paramNum, bool allowObjectConstruct = true);
 	int  MatchArgument(asCScriptFunction *desc, const asCExprContext *argExpr, int paramNum, bool allowObjectConstruct = true);
-	void PerformFunctionCall(int funcId, asCExprContext *out, bool isConstructor = false, asCArray<asCExprContext*> *args = 0, asCObjectType *objTypeForConstruct = 0, bool useVariable = false, int varOffset = 0, int funcPtrVar = 0);
+	void PerformFunctionCall(int funcId, asCExprContext *out, bool isConstructor = false, asCArray<asCExprContext*> *args = 0, asCObjectType *objTypeForConstruct = 0, bool useVariable = false, int varOffset = 0, int funcPtrVar = 0, bool receiverIsThis = false);
+	// True when the value is this method's own `this`: stack offset 0 is
+	// reserved for it, and a method's locals start at 1
+	bool IsThisReceiver(const asCExprValue &value) const;
+	// Adds a script-class property access to outFunc's local read report
+	void RecordPropertyRead(asCObjectType *objectType, asCObjectProperty *prop, bool viaThis);
 	void MoveArgsToStack(int funcId, asCByteCode *bc, asCArray<asCExprContext *> &args, bool addOneToOffset);
 	int  MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType *objectType, asCArray<asCExprContext*> &args, asCScriptNode *node, bool useVariable = false, int stackOffset = 0, int funcPtrVar = 0);
 	int  PrepareFunctionCall(int funcId, asCByteCode *bc, asCArray<asCExprContext *> &args);
