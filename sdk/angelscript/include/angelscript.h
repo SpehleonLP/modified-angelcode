@@ -1213,6 +1213,11 @@ public:
 	virtual bool             GetTransitiveCallsDelegate() const = 0;
 	virtual asEHalts         GetLocalHalts() const = 0;
 	virtual asEHalts         GetTransitiveHalts() const = 0;
+	virtual bool             GetLocalLoops() const = 0;
+	virtual bool             GetTransitiveLoops() const = 0;
+	// Not a reference: valid while the module that analysed this function lives
+	virtual asIScriptFunction *GetLoopsVia() const = 0;
+	virtual int              SetLoops(bool loops) = 0;
 	virtual int              SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write) = 0;
 	virtual void             GetMemoryAccess(asEMemoryAccess *read, asEMemoryAccess *write) const = 0;
 	virtual void            *GetAuxiliary() const = 0;

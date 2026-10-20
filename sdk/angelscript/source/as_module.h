@@ -203,9 +203,15 @@ public:
 	// time. In particular it must never consume the per-function inputs it
 	// reads (asCScriptFunction::funcdefCallTargets).
 	void ComputeTransitiveFunctionMetadata();
-	// A CompileFunction product that was not added to the module: nothing
-	// calls it, so one memory-access scan against the stored results is final.
-	void ComputeMemoryAccessOfDetachedFunction(asCScriptFunction *func);
+	// A CompileFunction or CompileMethod product that was not added to the
+	// module: nothing calls it, so one fold and one memory-access scan against
+	// the stored results are final.
+	void ComputeDetachedFunctionMetadata(asCScriptFunction *func);
+	// The transitive fold for a function nothing calls (an init function or a
+	// detached product), against this module's settled results.
+	void FoldSourceFunctionMetadata(asCScriptFunction *func, const asCMap<int, asUINT> &funcIdToIndex);
+	// Maps the id of every m_scriptFunctions entry with a body to its index.
+	void BuildFuncIdToIndex(asCMap<int, asUINT> &outFuncIdToIndex) const;
 	// Every function a CALLINTF on `called` can dispatch to: the one dispatch
 	// walk, shared by BuildCalleeList and the memory-access scanner. Returns
 	// false when the set is open (a shared type, or a vtable that does not
@@ -222,7 +228,8 @@ public:
 	// Caller must dedup outCallees if desired. outExternalCallees receives
 	// call targets that live outside this module's function map but whose
 	// metadata is nevertheless final and foldable as a constant: shared
-	// script functions reached by asBC_CALL/asBC_ALLOC, and, at an
+	// script functions reached by asBC_CALL/asBC_ALLOC, natives reached by
+	// asBC_CALLSYS/asBC_Thiscall1, and, at an
 	// asBC_CallPtr site with a statically-known target, that target when it
 	// is a system function or a shared script function. The caller folds it
 	// like a resolved edge; it is not deduped (the fold is a join of

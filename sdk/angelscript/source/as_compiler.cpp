@@ -1163,6 +1163,11 @@ void asCCompiler::FinalizeFunction()
 
 		if (outFunc->localCallsDelegate && outFunc->localHalts == asHALTS_YES)
 			outFunc->localHalts = asHALTS_UNKNOWN;
+
+		// Unlike halting, a bounded loop still loops, so this is just the back
+		// edges the pruning above kept. Bytecode the decoder cannot read may
+		// hide a back edge, so it counts as looping.
+		outFunc->localLoops = !decodeOk || backEdgeFrom.GetLength() > 0;
 	}
 
 	outFunc->scriptData->stackNeeded = byteCode.largestStackUsed + outFunc->scriptData->variableSpace;

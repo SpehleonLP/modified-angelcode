@@ -1719,10 +1719,10 @@ int asCModule::LoadByteCode(asIBinaryStream *in, bool *wasDebugInfoStripped)
 	JITCompile();
 
 	// The blob restores localHalts / transitiveHalts / transitiveCallsDelegate
-	// verbatim, but not the bind state that justified them: a module saved
-	// while its imports were bound loads with those imports unbound, so a
-	// restored asHALTS_YES can describe a call graph this module does not
-	// have. Likewise it carries each function's memory-access scopes, but this
+	// and the loops facts verbatim, but not the bind state that justified
+	// them: a module saved while its imports were bound loads with those
+	// imports unbound, so a restored asHALTS_YES can describe a call graph
+	// this module does not have. Likewise it carries each function's memory-access scopes, but this
 	// engine's natives may be declared differently from the one that saved it.
 	// Recompute, so that every verdict in the engine is one this pass derived
 	// from the module's current state and describes this engine. A build
@@ -1859,11 +1859,11 @@ int asCModule::CompileMethod(asITypeInfo *objectType, const char *sectionName, c
 	r = methodBuilder.CompileMethod(ot, sectionName, str.AddressOf(), lineOffset, &func);
 
 	// The method is in neither the module nor its class's virtual table, so
-	// nothing calls it: it gets its memory access the way a detached
+	// nothing calls it: it gets its metadata the way a detached
 	// CompileFunction product does
 	if (r >= 0)
 	{
-		ComputeMemoryAccessOfDetachedFunction(func);
+		ComputeDetachedFunctionMetadata(func);
 	}
 
 	if (r >= 0 && m_engine->jitCompiler)
@@ -1933,7 +1933,7 @@ int asCModule::CompileFunction(const char* sectionName, const char* code, int li
 		}
 		else
 		{
-			ComputeMemoryAccessOfDetachedFunction(func);
+			ComputeDetachedFunctionMetadata(func);
 		}
 
 		// Invoke the JIT compiler if it has been set
@@ -2227,6 +2227,15 @@ void asCModule::BuildCalleeList(asCScriptFunction *func,
 					outUnresolved = true; // Unmapped target: no edge can be recorded, so the site must poison.
 			}
 		}
+		else if (op == asBC_CALLSYS || op == asBC_Thiscall1)
+		{
+			// A native has no body to walk, but its registered facts are final
+			// (SetLoops is the only way it can say it loops), so it folds as a
+			// constant like any other external callee.
+			asCScriptFunction *calledFunc = m_engine->GetScriptFunction(asBC_INTARG(&bc[n]));
+			if (calledFunc && calledFunc->funcType == asFUNC_SYSTEM)
+				outExternalCallees.PushLast(calledFunc);
+		}
 		else if (op == asBC_CALLINTF)
 		{
 			// Interface or virtual dispatch (asBC_CALLINTF is emitted for
@@ -2434,8 +2443,8 @@ static bool ScanMemoryAccessRound(asCMemoryAccessScanner &scanner, const asCArra
 }
 
 // One round of the transitive fold over `order`: joins each function's access
-// mask, calls-delegate flag and halting verdict with its callees'. Reports
-// whether any field moved.
+// mask, calls-delegate flag, halting verdict and loops fact with its callees'.
+// Reports whether any field moved.
 static bool FoldTransitiveMetadataRound(const asCArray<asCScriptFunction*> &funcs, const asCArray<asUINT> &order, const asCArray<asCArray<asUINT>> &callees)
 {
 	bool changed = false;
@@ -2490,6 +2499,13 @@ static bool FoldTransitiveMetadataRound(const asCArray<asCScriptFunction*> &func
 				func->transitiveHalts = newHalts;
 				changed = true;
 			}
+
+			if( !func->transitiveLoops && callee->transitiveLoops )
+			{
+				func->transitiveLoops = true;
+				func->loopsVia = callee;
+				changed = true;
+			}
 		}
 	}
 	return changed;
@@ -2533,10 +2549,109 @@ static bool AdmitMayReturnRound(const asCArray<asCScriptFunction*> &funcs, const
 	return grew;
 }
 
+void asCModule::BuildFuncIdToIndex(asCMap<int, asUINT> &outFuncIdToIndex) const
+{
+	for( asUINT i = 0; i < m_scriptFunctions.GetLength(); i++ )
+	{
+		asCScriptFunction *func = m_scriptFunctions[i];
+		if( func && func->scriptData )
+		{
+			outFuncIdToIndex.Insert(func->id, i);
+		}
+	}
+}
+
+// A function nothing calls - a global-property init function, or a detached
+// CompileFunction/CompileMethod product - cannot be on a call cycle, and its
+// callees in m_scriptFunctions are settled, so one fold over them is final.
+void asCModule::FoldSourceFunctionMetadata(asCScriptFunction *func, const asCMap<int, asUINT> &funcIdToIndex)
+{
+	asCArray<asUINT> sourceCallees;
+	asCArray<asCScriptFunction*> sourceExternalCallees;
+	bool sourceUnresolved = false;
+	// Nothing calls a source, so an accurate NO on one would propagate
+	// nowhere. Its site table is collected and dropped rather than run
+	// through phase 4b.
+	asCArray<asUINT> siteAddr, siteIndex;
+	BuildCalleeList(func, funcIdToIndex, sourceCallees, sourceExternalCallees, sourceUnresolved,
+	                siteAddr, siteIndex);
+
+	func->minTransitiveAccessMask = func->minLocalAccessMask;
+	func->transitiveCallsDelegate = func->localCallsDelegate || sourceUnresolved;
+	func->transitiveHalts = func->localHalts;
+	func->transitiveLoops = func->localLoops;
+	func->loopsVia = 0;
+
+	// External fixed callees: same constant fold as phase 2 (shared
+	// functions are frozen at first compile, so this cannot form a
+	// cycle back into this module).
+	for( asUINT j = 0; j < sourceExternalCallees.GetLength(); j++ )
+	{
+		asCScriptFunction *ext = sourceExternalCallees[j];
+		func->minTransitiveAccessMask |= ext->minTransitiveAccessMask;
+		if( ext->transitiveCallsDelegate )
+		{
+			func->transitiveCallsDelegate = true;
+		}
+		// Same NO-doesn't-cross-a-call-edge rule as phase 4.
+		int extHalts = ext->transitiveHalts == asHALTS_NO
+			? (int)asHALTS_UNKNOWN : (int)ext->transitiveHalts;
+		if( extHalts > (int)func->transitiveHalts )
+		{
+			func->transitiveHalts = extHalts;
+		}
+		if( !func->transitiveLoops && ext->transitiveLoops )
+		{
+			func->transitiveLoops = true;
+			func->loopsVia = ext;
+		}
+	}
+
+	// BuildCalleeList's poisonings (shared targets, imports,
+	// unresolvable dispatch) contribute no call edges, so an
+	// unresolved site must cost precision, not soundness: a
+	// function whose calls are not all modeled cannot promise YES.
+	if( func->transitiveCallsDelegate && func->transitiveHalts == asHALTS_YES )
+	{
+		func->transitiveHalts = asHALTS_UNKNOWN;
+	}
+
+	for( asUINT j = 0; j < sourceCallees.GetLength(); j++ )
+	{
+		asCScriptFunction *callee = m_scriptFunctions[sourceCallees[j]];
+		if( !callee )
+		{
+			continue;
+		}
+
+		func->minTransitiveAccessMask |= callee->minTransitiveAccessMask;
+		if( callee->transitiveCallsDelegate )
+		{
+			func->transitiveCallsDelegate = true;
+			if( func->transitiveHalts == asHALTS_YES )
+			{
+				func->transitiveHalts = asHALTS_UNKNOWN;
+			}
+		}
+		// Same NO-doesn't-cross-a-call-edge rule as phase 4.
+		int calleeHalts = callee->transitiveHalts == asHALTS_NO
+			? (int)asHALTS_UNKNOWN : (int)callee->transitiveHalts;
+		if( calleeHalts > func->transitiveHalts )
+		{
+			func->transitiveHalts = calleeHalts;
+		}
+		if( !func->transitiveLoops && callee->transitiveLoops )
+		{
+			func->transitiveLoops = true;
+			func->loopsVia = callee;
+		}
+	}
+}
+
 // The module's one metadata pass. It settles every per-function result
 // together: the memory-access scopes, and the minimum access masks,
-// calls-delegate flags and halting verdicts. They share one id map, one
-// dispatch walk (GetDispatchTargets) and one round loop; each computation
+// calls-delegate flags, halting verdicts and loops facts. They share one id
+// map, one dispatch walk (GetDispatchTargets) and one round loop; each computation
 // keeps its own transfer function, because they answer different questions
 // over different lattices.
 //
@@ -2552,14 +2667,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	// Build id -> index map over m_scriptFunctions only. Init funcs are never
 	// callees (no bytecode CALL targets them), so they don't need to be in this map.
 	asCMap<int, asUINT> funcIdToIndex;
-	for( asUINT i = 0; i < funcCount; i++ )
-	{
-		asCScriptFunction *func = m_scriptFunctions[i];
-		if( func && func->scriptData )
-		{
-			funcIdToIndex.Insert(func->id, i);
-		}
-	}
+	BuildFuncIdToIndex(funcIdToIndex);
 
 	// Phase 1: build callee lists for regular script functions
 	asCArray<asCArray<asUINT>> callees;
@@ -2594,6 +2702,8 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		// verdict cannot promise YES.
 		func->transitiveCallsDelegate = func->localCallsDelegate || unresolved[i];
 		func->transitiveHalts = func->localHalts;
+		func->transitiveLoops = func->localLoops;
+		func->loopsVia = 0;
 
 		// External fixed callees: targets outside this module whose metadata
 		// is already final (shared functions are frozen at first compile).
@@ -2619,6 +2729,11 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 			{
 				func->transitiveHalts = extHalts;
 			}
+			if( !func->transitiveLoops && ext->transitiveLoops )
+			{
+				func->transitiveLoops = true;
+				func->loopsVia = ext;
+			}
 		}
 
 		// BuildCalleeList's poisonings (shared targets, imports,
@@ -2632,8 +2747,9 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 	}
 
 	// Phase 3: recursion check - any regular function that can reach itself in the
-	// call graph has unknown halting (unless already NO). Must run before fixed-point
-	// so UNKNOWN values from cycles propagate to callers outside the cycle.
+	// call graph has unknown halting (unless already NO), and loops: a call cycle
+	// repeats work exactly as a back edge does. Must run before fixed-point
+	// so UNKNOWN values and loops from cycles propagate to callers outside the cycle.
 	for( asUINT i = 0; i < funcCount; i++ )
 	{
 		asCScriptFunction *func = m_scriptFunctions[i];
@@ -2641,7 +2757,9 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		{
 			continue;
 		}
-		if( func->transitiveHalts >= asHALTS_UNKNOWN )
+		bool needsHalts = func->transitiveHalts < asHALTS_UNKNOWN;
+		bool needsLoops = !func->transitiveLoops;
+		if( !needsHalts && !needsLoops )
 		{
 			continue;
 		}
@@ -2653,38 +2771,46 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 			visited[v] = false;
 		}
 
-		asCArray<asUINT> stack;
-		for( asUINT j = 0; j < callees[i].GetLength(); j++ )
+		// One walk per direct callee, in order, so the cycle is attributed to
+		// the first callee that leads back. The visited set is shared: a
+		// function a finished walk reached without finding i cannot reach it
+		// from a later root either.
+		asCScriptFunction *cycleVia = 0;
+		for( asUINT root = 0; root < callees[i].GetLength() && !cycleVia; root++ )
 		{
-			stack.PushLast(callees[i][j]);
+			asCArray<asUINT> stack;
+			stack.PushLast(callees[i][root]);
+			while( stack.GetLength() > 0 )
+			{
+				asUINT cur = stack[stack.GetLength() - 1];
+				stack.PopLast();
+
+				if( cur == i )
+				{
+					cycleVia = m_scriptFunctions[callees[i][root]];
+					break;
+				}
+				if( visited[cur] )
+				{
+					continue;
+				}
+				visited[cur] = true;
+
+				for( asUINT j = 0; j < callees[cur].GetLength(); j++ )
+				{
+					stack.PushLast(callees[cur][j]);
+				}
+			}
 		}
 
-		bool selfReachable = false;
-		while( stack.GetLength() > 0 )
-		{
-			asUINT cur = stack[stack.GetLength() - 1];
-			stack.PopLast();
-
-			if( cur == i )
-			{
-				selfReachable = true;
-				break;
-			}
-			if( visited[cur] )
-			{
-				continue;
-			}
-			visited[cur] = true;
-
-			for( asUINT j = 0; j < callees[cur].GetLength(); j++ )
-			{
-				stack.PushLast(callees[cur][j]);
-			}
-		}
-
-		if( selfReachable && func->transitiveHalts < asHALTS_UNKNOWN )
+		if( cycleVia && needsHalts )
 		{
 			func->transitiveHalts = asHALTS_UNKNOWN;
+		}
+		if( cycleVia && needsLoops )
+		{
+			func->transitiveLoops = true;
+			func->loopsVia = cycleVia;
 		}
 	}
 
@@ -2964,74 +3090,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 			continue;
 		}
 
-		asCArray<asUINT> initCallees;
-		asCArray<asCScriptFunction*> initExternalCallees;
-		bool initUnresolved = false;
-		// Init funcs are pure sources: nothing calls them, so an accurate NO on
-		// one would propagate nowhere. Their site table is collected and
-		// dropped rather than run through phase 4b.
-		asCArray<asUINT> initSiteAddr, initSiteIndex;
-		BuildCalleeList(initFunc, funcIdToIndex, initCallees, initExternalCallees, initUnresolved,
-		                initSiteAddr, initSiteIndex);
-
-		initFunc->minTransitiveAccessMask = initFunc->minLocalAccessMask;
-		initFunc->transitiveCallsDelegate = initFunc->localCallsDelegate || initUnresolved;
-		initFunc->transitiveHalts = initFunc->localHalts;
-
-		// External fixed callees: same constant fold as phase 2 (shared
-		// functions are frozen at first compile, so this cannot form a
-		// cycle back into this module's init funcs).
-		for( asUINT j = 0; j < initExternalCallees.GetLength(); j++ )
-		{
-			asCScriptFunction *ext = initExternalCallees[j];
-			initFunc->minTransitiveAccessMask |= ext->minTransitiveAccessMask;
-			if( ext->transitiveCallsDelegate )
-			{
-				initFunc->transitiveCallsDelegate = true;
-			}
-			// Same NO-doesn't-cross-a-call-edge rule as phase 4.
-			int extHalts = ext->transitiveHalts == asHALTS_NO
-				? (int)asHALTS_UNKNOWN : (int)ext->transitiveHalts;
-			if( extHalts > (int)initFunc->transitiveHalts )
-			{
-				initFunc->transitiveHalts = extHalts;
-			}
-		}
-
-		// BuildCalleeList's poisonings (shared targets, imports,
-		// unresolvable dispatch) contribute no call edges, so an
-		// unresolved site must cost precision, not soundness: a
-		// function whose calls are not all modeled cannot promise YES.
-		if( initFunc->transitiveCallsDelegate && initFunc->transitiveHalts == asHALTS_YES )
-		{
-			initFunc->transitiveHalts = asHALTS_UNKNOWN;
-		}
-
-		for( asUINT j = 0; j < initCallees.GetLength(); j++ )
-		{
-			asCScriptFunction *callee = m_scriptFunctions[initCallees[j]];
-			if( !callee )
-			{
-				continue;
-			}
-
-			initFunc->minTransitiveAccessMask |= callee->minTransitiveAccessMask;
-			if( callee->transitiveCallsDelegate )
-			{
-				initFunc->transitiveCallsDelegate = true;
-				if( initFunc->transitiveHalts == asHALTS_YES )
-				{
-					initFunc->transitiveHalts = asHALTS_UNKNOWN;
-				}
-			}
-			// Same NO-doesn't-cross-a-call-edge rule as phase 4.
-			int calleeHalts = callee->transitiveHalts == asHALTS_NO
-				? (int)asHALTS_UNKNOWN : (int)callee->transitiveHalts;
-			if( calleeHalts > initFunc->transitiveHalts )
-			{
-				initFunc->transitiveHalts = calleeHalts;
-			}
-		}
+		FoldSourceFunctionMetadata(initFunc, funcIdToIndex);
 
 		asSMemoryScanResult res = scanner.Scan(initFunc);
 		asBYTE packed = asPackMemoryAccess(res.read, res.write);
@@ -3052,10 +3111,14 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 }
 
 // A CompileFunction or CompileMethod product that was not added to the
-// module: nothing calls it, so one scan against the module's stored results
-// is final.
-void asCModule::ComputeMemoryAccessOfDetachedFunction(asCScriptFunction *func)
+// module: nothing calls it, so one fold and one scan against the module's
+// stored results are final.
+void asCModule::ComputeDetachedFunctionMetadata(asCScriptFunction *func)
 {
+	asCMap<int, asUINT> funcIdToIndex;
+	BuildFuncIdToIndex(funcIdToIndex);
+	FoldSourceFunctionMetadata(func, funcIdToIndex);
+
 	asCMemoryAccessScanner scanner(m_engine, this, 0);
 	asSMemoryScanResult res = scanner.Scan(func);
 	asBYTE packed = asPackMemoryAccess(res.read, res.write);

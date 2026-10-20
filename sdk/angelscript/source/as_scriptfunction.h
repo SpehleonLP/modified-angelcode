@@ -196,6 +196,10 @@ public:
 	bool                 GetTransitiveCallsDelegate() const override;
 	asEHalts             GetLocalHalts() const override;
 	asEHalts             GetTransitiveHalts() const override;
+	bool                 GetLocalLoops() const override;
+	bool                 GetTransitiveLoops() const override;
+	asIScriptFunction   *GetLoopsVia() const override;
+	int                  SetLoops(bool loops) override;
 	int                  SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write);
 	void                 GetMemoryAccess(asEMemoryAccess *read, asEMemoryAccess *write) const;
 	void                *GetAuxiliary() const;
@@ -370,6 +374,14 @@ public:
 	bool                         transitiveCallsDelegate;
 	int8_t                       localHalts;      // asEHalts
 	int8_t                       transitiveHalts; // asEHalts
+	bool                         localLoops;
+	bool                         transitiveLoops;
+	// The direct callee the transitive fold took transitiveLoops from; null
+	// when the function loops locally or not at all. Not counted, because a
+	// recursive function would then hold itself: it is valid while the module
+	// that analysed this function lives, which owns every script callee
+	// (dispatch targets included) and recomputes it on bind and unbind.
+	asCScriptFunction           *loopsVia;
 
 	// Namespace will be null for funcdefs that are declared as child funcdefs
 	// of a class. In this case the namespace shall be taken from the parentClass

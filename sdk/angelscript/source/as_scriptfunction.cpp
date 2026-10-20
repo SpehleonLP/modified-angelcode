@@ -390,12 +390,14 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	transitiveCallsDelegate = false;
 	// Registered natives are trusted to halt (the application vouches for
 	// them). Everything else rests at UNKNOWN until the compiler/module
-	// analysis writes a real verdict — a function whose analysis never runs
-	// (e.g. a CompileFunction product not added to the module, or a
-	// CompileMethod product, neither of which the transitive pass visits)
-	// must not claim YES.
+	// analysis writes a real verdict, so a function whose analysis never
+	// runs must not claim YES.
 	localHalts             = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
 	transitiveHalts        = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
+	// A native cannot be analysed: it does not loop until SetLoops says so
+	localLoops             = false;
+	transitiveLoops        = false;
+	loopsVia               = 0;
 	// Zero would be None, the most permissive scope; an undeclared function must not look safe
 	memoryAccess           = asPackMemoryAccess(asMA_UNSET, asMA_UNSET);
 	nameSpace              = engine->nameSpaces[0];
@@ -1586,6 +1588,22 @@ bool    asCScriptFunction::GetLocalCallsDelegate() const { return localCallsDele
 bool    asCScriptFunction::GetTransitiveCallsDelegate() const { return transitiveCallsDelegate; }
 asEHalts asCScriptFunction::GetLocalHalts() const { return (asEHalts)localHalts; }
 asEHalts asCScriptFunction::GetTransitiveHalts() const { return (asEHalts)transitiveHalts; }
+bool    asCScriptFunction::GetLocalLoops() const { return localLoops; }
+bool    asCScriptFunction::GetTransitiveLoops() const { return transitiveLoops; }
+asIScriptFunction *asCScriptFunction::GetLoopsVia() const { return loopsVia; }
+
+// interface
+int asCScriptFunction::SetLoops(bool loops)
+{
+	// Script functions get the fact from the analysis
+	if( funcType != asFUNC_SYSTEM )
+	{
+		return asNOT_SUPPORTED;
+	}
+	localLoops = loops;
+	transitiveLoops = loops;
+	return asSUCCESS;
+}
 
 // interface
 int asCScriptFunction::SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write)

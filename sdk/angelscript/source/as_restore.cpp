@@ -1477,6 +1477,8 @@ asCScriptFunction *asCReader::ReadFunction(bool &isNew, bool addToModule, bool a
 				ReadData(&metaFlags, 1);
 				func->localCallsDelegate = (metaFlags & 1) != 0;
 				func->transitiveCallsDelegate = (metaFlags & 2) != 0;
+				func->localLoops = (metaFlags & 4) != 0;
+				func->transitiveLoops = (metaFlags & 8) != 0;
 				asBYTE metaHalts[2];
 				ReadData(metaHalts, 2);
 				func->localHalts = metaHalts[0] <= asHALTS_NO ? metaHalts[0] : asHALTS_UNKNOWN;
@@ -4527,7 +4529,9 @@ void asCWriter::WriteFunction(asCScriptFunction* func)
 		WriteData(&func->minLocalAccessMask, sizeof(asDWORD));
 		WriteData(&func->minTransitiveAccessMask, sizeof(asDWORD));
 		asBYTE flags = (func->localCallsDelegate ? 1 : 0) |
-		               (func->transitiveCallsDelegate ? 2 : 0);
+		               (func->transitiveCallsDelegate ? 2 : 0) |
+		               (func->localLoops ? 4 : 0) |
+		               (func->transitiveLoops ? 8 : 0);
 		WriteData(&flags, 1);
 		asBYTE halts[2] = { (asBYTE)func->localHalts, (asBYTE)func->transitiveHalts };
 		WriteData(halts, 2);

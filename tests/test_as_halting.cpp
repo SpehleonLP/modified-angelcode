@@ -154,16 +154,16 @@ TEST_F(AsHalting, SystemFunctionDefaultsToYes) {
 	EXPECT_EQ(f->GetTransitiveHalts(), asHALTS_YES);
 }
 
-TEST_F(AsHalting, CompileFunctionTransitiveDefaultsToUnknown) {
-	// CompileFunction runs only the LOCAL analysis; the dormant transitive
-	// side must rest at UNKNOWN, never a vacuous YES.
+TEST_F(AsHalting, CompileFunctionProductGetsATransitiveVerdict) {
+	// A detached CompileFunction product is folded against the module's
+	// settled results; with no callees its transitive verdict is its own.
 	asIScriptModule* mod = engine->GetModule("halts", asGM_ALWAYS_CREATE);
 	mod->AddScriptSection("s", "int dummy;");
 	ASSERT_GE(mod->Build(), 0);
 	asIScriptFunction* fn = nullptr;
 	ASSERT_GE(mod->CompileFunction("halts", "void f_loop() { while(true) {} }", 0, 0, &fn), 0);
-	EXPECT_EQ(fn->GetLocalHalts(), asHALTS_NO);          // local analysis is live
-	EXPECT_EQ(fn->GetTransitiveHalts(), asHALTS_UNKNOWN); // dormant => conservative
+	EXPECT_EQ(fn->GetLocalHalts(), asHALTS_NO);
+	EXPECT_EQ(fn->GetTransitiveHalts(), asHALTS_NO);
 	fn->Release();
 }
 
