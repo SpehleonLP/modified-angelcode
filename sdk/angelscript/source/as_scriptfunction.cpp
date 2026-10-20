@@ -1625,39 +1625,69 @@ bool asCScriptFunction::GetPropertyReadsComplete() const
 	return report ? report->complete : funcType == asFUNC_SYSTEM;
 }
 
+static bool asPropertyReportMatches(const asSPropertyReadReport *report, const asCArray<asSPropertyRead> &reads, bool complete)
+{
+	if( report == 0 || report->complete != complete || report->reads.GetLength() != reads.GetLength() )
+	{
+		return false;
+	}
+	for( asUINT n = 0; n < reads.GetLength(); n++ )
+	{
+		if( report->reads[n].objectType != reads[n].objectType ||
+		    report->reads[n].propertyIndex != reads[n].propertyIndex ||
+		    report->reads[n].viaThis != reads[n].viaThis )
+		{
+			return false;
+		}
+	}
+	return true;
+}
+
 void asCScriptFunction::PublishPropertyReads()
 {
 	asSortPropertyReads(propertyReads);
 	asSPropertyReadReport *current = publishedPropertyReads.load(std::memory_order_acquire);
-	if( current && current->complete == propertyReadsComplete &&
-	    current->reads.GetLength() == propertyReads.GetLength() )
+	if( asPropertyReportMatches(current, propertyReads, propertyReadsComplete) )
 	{
-		bool same = true;
-		for( asUINT n = 0; n < propertyReads.GetLength() && same; n++ )
-		{
-			same = current->reads[n].objectType == propertyReads[n].objectType &&
-			       current->reads[n].propertyIndex == propertyReads[n].propertyIndex &&
-			       current->reads[n].viaThis == propertyReads[n].viaThis;
-		}
-		if( same )
-		{
-			return;
-		}
-	}
-
-	asSPropertyReadReport *report = asNEW(asSPropertyReadReport);
-	if( report == 0 )
-	{
-		// Out of memory: keep the old report, which a host may still read
 		return;
 	}
-	report->reads = propertyReads;
-	report->complete = propertyReadsComplete;
+
+	// A report that alternates (bind/unbind, recompiling a global) would
+	// otherwise retire one copy per change for the function's lifetime;
+	// reusing an equal retired report bounds what is held to the number of
+	// distinct contents. A reused report is immutable, so a host still
+	// reading it from an earlier publish sees the same contents.
+	asSPropertyReadReport *report = 0;
+	for( asUINT n = 0; n < retiredPropertyReads.GetLength(); n++ )
+	{
+		if( asPropertyReportMatches(retiredPropertyReads[n], propertyReads, propertyReadsComplete) )
+		{
+			report = retiredPropertyReads[n];
+			retiredPropertyReads.RemoveIndexUnordered(n);
+			break;
+		}
+	}
+	if( report == 0 )
+	{
+		report = asNEW(asSPropertyReadReport);
+		if( report == 0 )
+		{
+			// Out of memory: keep the old report, which a host may still read
+			return;
+		}
+		report->reads = propertyReads;
+		report->complete = propertyReadsComplete;
+	}
 	publishedPropertyReads.store(report, std::memory_order_release);
 	if( current )
 	{
 		retiredPropertyReads.PushLast(current);
 	}
+}
+
+asUINT asCScriptFunction::GetRetainedPropertyReadReportCount() const
+{
+	return retiredPropertyReads.GetLength() + (publishedPropertyReads.load(std::memory_order_acquire) ? 1 : 0);
 }
 
 // interface

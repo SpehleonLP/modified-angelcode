@@ -430,6 +430,9 @@ public:
 	// Sorts the working report and publishes it, unless the published one
 	// already has the same contents
 	void                         PublishPropertyReads();
+	// Published plus retired reports; internal, for the fork tests that pin
+	// the retention bound
+	asUINT                       GetRetainedPropertyReadReportCount() const;
 
 	// Namespace will be null for funcdefs that are declared as child funcdefs
 	// of a class. In this case the namespace shall be taken from the parentClass
