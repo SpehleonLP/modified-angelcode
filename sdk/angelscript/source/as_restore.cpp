@@ -2990,9 +2990,6 @@ void asCReader::TranslateFunction(asCScriptFunction *func)
 		Error(TXT_INVALID_BYTECODE_d);
 		return;
 	}
-	// The restored report is what a build without the compiler hands out;
-	// one with it recomputes and republishes only what changed
-	func->PublishPropertyReads();
 
 	// Pre-compute the size of each instruction in order to translate jump offsets
 	asUINT n;

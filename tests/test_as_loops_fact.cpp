@@ -1,7 +1,7 @@
-// The derived loops fact (GetLocalLoops / GetTransitiveLoops / GetLoopsVia /
-// SetLoops). Nothing declares it: the compiler derives the local fact from
-// reachable back edges, and the module pass folds it along the call graph the
-// way it folds halting. A native contributes only through SetLoops.
+// The derived loops fact (GetLocalLoops / GetTransitiveLoops / SetLoops).
+// Nothing declares it: the compiler derives the local fact from reachable
+// back edges, and the module pass folds it along the call graph the way it
+// folds halting. A native contributes only through SetLoops.
 #include <gtest/gtest.h>
 #include <angelscript.h>
 #include <cstring>
@@ -78,7 +78,6 @@ TEST_F(AsLoopsFact, StraightLineCodeDoesNotLoop) {
 	ASSERT_NE(f, nullptr);
 	EXPECT_FALSE(f->GetLocalLoops());
 	EXPECT_FALSE(f->GetTransitiveLoops());
-	EXPECT_EQ(f->GetLoopsVia(), nullptr);
 }
 
 // The counted-loop prover makes this halt, and it is still a loop: halting
@@ -90,7 +89,6 @@ TEST_F(AsLoopsFact, ACountedLoopLoops) {
 	EXPECT_TRUE(f->GetLocalLoops());
 	EXPECT_TRUE(f->GetTransitiveLoops());
 	EXPECT_EQ(f->GetLocalHalts(), asHALTS_YES);
-	EXPECT_EQ(f->GetLoopsVia(), nullptr);
 }
 
 // The pruning pass drops back edges that are not loops; a for(;;) that
@@ -104,21 +102,18 @@ TEST_F(AsLoopsFact, AnUnreachableBackEdgeIsNotALoop) {
 
 TEST_F(AsLoopsFact, CallingALoopingHelperLoopsTransitively) {
 	ASSERT_TRUE(Build(std::string(kLoopingHelper) + "int g() { return f() + 1; }\n")) << messages;
-	asIScriptFunction* f = Fn("f");
 	asIScriptFunction* g = Fn("g");
 	ASSERT_NE(g, nullptr);
 	EXPECT_FALSE(g->GetLocalLoops());
 	EXPECT_TRUE(g->GetTransitiveLoops());
-	EXPECT_EQ(g->GetLoopsVia(), f);
 }
 
-// The via names the direct callee, not the function that loops locally.
-TEST_F(AsLoopsFact, LoopsViaNamesTheDirectCallee) {
+// The fact crosses more than one call edge.
+TEST_F(AsLoopsFact, LoopsFoldThroughACallChain) {
 	ASSERT_TRUE(Build(std::string(kLoopingHelper) +
 		"int g() { return f(); }\n"
 		"int h() { return g(); }\n")) << messages;
 	EXPECT_TRUE(Fn("h")->GetTransitiveLoops());
-	EXPECT_EQ(Fn("h")->GetLoopsVia(), Fn("g"));
 }
 
 // Recursion is a loop through the call graph, as the halting fold also
@@ -129,7 +124,6 @@ TEST_F(AsLoopsFact, RecursionLoopsTransitively) {
 	ASSERT_NE(r, nullptr);
 	EXPECT_FALSE(r->GetLocalLoops());
 	EXPECT_TRUE(r->GetTransitiveLoops());
-	EXPECT_EQ(r->GetLoopsVia(), r);
 }
 
 TEST_F(AsLoopsFact, NativeMarkedLoopingLoopsTransitively) {
@@ -147,9 +141,7 @@ TEST_F(AsLoopsFact, NativeMarkedLoopingLoopsTransitively) {
 		"int h() { return scan(); }\n"
 		"int k() { return plain(); }\n")) << messages;
 	EXPECT_TRUE(Fn("h")->GetTransitiveLoops());
-	EXPECT_EQ(Fn("h")->GetLoopsVia(), scan);
 	EXPECT_FALSE(Fn("k")->GetTransitiveLoops());
-	EXPECT_EQ(Fn("k")->GetLoopsVia(), nullptr);
 }
 
 TEST_F(AsLoopsFact, NativeMarkedLoopingFoldsThroughAMethodCall) {
@@ -163,7 +155,6 @@ TEST_F(AsLoopsFact, NativeMarkedLoopingFoldsThroughAMethodCall) {
 
 	ASSERT_TRUE(Build("int h(Cursor@ c) { return c.scan(); }\n")) << messages;
 	EXPECT_TRUE(Fn("h")->GetTransitiveLoops());
-	EXPECT_EQ(Fn("h")->GetLoopsVia(), scan);
 }
 
 TEST_F(AsLoopsFact, TemplateInstanceMethodInheritsTheNativeLoopsFact) {
@@ -214,12 +205,10 @@ TEST_F(AsLoopsFact, MethodCalledThroughAnInterfaceOrVirtualFoldsEveryOverride) {
 	asIScriptFunction* viaVirtual = Fn("viaVirtual");
 	EXPECT_FALSE(viaVirtual->GetLocalLoops());
 	EXPECT_TRUE(viaVirtual->GetTransitiveLoops());
-	EXPECT_EQ(viaVirtual->GetLoopsVia(), dm);
 
 	asIScriptFunction* viaInterface = Fn("viaInterface");
 	EXPECT_FALSE(viaInterface->GetLocalLoops());
 	EXPECT_TRUE(viaInterface->GetTransitiveLoops());
-	EXPECT_EQ(viaInterface->GetLoopsVia(), qn);
 
 	// GetMethodByName defaults to the virtual stub, which has no body: it
 	// answers with the join over everything a call through it can reach.
@@ -229,7 +218,6 @@ TEST_F(AsLoopsFact, MethodCalledThroughAnInterfaceOrVirtualFoldsEveryOverride) {
 	ASSERT_NE(bStub, nullptr);
 	EXPECT_EQ(bStub->GetFuncType(), asFUNC_VIRTUAL);
 	EXPECT_TRUE(bStub->GetTransitiveLoops());
-	EXPECT_EQ(bStub->GetLoopsVia(), dm);
 
 	asIScriptFunction* iStub = mod->GetTypeInfoByName("I")->GetMethodByName("n");
 	ASSERT_NE(iStub, nullptr);
@@ -250,7 +238,6 @@ TEST_F(AsLoopsFact, OpenDispatchLoops) {
 		"shared class S { int m() { return 1; } }\n"
 		"int viaShared(S@ s) { return s.m(); }\n")) << messages;
 	EXPECT_TRUE(Fn("viaShared")->GetTransitiveLoops());
-	EXPECT_EQ(Fn("viaShared")->GetLoopsVia(), nullptr);
 	EXPECT_TRUE(mod->GetTypeInfoByName("S")->GetMethodByName("m")->GetTransitiveLoops());
 }
 
@@ -263,9 +250,7 @@ TEST_F(AsLoopsFact, FuncdefCallLoops) {
 	asIScriptFunction* call = Fn("call");
 	EXPECT_FALSE(call->GetLocalLoops());
 	EXPECT_TRUE(call->GetTransitiveLoops());
-	EXPECT_EQ(call->GetLoopsVia(), nullptr);
 	EXPECT_TRUE(Fn("outer")->GetTransitiveLoops());
-	EXPECT_EQ(Fn("outer")->GetLoopsVia(), call);
 }
 
 // A local value is built by CALLSYS on its native constructor; a non-POD
@@ -329,7 +314,6 @@ TEST_F(AsLoopsFact, CompileMethodProductHasTransitiveFacts) {
 	ASSERT_EQ(mod->CompileMethod(foo, "gauge", "int get() const { return helperThatLoops(); }", 0, &looping), asSUCCESS) << messages;
 	EXPECT_FALSE(looping->GetLocalLoops());
 	EXPECT_TRUE(looping->GetTransitiveLoops());
-	EXPECT_EQ(looping->GetLoopsVia(), Fn("helperThatLoops"));
 	EXPECT_EQ(looping->GetTransitiveHalts(), asHALTS_YES);
 	EXPECT_FALSE(looping->GetTransitiveCallsDelegate());
 	looping->Release();
@@ -337,7 +321,6 @@ TEST_F(AsLoopsFact, CompileMethodProductHasTransitiveFacts) {
 	asIScriptFunction* plain = nullptr;
 	ASSERT_EQ(mod->CompileMethod(foo, "gauge", "int get() const { return v + straight(); }", 0, &plain), asSUCCESS) << messages;
 	EXPECT_FALSE(plain->GetTransitiveLoops());
-	EXPECT_EQ(plain->GetLoopsVia(), nullptr);
 	EXPECT_EQ(plain->GetTransitiveHalts(), asHALTS_YES);
 	plain->Release();
 
@@ -354,7 +337,6 @@ TEST_F(AsLoopsFact, CompileFunctionProductHasTransitiveFacts) {
 	ASSERT_EQ(mod->CompileFunction("gauge", "int g() { return f(); }", 0, 0, &g), asSUCCESS) << messages;
 	EXPECT_FALSE(g->GetLocalLoops());
 	EXPECT_TRUE(g->GetTransitiveLoops());
-	EXPECT_EQ(g->GetLoopsVia(), Fn("f"));
 	EXPECT_EQ(g->GetTransitiveHalts(), asHALTS_YES);
 	g->Release();
 }
@@ -379,7 +361,6 @@ TEST_F(AsLoopsFact, LoopsFactsSurviveSaveAndLoad) {
 	EXPECT_TRUE(f->GetTransitiveLoops());
 	EXPECT_FALSE(g->GetLocalLoops());
 	EXPECT_TRUE(g->GetTransitiveLoops());
-	EXPECT_EQ(g->GetLoopsVia(), f);
 	EXPECT_FALSE(s->GetLocalLoops());
 	EXPECT_FALSE(s->GetTransitiveLoops());
 }

@@ -67,15 +67,6 @@ struct asSPropertyRead
 	bool           viaThis;
 };
 
-// One published property-read report. Never modified once published: a new
-// analysis result is a new report, so a host reading one concurrently with a
-// re-analysis (Build, bind, unbind) never sees its storage move.
-struct asSPropertyReadReport
-{
-	asCArray<asSPropertyRead> reads;
-	bool                      complete;
-};
-
 // Adds `read` unless an equal entry is present. Reports whether it was added.
 bool asAddPropertyRead(asCArray<asSPropertyRead> &reads, const asSPropertyRead &read);
 // Puts a report in its canonical order (type name, property, viaThis), so
@@ -223,7 +214,6 @@ public:
 	asEHalts             GetTransitiveHalts() const override;
 	bool                 GetLocalLoops() const override;
 	bool                 GetTransitiveLoops() const override;
-	asIScriptFunction   *GetLoopsVia() const override;
 	int                  SetLoops(bool loops) override;
 	asUINT               GetPropertyReadCount() const override;
 	int                  GetPropertyRead(asUINT index, asITypeInfo **objectType, asUINT *propertyIndex, bool *viaThis) const override;
@@ -404,35 +394,14 @@ public:
 	int8_t                       transitiveHalts; // asEHalts
 	bool                         localLoops;
 	bool                         transitiveLoops;
-	// The direct callee the transitive fold took transitiveLoops from; null
-	// when the function loops locally, through a call the analysis cannot
-	// follow (a delegate, an import, an open dispatch), or not at all.
-	// Not counted, because a
-	// recursive function would then hold itself: it is valid while the module
-	// that analysed this function lives, which owns every script callee
-	// (dispatch targets included) and recomputes it on bind and unbind.
-	asCScriptFunction           *loopsVia;
 	// The property-read report. The local one is what this function's own
 	// bytecode reads, written by the compiler; the transitive one folds in
-	// every modelled callee's, and is what the interface returns. Raw type
-	// pointers, valid for the same reason loopsVia is: the analysing module
-	// holds every function whose bytecode names them.
+	// every modelled callee's, is overwritten whenever the module pass
+	// recomputes it, and is what the interface returns. Raw type pointers:
+	// the analysing module holds every function whose bytecode names them.
 	asCArray<asSPropertyRead>    localPropertyReads;
-	// The module pass's working copy of the transitive report, which only
-	// the analysis reads and writes; PublishPropertyReads hands it to hosts.
 	asCArray<asSPropertyRead>    propertyReads;
 	bool                         propertyReadsComplete;
-	// What the interface returns: the last published report, null before
-	// the first. Superseded reports are retired, not freed, until the
-	// function is destroyed, so a pointer a host loaded stays valid.
-	std::atomic<asSPropertyReadReport*> publishedPropertyReads;
-	asCArray<asSPropertyReadReport*>    retiredPropertyReads;
-	// Sorts the working report and publishes it, unless the published one
-	// already has the same contents
-	void                         PublishPropertyReads();
-	// Published plus retired reports; internal, for the fork tests that pin
-	// the retention bound
-	asUINT                       GetRetainedPropertyReadReportCount() const;
 
 	// Namespace will be null for funcdefs that are declared as child funcdefs
 	// of a class. In this case the namespace shall be taken from the parentClass

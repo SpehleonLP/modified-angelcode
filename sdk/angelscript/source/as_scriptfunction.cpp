@@ -401,11 +401,9 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	// a funcdef signature) cannot read as "does not loop".
 	localLoops             = (funcType != asFUNC_SYSTEM);
 	transitiveLoops        = (funcType != asFUNC_SYSTEM);
-	loopsVia               = 0;
 	// Same trust as halting: a native reads no script property, and anything
 	// else is incomplete until the analysis says otherwise
 	propertyReadsComplete  = (funcType == asFUNC_SYSTEM);
-	publishedPropertyReads.store(0, std::memory_order_relaxed);
 	// Zero would be None, the most permissive scope; an undeclared function must not look safe
 	memoryAccess           = asPackMemoryAccess(asMA_UNSET, asMA_UNSET);
 	nameSpace              = engine->nameSpaces[0];
@@ -523,17 +521,6 @@ void asCScriptFunction::DestroyInternal()
 	}
 
 	DeallocateScriptFunctionData();
-
-	asSPropertyReadReport *published = publishedPropertyReads.exchange(0, std::memory_order_acq_rel);
-	if( published )
-	{
-		asDELETE(published, asSPropertyReadReport);
-	}
-	for( asUINT n = 0; n < retiredPropertyReads.GetLength(); n++ )
-	{
-		asDELETE(retiredPropertyReads[n], asSPropertyReadReport);
-	}
-	retiredPropertyReads.SetLength(0);
 
 	// Deallocate list pattern data
 	while( listPattern )
@@ -1609,96 +1596,26 @@ asEHalts asCScriptFunction::GetLocalHalts() const { return (asEHalts)localHalts;
 asEHalts asCScriptFunction::GetTransitiveHalts() const { return (asEHalts)transitiveHalts; }
 bool    asCScriptFunction::GetLocalLoops() const { return localLoops; }
 bool    asCScriptFunction::GetTransitiveLoops() const { return transitiveLoops; }
-asIScriptFunction *asCScriptFunction::GetLoopsVia() const { return loopsVia; }
 // interface
 asUINT asCScriptFunction::GetPropertyReadCount() const
 {
-	const asSPropertyReadReport *report = publishedPropertyReads.load(std::memory_order_acquire);
-	return report ? report->reads.GetLength() : 0;
+	return propertyReads.GetLength();
 }
 
 // interface
 bool asCScriptFunction::GetPropertyReadsComplete() const
 {
-	// Never analysed: only a native is trusted to read nothing
-	const asSPropertyReadReport *report = publishedPropertyReads.load(std::memory_order_acquire);
-	return report ? report->complete : funcType == asFUNC_SYSTEM;
-}
-
-static bool asPropertyReportMatches(const asSPropertyReadReport *report, const asCArray<asSPropertyRead> &reads, bool complete)
-{
-	if( report == 0 || report->complete != complete || report->reads.GetLength() != reads.GetLength() )
-	{
-		return false;
-	}
-	for( asUINT n = 0; n < reads.GetLength(); n++ )
-	{
-		if( report->reads[n].objectType != reads[n].objectType ||
-		    report->reads[n].propertyIndex != reads[n].propertyIndex ||
-		    report->reads[n].viaThis != reads[n].viaThis )
-		{
-			return false;
-		}
-	}
-	return true;
-}
-
-void asCScriptFunction::PublishPropertyReads()
-{
-	asSortPropertyReads(propertyReads);
-	asSPropertyReadReport *current = publishedPropertyReads.load(std::memory_order_acquire);
-	if( asPropertyReportMatches(current, propertyReads, propertyReadsComplete) )
-	{
-		return;
-	}
-
-	// A report that alternates (bind/unbind, recompiling a global) would
-	// otherwise retire one copy per change for the function's lifetime;
-	// reusing an equal retired report bounds what is held to the number of
-	// distinct contents. A reused report is immutable, so a host still
-	// reading it from an earlier publish sees the same contents.
-	asSPropertyReadReport *report = 0;
-	for( asUINT n = 0; n < retiredPropertyReads.GetLength(); n++ )
-	{
-		if( asPropertyReportMatches(retiredPropertyReads[n], propertyReads, propertyReadsComplete) )
-		{
-			report = retiredPropertyReads[n];
-			retiredPropertyReads.RemoveIndexUnordered(n);
-			break;
-		}
-	}
-	if( report == 0 )
-	{
-		report = asNEW(asSPropertyReadReport);
-		if( report == 0 )
-		{
-			// Out of memory: keep the old report, which a host may still read
-			return;
-		}
-		report->reads = propertyReads;
-		report->complete = propertyReadsComplete;
-	}
-	publishedPropertyReads.store(report, std::memory_order_release);
-	if( current )
-	{
-		retiredPropertyReads.PushLast(current);
-	}
-}
-
-asUINT asCScriptFunction::GetRetainedPropertyReadReportCount() const
-{
-	return retiredPropertyReads.GetLength() + (publishedPropertyReads.load(std::memory_order_acquire) ? 1 : 0);
+	return propertyReadsComplete;
 }
 
 // interface
 int asCScriptFunction::GetPropertyRead(asUINT index, asITypeInfo **outObjectType, asUINT *outPropertyIndex, bool *outViaThis) const
 {
-	const asSPropertyReadReport *report = publishedPropertyReads.load(std::memory_order_acquire);
-	if( report == 0 || index >= report->reads.GetLength() )
+	if( index >= propertyReads.GetLength() )
 	{
 		return asINVALID_ARG;
 	}
-	const asSPropertyRead &read = report->reads[index];
+	const asSPropertyRead &read = propertyReads[index];
 	if( outObjectType )
 	{
 		*outObjectType = read.objectType;

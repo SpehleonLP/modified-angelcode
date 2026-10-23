@@ -4467,7 +4467,6 @@ bool asCScriptEngine::GenerateFunctionForTemplateObjectInstance(asCObjectType *t
 	// Native property reads are empty and complete by default, so there is nothing else to copy.
 	func2->localLoops = func->localLoops;
 	func2->transitiveLoops = func->transitiveLoops;
-	func2->loopsVia = func->loopsVia;
 	func2->SetReadOnly(func->IsReadOnly());
 	func2->objectType = ot;
 	func2->objectType->AddRefInternal();

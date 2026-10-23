@@ -1220,21 +1220,16 @@ public:
 	virtual asEHalts         GetTransitiveHalts() const = 0;
 	virtual bool             GetLocalLoops() const = 0;
 	virtual bool             GetTransitiveLoops() const = 0;
-	// Null when the function loops locally, through a call the analysis cannot
-	// follow, or not at all. Not a reference: valid while the module that
-	// analysed this function lives
-	virtual asIScriptFunction *GetLoopsVia() const = 0;
 	virtual int              SetLoops(bool loops) = 0;
 	// The script-class properties this function reads, transitively, without
 	// duplicates. viaThis is true when the read's object is this function's own
 	// `this`; a callee's `this` reads keep it only when the call's receiver
 	// was `this`. A write is reported as a read. Not references: the types
 	// are valid while the module that analysed this function lives.
-	// Safe to call concurrently with a re-analysis (Build, bind, unbind): a
-	// changed report is published as a new immutable one and the old one
-	// stays valid, but the count and the entries read by separate calls may
-	// then come from different reports, so an index past the newer count
-	// returns asINVALID_ARG.
+	// The report, its count and its indices hold until that module re-runs its
+	// analysis (it is rebuilt, loads bytecode, binds or unbinds an import, or
+	// adds a compiled function), which overwrites it in place; do not read it
+	// concurrently with any of those.
 	virtual asUINT           GetPropertyReadCount() const = 0;
 	virtual int              GetPropertyRead(asUINT index, asITypeInfo **objectType, asUINT *propertyIndex, bool *viaThis) const = 0;
 	// False when a call the analysis cannot follow (a delegate, an import, an

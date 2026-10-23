@@ -554,7 +554,7 @@ stores pointers at dword alignment by design, `as_restore.cpp` passes null
 to `memcpy` with a zero size, and `as_context.cpp`'s live-object scan passes
 null to `memset` with a zero size for a function without object variables.
 
-All 161 tests should pass. 95 of them live in `tests/test_as_halting.cpp`,
+All 217 tests should pass. 95 of them live in `tests/test_as_halting.cpp`,
 across three fixtures that differ only in engine properties: `AsHalting`
 enables `asEP_ALLOW_UNSAFE_REFERENCES` (one test needs `int &inout` on a script
 function); `AsHaltingConstGlobalFuncdef` leaves it at its default of off,

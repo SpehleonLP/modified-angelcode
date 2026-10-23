@@ -4,8 +4,6 @@
 // reports; the host decides what a read through another object means.
 #include <gtest/gtest.h>
 #include <angelscript.h>
-// Internal header: the retention test reads a count the public API does not expose
-#include "as_scriptfunction.h"
 #include <algorithm>
 #include <cstring>
 #include <string>
@@ -391,28 +389,4 @@ TEST_F(AsPropertyReads, DefaultAssignmentReadsSurviveSaveAndLoad) {
 	asIScriptFunction* m = Method(restored, "G", "m");
 	EXPECT_EQ(Report(m), before);
 	EXPECT_TRUE(m->GetPropertyReadsComplete());
-}
-
-// Bind and unbind flip the importer's report between two contents; the
-// retired reports must be reused, not accumulated for the function's life
-TEST_F(AsPropertyReads, AlternatingReportsRetainOneCopyPerContent) {
-	asIScriptModule* lib = engine->GetModule("lib", asGM_ALWAYS_CREATE);
-	lib->AddScriptSection("lib", "float g() { return 0; }\n");
-	ASSERT_GE(lib->Build(), 0) << messages;
-	ASSERT_TRUE(Build(std::string(kClassHead) +
-		"float m() const { return a + g(); } }\n"
-		"import float g() from \"lib\";\n")) << messages;
-	asIScriptFunction* m = Method(mod, "G", "m");
-	ASSERT_NE(m, nullptr);
-	asCScriptFunction* impl = static_cast<asCScriptFunction*>(m);
-
-	ASSERT_FALSE(m->GetPropertyReadsComplete());
-	for (int n = 0; n < 100; n++) {
-		ASSERT_GE(mod->BindAllImportedFunctions(), 0) << messages;
-		ASSERT_TRUE(m->GetPropertyReadsComplete()) << n;
-		ASSERT_GE(mod->UnbindAllImportedFunctions(), 0);
-		ASSERT_FALSE(m->GetPropertyReadsComplete()) << n;
-	}
-	EXPECT_TRUE(Has(Report(m), Read("G", "a", true)));
-	EXPECT_LE(impl->GetRetainedPropertyReadReportCount(), 2u);
 }

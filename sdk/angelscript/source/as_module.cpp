@@ -2699,7 +2699,6 @@ static bool JoinCalleeFacts(asCScriptFunction *func, asCScriptFunction *callee, 
 	if( !func->transitiveLoops && callee->transitiveLoops )
 	{
 		func->transitiveLoops = true;
-		func->loopsVia = callee;
 		changed = true;
 	}
 
@@ -2707,15 +2706,11 @@ static bool JoinCalleeFacts(asCScriptFunction *func, asCScriptFunction *callee, 
 }
 
 // An unmodelled call site (a delegate, an import, an open dispatch, an
-// unmapped target) may reach anything, so it loops with no callee to name,
-// and it may read any property, so the read report is incomplete.
+// unmapped target) may reach anything, so it loops, and it may read any
+// property, so the read report is incomplete.
 static void SetLoopsThroughUnresolvedCall(asCScriptFunction *func)
 {
-	if( !func->transitiveLoops )
-	{
-		func->transitiveLoops = true;
-		func->loopsVia = 0;
-	}
+	func->transitiveLoops = true;
 	func->propertyReadsComplete = false;
 }
 
@@ -2730,7 +2725,6 @@ static void InitTransitiveFacts(asCScriptFunction *func, bool unresolved, const 
 	func->transitiveCallsDelegate = func->localCallsDelegate || unresolved;
 	func->transitiveHalts = func->localHalts;
 	func->transitiveLoops = func->localLoops;
-	func->loopsVia = 0;
 	func->propertyReads = func->localPropertyReads;
 	for( asUINT n = 0; n < copyReads.GetLength(); n++ )
 	{
@@ -2872,7 +2866,7 @@ void asCModule::FoldSourceFunctionMetadata(asCScriptFunction *func, const asCMap
 			JoinCalleeFacts(func, callee, sourceCalleeReceivers[j]);
 		}
 	}
-	func->PublishPropertyReads();
+	asSortPropertyReads(func->propertyReads);
 }
 
 // The module's one metadata pass. It settles every per-function result
@@ -2969,9 +2963,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		{
 			continue;
 		}
-		bool needsHalts = func->transitiveHalts < asHALTS_UNKNOWN;
-		bool needsLoops = !func->transitiveLoops;
-		if( !needsHalts && !needsLoops )
+		if( func->transitiveHalts >= asHALTS_UNKNOWN && func->transitiveLoops )
 		{
 			continue;
 		}
@@ -2983,46 +2975,42 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 			visited[v] = false;
 		}
 
-		// One walk per direct callee, in order, so the cycle is attributed to
-		// the first callee that leads back. The visited set is shared: a
-		// function a finished walk reached without finding i cannot reach it
-		// from a later root either.
-		asCScriptFunction *cycleVia = 0;
-		for( asUINT root = 0; root < callees[i].GetLength() && !cycleVia; root++ )
+		asCArray<asUINT> stack;
+		for( asUINT j = 0; j < callees[i].GetLength(); j++ )
 		{
-			asCArray<asUINT> stack;
-			stack.PushLast(callees[i][root]);
-			while( stack.GetLength() > 0 )
+			stack.PushLast(callees[i][j]);
+		}
+
+		bool selfReachable = false;
+		while( stack.GetLength() > 0 )
+		{
+			asUINT cur = stack[stack.GetLength() - 1];
+			stack.PopLast();
+
+			if( cur == i )
 			{
-				asUINT cur = stack[stack.GetLength() - 1];
-				stack.PopLast();
+				selfReachable = true;
+				break;
+			}
+			if( visited[cur] )
+			{
+				continue;
+			}
+			visited[cur] = true;
 
-				if( cur == i )
-				{
-					cycleVia = m_scriptFunctions[callees[i][root]];
-					break;
-				}
-				if( visited[cur] )
-				{
-					continue;
-				}
-				visited[cur] = true;
-
-				for( asUINT j = 0; j < callees[cur].GetLength(); j++ )
-				{
-					stack.PushLast(callees[cur][j]);
-				}
+			for( asUINT j = 0; j < callees[cur].GetLength(); j++ )
+			{
+				stack.PushLast(callees[cur][j]);
 			}
 		}
 
-		if( cycleVia && needsHalts )
+		if( selfReachable )
 		{
-			func->transitiveHalts = asHALTS_UNKNOWN;
-		}
-		if( cycleVia && needsLoops )
-		{
+			if( func->transitiveHalts < asHALTS_UNKNOWN )
+			{
+				func->transitiveHalts = asHALTS_UNKNOWN;
+			}
 			func->transitiveLoops = true;
-			func->loopsVia = cycleVia;
 		}
 	}
 
@@ -3250,7 +3238,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		asCScriptFunction *func = m_scriptFunctions[i];
 		if( func && func->scriptData )
 		{
-			func->PublishPropertyReads();
+			asSortPropertyReads(func->propertyReads);
 		}
 	}
 
@@ -3276,7 +3264,6 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 		asEMemoryAccess r = asMA_PROGRAM, w = asMA_PROGRAM;
 		func->localLoops = true;
 		func->transitiveLoops = true;
-		func->loopsVia = 0;
 		// Every target runs on the stub's own receiver, so their `this`
 		// reads stay `this` reads
 		func->propertyReads.SetLength(0);
@@ -3303,7 +3290,6 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 				if( targets[n]->transitiveLoops )
 				{
 					func->transitiveLoops = true;
-					func->loopsVia = targets[n];
 				}
 			}
 			r = w = asMA_NONE;
@@ -3322,7 +3308,7 @@ void asCModule::ComputeTransitiveFunctionMetadata()
 				}
 			}
 		}
-		func->PublishPropertyReads();
+		asSortPropertyReads(func->propertyReads);
 		asBYTE packed = asPackMemoryAccess(r, w);
 		if( func->memoryAccess != packed )
 		{
