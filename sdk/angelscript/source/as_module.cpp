@@ -1860,7 +1860,7 @@ int asCModule::CompileMethod(asITypeInfo *objectType, const char *sectionName, c
 	}
 
 	asCBuilder methodBuilder(m_engine, this);
-	methodBuilder.accessMask = accessMask;
+	methodBuilder.m_accessMask = accessMask;
 	asCString str = code;
 	asCScriptFunction* func = 0;
 	r = methodBuilder.CompileMethod(ot, sectionName, str.AddressOf(), lineOffset, &func);
@@ -1934,7 +1934,7 @@ int asCModule::CompileFunction(const char* sectionName, const char* code, int li
 
 	// Compile the single function
 	asCBuilder funcBuilder(m_engine, this);
-	funcBuilder.accessMask = accessMask;
+	funcBuilder.m_accessMask = accessMask;
 	asCString str = code;
 	asCScriptFunction* func = 0;
 	r = funcBuilder.CompileFunction(sectionName, str.AddressOf(), lineOffset, compileFlags, &func);

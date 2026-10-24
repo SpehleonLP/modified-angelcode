@@ -84,7 +84,7 @@ asCBuilder::asCBuilder(asCScriptEngine *_engine, asCModule *_module)
 {
 	this->engine = _engine;
 	this->module = _module;
-	this->accessMask = _module ? _module->m_accessMask : 0;
+	this->m_accessMask = _module ? _module->m_accessMask : 0;
 	this->m_accessMaskAccumulator = nullptr;
 	this->m_missedAccessMaskAccumulator = nullptr;
 	silent = false;
@@ -1272,7 +1272,7 @@ asCObjectProperty *asCBuilder::GetObjectProperty(asCDataType &obj, const char *p
 	{
 		if( props[n]->name == prop )
 		{
-			if( accessMask & props[n]->accessMask )
+			if( m_accessMask & props[n]->accessMask )
 			{
 				// Only accumulate for members of registered (non-script) types. Script-class
 				// members inherit the module's default accessMask (0xFFFFFFFF) which is visibility
@@ -1362,7 +1362,7 @@ asCGlobalProperty *asCBuilder::GetGlobalProperty(const char *prop, asSNameSpace 
 		if( isAppProp )
 		{
 			// Don't return the property if the module doesn't have access to it
-			if( !(accessMask & globProp->accessMask) )
+			if( !(m_accessMask & globProp->accessMask) )
 			{
 				if (m_missedAccessMaskAccumulator) *m_missedAccessMaskAccumulator |= globProp->accessMask;
 				globProp = 0;
@@ -6042,7 +6042,7 @@ void asCBuilder::GetFunctionDescriptions(const char *name, asCArray<int> &funcs,
 		asCScriptFunction *f = engine->registeredGlobalFuncs.Get(idxs2[n]);
 
 		// Verify if the module has access to the function
-		if( accessMask & f->accessMask )
+		if( m_accessMask & f->accessMask )
 		{
 			if (m_accessMaskAccumulator)
 			{
@@ -6111,13 +6111,13 @@ void asCBuilder::GetObjectMethodDescriptions(const char *name, asCObjectType *ob
 		asCScriptFunction *func = engine->scriptFunctions[objectType->methods[n]];
 		if( func->name == name &&
 			(!objIsConst || func->IsReadOnly()) &&
-			!(func->accessMask & accessMask) )
+			!(func->accessMask & m_accessMask) )
 		{
 			if (m_missedAccessMaskAccumulator) *m_missedAccessMaskAccumulator |= func->accessMask;
 		}
 		if( func->name == name &&
 			(!objIsConst || func->IsReadOnly()) &&
-			(func->accessMask & accessMask) )
+			(func->accessMask & m_accessMask) )
 		{
 			// Skip script-defined-class methods (owning type is asOBJ_SCRIPT_OBJECT). Their
 			// accessMask is module-default 0xFFFFFFFF visibility noise; real usage flows via
@@ -6602,11 +6602,11 @@ asCDataType asCBuilder::CreateDataTypeFromNode(asCScriptNode *node, asCScriptCod
 						isImplicitHandle = true;
 
 					// Make sure the module has access to the object type
-					if (module && !(accessMask & ti->accessMask))
+					if (module && !(m_accessMask & ti->accessMask))
 					{
 						if (m_missedAccessMaskAccumulator) *m_missedAccessMaskAccumulator |= ti->accessMask;
 					}
-					if (!module || (accessMask & ti->accessMask))
+					if (!module || (m_accessMask & ti->accessMask))
 					{
 						// Only accumulate for registered types. Script-defined object types
 						// default accessMask to 0xFFFFFFFF (module visibility), which saturates
@@ -7222,7 +7222,7 @@ int asCBuilder::GetEnumValue(const char *name, asCDataType &outDt, asDWORD &outV
 		if( ns != et->nameSpace ) continue;
 
 		// Don't bother with types the module doesn't have access to
-		if( (et->accessMask & accessMask) == 0 )
+		if( (et->accessMask & m_accessMask) == 0 )
 		{
 			// Still check if the name matches any value in this enum so we can
 			// report that the enum was mask-hidden in diagnostics.

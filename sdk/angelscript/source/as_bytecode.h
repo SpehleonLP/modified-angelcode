@@ -196,11 +196,19 @@ public:
 	asCByteInstruction *next;
 	asCByteInstruction *prev;
 
-	asEBCInstr op;
 	asQWORD arg;
 	short wArg[3];
+
+	// Testing
+	bool marked;
+	// For asBC_CALL and asBC_CALLINTF only: the call's receiver is the
+	// compiled method's own `this`
+	bool receiverIsThis;
+
+	asEBCInstr op;
 	int size;
 	int stackInc;
+	int  stackSize;
 
 	// For asBC_CallPtr only: the statically-known callee (asCScriptFunction*)
 	// if the compiler proved the value provenance, else 0 (unknown target).
@@ -209,17 +217,9 @@ public:
 	// initializer.
 	void *funcdefTarget;
 
-	// For asBC_CALL and asBC_CALLINTF only: the call's receiver is the
-	// compiled method's own `this`
-	bool receiverIsThis;
-
 	// For an asBC_CALLSYS to the script classes' default copy behaviour only:
 	// the static type of the object assigned to, or 0 when unknown
 	void *copyType;
-
-	// Testing
-	bool marked;
-	int  stackSize;
 };
 
 END_AS_NAMESPACE

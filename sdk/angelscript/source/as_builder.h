@@ -209,7 +209,7 @@ protected:
 	asCScriptEngine *engine;
 	asCModule       *module;
 	// The mask names resolve under: the module's, unless a compile passed its own.
-	asDWORD          accessMask;
+	asDWORD          m_accessMask;
 	asDWORD         *m_accessMaskAccumulator;  // points to compiler's accumulator during compilation
 	asDWORD         *m_missedAccessMaskAccumulator; // name-matches-but-mask-rejects accumulator for enriched diagnostics
 	asCMap<asSNameSpace*, asCArray<asSNameSpace*>>    namespaceVisibility;
