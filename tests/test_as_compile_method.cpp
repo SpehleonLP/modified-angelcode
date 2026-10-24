@@ -126,3 +126,47 @@ TEST_F(Fixture, OutlivesItsModule) {
 	f->Release();
 	engine->GarbageCollect();
 }
+
+namespace {
+int OpenFn() { return 1; }
+int SecretFn() { return 2; }
+}
+
+// A per-compile mask decides what the compile can name; the module's mask is neither
+// used nor changed, so no compile needs a SetAccessMask round trip.
+TEST(CompileAccessMask, PerCompileMaskWithoutTouchingTheModule) {
+	asIScriptEngine* engine = asCreateScriptEngine();
+	std::string messages;
+	engine->SetMessageCallback(asFUNCTION(MessageCallback), &messages, asCALL_CDECL);
+	engine->SetDefaultAccessMask(1);
+	ASSERT_GE(engine->RegisterGlobalFunction("int open()", asFUNCTION(OpenFn), asCALL_CDECL), 0);
+	engine->SetDefaultAccessMask(2);
+	ASSERT_GE(engine->RegisterGlobalFunction("int secret()", asFUNCTION(SecretFn), asCALL_CDECL), 0);
+	engine->SetDefaultAccessMask(1);
+
+	asIScriptModule* mod = engine->GetModule("m", asGM_ALWAYS_CREATE);
+	mod->SetAccessMask(3);
+	ASSERT_GE(mod->AddScriptSection("s", "class Foo { int v = 5; }\n"), 0);
+	ASSERT_GE(mod->Build(), 0) << messages;
+	asITypeInfo* foo = mod->GetTypeInfoByName("Foo");
+	ASSERT_NE(foo, nullptr);
+
+	asIScriptFunction* f = nullptr;
+	EXPECT_LT(mod->CompileFunction("narrow", "int f() { return secret(); }", 0, 0, 1u, &f), 0)
+		<< "secret() is outside the compile's mask, though inside the module's";
+	EXPECT_EQ(f, nullptr);
+	ASSERT_GE(mod->CompileFunction("narrow", "int f() { return open(); }", 0, 0, 1u, &f), 0) << messages;
+	f->Release();
+	f = nullptr;
+	EXPECT_LT(mod->CompileMethod(foo, "narrow", "int g() { return secret() + v; }", 0, 1u, &f), 0);
+	EXPECT_EQ(f, nullptr);
+	ASSERT_GE(mod->CompileMethod(foo, "wide", "int g() { return secret() + v; }", 0, 2u, &f), 0) << messages;
+	f->Release();
+	f = nullptr;
+
+	EXPECT_EQ(mod->SetAccessMask(3), 3u) << "the module's mask is unchanged";
+	// The original signatures still use the module's mask.
+	ASSERT_GE(mod->CompileFunction("module", "int f() { return secret(); }", 0, 0, &f), 0) << messages;
+	f->Release();
+	engine->ShutDownAndRelease();
+}

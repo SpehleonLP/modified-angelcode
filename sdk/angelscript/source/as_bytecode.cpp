@@ -1663,6 +1663,54 @@ void asCByteCode::ExtractFuncdefCallTargets(asCScriptFunction *outFunc)
 			outFunc->scriptData->funcdefCallTargets.PushLast((asCScriptFunction*)instr->funcdefTarget);
 }
 
+// The receiver kind of each asBC_CALL and asBC_CALLINTF, and the assigned
+// type of each call to the default script-class copy, in final bytecode order,
+// extracted after the optimizer for the same reason the funcdef targets are
+void asCByteCode::ExtractCallReceivers(asCScriptFunction *outFunc)
+{
+	asASSERT(outFunc->scriptData);
+	int defaultCopy = engine->scriptTypeBehaviours.beh.copy;
+	for( asCByteInstruction *instr = first; instr; instr = instr->next )
+	{
+		if( instr->op == asBC_CALL || instr->op == asBC_CALLINTF )
+		{
+			outFunc->scriptData->callReceiverIsThis.PushLast(instr->receiverIsThis);
+		}
+		else if( instr->op == asBC_CALLSYS && *((int*)ARG_DW(instr->arg)) == defaultCopy )
+		{
+			outFunc->scriptData->defaultCopyTypes.PushLast((asCObjectType*)instr->copyType);
+		}
+	}
+}
+
+void asCByteCode::MarkLastCallCopyType(asCObjectType *type)
+{
+	asCByteInstruction *instr = last;
+	if( instr && instr->op == asBC_JitEntry )
+	{
+		instr = instr->prev;
+	}
+	if( instr && instr->op == asBC_CALLSYS )
+	{
+		instr->copyType = type;
+	}
+}
+
+// Call() follows the call with a JitEntry, so the call is the last
+// instruction but one
+void asCByteCode::MarkLastCallReceiverIsThis()
+{
+	asCByteInstruction *instr = last;
+	if( instr && instr->op == asBC_JitEntry )
+	{
+		instr = instr->prev;
+	}
+	if( instr && (instr->op == asBC_CALL || instr->op == asBC_CALLINTF) )
+	{
+		instr->receiverIsThis = true;
+	}
+}
+
 void asCByteCode::ExtractTryCatchInfo(asCScriptFunction *outFunc)
 {
 	asASSERT(outFunc->scriptData);
@@ -3035,6 +3083,8 @@ asCByteInstruction::asCByteInstruction()
 	size          = 0;
 	stackInc      = 0;
 	funcdefTarget = 0;
+	receiverIsThis = false;
+	copyType      = 0;
 	marked        = false;
 	stackSize     = 0;
 }

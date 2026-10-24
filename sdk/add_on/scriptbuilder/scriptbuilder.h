@@ -63,8 +63,14 @@ public:
 	// mutates engine, calls preprocess if it wasn't called by caller 
 	int BuildModule();
 
+	// While building, swaps the ENGINE's message callback for one that translates
+	// spliced sections and forwards here: a host whose other threads compile or log
+	// concurrently should capture messages itself and use TranslateMessage instead.
 	void SetMessageCallback(MSGCALLBACK_t callback, void *param);
 	void ClearMessageCallback();
+	// Maps a message about a spliced section back to its original section and row.
+	// sectionStorage keeps the translated section name alive while msg points at it.
+	void TranslateMessage(asSMessageInfo &msg, std::string &sectionStorage) const;
 
 	Visibility GetVisibility(asITypeInfo *type) const;
 	Visibility GetVisibility(asIScriptFunction *func) const;

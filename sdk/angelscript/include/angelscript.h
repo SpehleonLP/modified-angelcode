@@ -877,6 +877,11 @@ public:
 	virtual int         CompileFunction(const char *sectionName, const char *code, int lineOffset, asDWORD compileFlags, asIScriptFunction **outFunc) = 0;
 	virtual int         CompileGlobalVar(const char *sectionName, const char *code, int lineOffset) = 0;
 	virtual int         CompileMethod(asITypeInfo *objectType, const char *sectionName, const char *code, int lineOffset, asIScriptFunction **outFunc) = 0;
+	// As above, but names resolve under accessMask instead of the module's mask, which
+	// is neither read nor changed: a compile needs no SetAccessMask round trip, which
+	// would race every other compile in the module.
+	virtual int         CompileFunction(const char *sectionName, const char *code, int lineOffset, asDWORD compileFlags, asDWORD accessMask, asIScriptFunction **outFunc) = 0;
+	virtual int         CompileMethod(asITypeInfo *objectType, const char *sectionName, const char *code, int lineOffset, asDWORD accessMask, asIScriptFunction **outFunc) = 0;
 	virtual asDWORD     SetAccessMask(asDWORD accessMask) = 0;
 	virtual int         SetDefaultNamespace(const char *nameSpace) = 0;
 	virtual const char *GetDefaultNamespace() const = 0;
@@ -1213,6 +1218,28 @@ public:
 	virtual bool             GetTransitiveCallsDelegate() const = 0;
 	virtual asEHalts         GetLocalHalts() const = 0;
 	virtual asEHalts         GetTransitiveHalts() const = 0;
+	virtual bool             GetLocalLoops() const = 0;
+	virtual bool             GetTransitiveLoops() const = 0;
+	virtual int              SetLoops(bool loops) = 0;
+	// The script-class properties this function reads, transitively, without
+	// duplicates. viaThis is true when the read's object is this function's own
+	// `this`; a callee's `this` reads keep it only when the call's receiver
+	// was `this`. A write is reported as a read. Not references: the types
+	// are valid while the module that analysed this function lives.
+	// The report, its count and its indices hold until that module re-runs its
+	// analysis (it is rebuilt, loads bytecode, binds or unbinds an import, or
+	// adds a compiled function), which overwrites it in place; do not read it
+	// concurrently with any of those.
+	virtual asUINT           GetPropertyReadCount() const = 0;
+	virtual int              GetPropertyRead(asUINT index, asITypeInfo **objectType, asUINT *propertyIndex, bool *viaThis) const = 0;
+	// False when a call the analysis cannot follow (a delegate, an import, an
+	// open dispatch, an unmapped target) is reachable, here or in a callee:
+	// that call may read anything, so the report is a lower bound only.
+	// Natives are taken to read no script properties. Implicit behaviour calls
+	// are not followed either: a handle store or a release that drops an
+	// object's last reference runs its script destructor, whose reads are
+	// neither reported nor counted against completeness.
+	virtual bool             GetPropertyReadsComplete() const = 0;
 	virtual int              SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write) = 0;
 	virtual void             GetMemoryAccess(asEMemoryAccess *read, asEMemoryAccess *write) const = 0;
 	virtual void            *GetAuxiliary() const = 0;

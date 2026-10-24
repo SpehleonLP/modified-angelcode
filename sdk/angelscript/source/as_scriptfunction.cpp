@@ -49,6 +49,7 @@
 #include "as_scriptcode.h"
 
 #include <cstdlib> // qsort
+#include <cstring> // strcmp
 
 BEGIN_AS_NAMESPACE
 
@@ -390,12 +391,19 @@ asCScriptFunction::asCScriptFunction(asCScriptEngine *engine, asCModule *mod, as
 	transitiveCallsDelegate = false;
 	// Registered natives are trusted to halt (the application vouches for
 	// them). Everything else rests at UNKNOWN until the compiler/module
-	// analysis writes a real verdict — a function whose analysis never runs
-	// (e.g. a CompileFunction product not added to the module, or a
-	// CompileMethod product, neither of which the transitive pass visits)
-	// must not claim YES.
+	// analysis writes a real verdict, so a function whose analysis never
+	// runs must not claim YES.
 	localHalts             = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
 	transitiveHalts        = (funcType == asFUNC_SYSTEM) ? asHALTS_YES : asHALTS_UNKNOWN;
+	// A native cannot be analysed: it does not loop until SetLoops says so.
+	// Every other kind loops until the compiler or the module pass proves
+	// otherwise, so a kind the analysis never visits (an import, a delegate,
+	// a funcdef signature) cannot read as "does not loop".
+	localLoops             = (funcType != asFUNC_SYSTEM);
+	transitiveLoops        = (funcType != asFUNC_SYSTEM);
+	// Same trust as halting: a native reads no script property, and anything
+	// else is incomplete until the analysis says otherwise
+	propertyReadsComplete  = (funcType == asFUNC_SYSTEM);
 	// Zero would be None, the most permissive scope; an undeclared function must not look safe
 	memoryAccess           = asPackMemoryAccess(asMA_UNSET, asMA_UNSET);
 	nameSpace              = engine->nameSpaces[0];
@@ -1586,6 +1594,103 @@ bool    asCScriptFunction::GetLocalCallsDelegate() const { return localCallsDele
 bool    asCScriptFunction::GetTransitiveCallsDelegate() const { return transitiveCallsDelegate; }
 asEHalts asCScriptFunction::GetLocalHalts() const { return (asEHalts)localHalts; }
 asEHalts asCScriptFunction::GetTransitiveHalts() const { return (asEHalts)transitiveHalts; }
+bool    asCScriptFunction::GetLocalLoops() const { return localLoops; }
+bool    asCScriptFunction::GetTransitiveLoops() const { return transitiveLoops; }
+// interface
+asUINT asCScriptFunction::GetPropertyReadCount() const
+{
+	return propertyReads.GetLength();
+}
+
+// interface
+bool asCScriptFunction::GetPropertyReadsComplete() const
+{
+	return propertyReadsComplete;
+}
+
+// interface
+int asCScriptFunction::GetPropertyRead(asUINT index, asITypeInfo **outObjectType, asUINT *outPropertyIndex, bool *outViaThis) const
+{
+	if( index >= propertyReads.GetLength() )
+	{
+		return asINVALID_ARG;
+	}
+	const asSPropertyRead &read = propertyReads[index];
+	if( outObjectType )
+	{
+		*outObjectType = read.objectType;
+	}
+	if( outPropertyIndex )
+	{
+		*outPropertyIndex = read.propertyIndex;
+	}
+	if( outViaThis )
+	{
+		*outViaThis = read.viaThis;
+	}
+	return asSUCCESS;
+}
+
+bool asAddPropertyRead(asCArray<asSPropertyRead> &reads, const asSPropertyRead &read)
+{
+	for( asUINT n = 0; n < reads.GetLength(); n++ )
+	{
+		if( reads[n].objectType == read.objectType &&
+		    reads[n].propertyIndex == read.propertyIndex &&
+		    reads[n].viaThis == read.viaThis )
+		{
+			return false;
+		}
+	}
+	reads.PushLast(read);
+	return true;
+}
+
+static int ComparePropertyReads(const void *a, const void *b)
+{
+	const asSPropertyRead *x = (const asSPropertyRead*)a;
+	const asSPropertyRead *y = (const asSPropertyRead*)b;
+	if( x->objectType != y->objectType )
+	{
+		int c = strcmp(x->objectType->nameSpace->name.AddressOf(), y->objectType->nameSpace->name.AddressOf());
+		if( c == 0 )
+		{
+			c = strcmp(x->objectType->name.AddressOf(), y->objectType->name.AddressOf());
+		}
+		if( c != 0 )
+		{
+			return c;
+		}
+		// Same name in one report means two modules' types; any fixed order will do
+		return x->objectType < y->objectType ? -1 : 1;
+	}
+	if( x->propertyIndex != y->propertyIndex )
+	{
+		return x->propertyIndex < y->propertyIndex ? -1 : 1;
+	}
+	return int(x->viaThis) - int(y->viaThis);
+}
+
+void asSortPropertyReads(asCArray<asSPropertyRead> &reads)
+{
+	if( reads.GetLength() > 1 )
+	{
+		qsort(reads.AddressOf(), reads.GetLength(), sizeof(asSPropertyRead), ComparePropertyReads);
+	}
+}
+
+// interface
+int asCScriptFunction::SetLoops(bool loops)
+{
+	// Script functions get the fact from the analysis
+	if( funcType != asFUNC_SYSTEM )
+	{
+		return asNOT_SUPPORTED;
+	}
+	localLoops = loops;
+	transitiveLoops = loops;
+	return asSUCCESS;
+}
 
 // interface
 int asCScriptFunction::SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write)

@@ -49,8 +49,11 @@
 // the format incompatible with stock AngelScript long before this header
 // existed; version 1 is the first self-identifying format. Version 2 adds
 // a memory-access byte to each script function (after its halting and
-// access-mask metadata) and to each virtual or interface function.
-#define AS_BYTECODE_FORMAT_VERSION 2
+// access-mask metadata) and to each virtual or interface function. Version
+// 3 adds the loops facts to the metadata flags byte; an older blob would
+// read them as "does not loop". Version 3 also carries each script function's
+// property-read reports, their completeness flag and its call receivers.
+#define AS_BYTECODE_FORMAT_VERSION 3
 
 BEGIN_AS_NAMESPACE
 
@@ -83,6 +86,8 @@ protected:
 	asCTypeInfo       *ReadTypeInfo();
 	void               ReadTypeDeclaration(asCTypeInfo *ot, int phase, bool *isExternal = 0);
 	void               ReadByteCode(asCScriptFunction *func);
+	void               ReadPropertyReads(asCArray<asSPropertyRead> &reads);
+	bool               ArePropertyReadsValid(const asCArray<asSPropertyRead> &reads);
 	asWORD             ReadEncodedUInt16();
 	asUINT             ReadEncodedUInt();
 	int                ReadEncodedInt();
@@ -195,6 +200,7 @@ protected:
 	void WriteTypeInfo(asCTypeInfo *ot);
 	void WriteTypeDeclaration(asCTypeInfo *ot, int phase);
 	void WriteByteCode(asCScriptFunction *func);
+	void WritePropertyReads(const asCArray<asSPropertyRead> &reads);
 	void WriteEncodedInt64(asINT64 i);
 
 	// Helper functions for storing variable data

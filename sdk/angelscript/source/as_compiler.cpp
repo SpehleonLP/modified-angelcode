@@ -949,6 +949,8 @@ void asCCompiler::FinalizeFunction()
 	// ordinals — deleted/reordered sites from optimization must not desync
 	// this from BuildCalleeList's later per-site walk.
 	byteCode.ExtractFuncdefCallTargets(outFunc);
+	byteCode.ExtractCallReceivers(outFunc);
+	asSortPropertyReads(outFunc->localPropertyReads);
 
 	// Copy byte code to the function
 	asASSERT( outFunc->scriptData->byteCode.GetLength() == 0 );
@@ -1199,6 +1201,11 @@ void asCCompiler::FinalizeFunction()
 
 		if (outFunc->localCallsDelegate && outFunc->localHalts == asHALTS_YES)
 			outFunc->localHalts = asHALTS_UNKNOWN;
+
+		// Unlike halting, a bounded loop still loops, so this is just the back
+		// edges the pruning above kept. Bytecode the decoder cannot read may
+		// hide a back edge, so it counts as looping.
+		outFunc->localLoops = !decodeOk || backEdgeFrom.GetLength() > 0;
 	}
 
 	outFunc->scriptData->stackNeeded = byteCode.largestStackUsed + outFunc->scriptData->variableSpace;
@@ -1357,6 +1364,9 @@ void asCCompiler::CompileMemberInitializationCopy(asCByteCode* bc)
 			ctx.bc.InstrSHORT_DW(asBC_ADDSi, (short)prop->byteOffset, engine->GetTypeIdFromDataType(asCDataType::CreateType(outFunc->objectType, false)));
 			if (prop->type.IsReference())
 				ctx.bc.Instr(asBC_RDSPtr);
+
+			// A read of the copied object's property, which is not `this`
+			RecordPropertyRead(outFunc->objectType, prop, false);
 
 			// Reference to primitive must be stored in the temp register
 			if (prop->type.IsPrimitive())
@@ -7601,6 +7611,9 @@ int asCCompiler::PerformAssignment(asCExprValue *lvalue, asCExprValue *rvalue, a
 			// TODO: Avoid this special case by implementing a copystub for
 			//       script classes that uses the default copy operator
 			bc->Call(asBC_CALLSYS, beh->copy, 2*AS_PTR_SIZE);
+			// The copy reads the source's properties, which the module pass
+			// derives from this type and the classes that derive from it
+			bc->MarkLastCallCopyType(CastToObjectType(lvalue->dataType.GetTypeInfo()));
 			bc->Instr(asBC_PshRPtr);
 		}
 		else
@@ -11455,7 +11468,7 @@ asCCompiler::SYMBOLTYPE asCCompiler::SymbolLookupMember(const asCString &name, a
 		asCScriptFunction *f = engine->scriptFunctions[ot->methods[n]];
 		if (f->name == name)
 		{
-			if((builder->module->m_accessMask & f->accessMask) == false)
+			if((builder->m_accessMask & f->accessMask) == false)
 				candidate = f;
 			else
 			{
@@ -11488,7 +11501,7 @@ asCCompiler::SYMBOLTYPE asCCompiler::SymbolLookupMember(const asCString &name, a
 		asCString msg;
 		asCString smbl;
 		
-		msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, name.AddressOf(), candidate->accessMask, builder->module ? builder->module->m_accessMask : 0);
+		msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, name.AddressOf(), candidate->accessMask, builder->m_accessMask);
 		builder->WriteError(script->name, msg, 0, 0);
 	}
 
@@ -11911,7 +11924,7 @@ int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &s
 				smbl = scope + "::";
 			smbl += name;
 			if (missedAccessMask)
-				msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->module ? builder->module->m_accessMask : 0);
+				msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->m_accessMask);
 			else
 				msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
 			Error(msg, errNode);
@@ -12027,6 +12040,9 @@ int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &s
 			}
 			if (r < 0) return -1;
 
+			// Without objType the accessor is called on the implicit `this`
+			access.property_this = objType == 0;
+
 			if (access.property_get == 0 && access.property_set == 0)
 			{
 				// Even though the symbol was identified in SymbolLookup, it doesn't match the arguments
@@ -12068,6 +12084,10 @@ int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &s
 				dt = asCDataType::CreateType(outFunc->objectType, false);
 			asCObjectProperty *prop = builder->GetObjectProperty(dt, name.AddressOf());
 			asASSERT(prop);
+
+			// Without objType the object is the implicit `this`; with it, the
+			// object is an expression this function cannot see
+			RecordPropertyRead(CastToObjectType(dt.GetTypeInfo()), prop, objType == 0);
 
 			// Count the access, so it can be determined if the access happens before initialization in constructors
 			if (m_isConstructor)
@@ -12180,7 +12200,7 @@ int asCCompiler::CompileVariableAccess(const asCString &name, const asCString &s
 			{
 				asCScriptFunction *f = engine->scriptFunctions[ot->methods[n]];
 				if (f->name == name &&
-					(builder->module->m_accessMask & f->accessMask))
+					(builder->m_accessMask & f->accessMask))
 				{
 					func = f;
 					break;
@@ -13676,7 +13696,7 @@ int asCCompiler::CompileFunctionCall(asCScriptNode *node, asCExprContext *ctx, a
 			smbl = scope + "::";
 		smbl += name;
 		if (missedAccessMask)
-			msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->module ? builder->module->m_accessMask : 0);
+			msg.Format(TXT_NO_MATCHING_SYMBOL_s_MASK_x_vs_x, smbl.AddressOf(), missedAccessMask, builder->m_accessMask);
 		else
 			msg.Format(TXT_NO_MATCHING_SYMBOL_s, smbl.AddressOf());
 		Error(msg, node);
@@ -14730,6 +14750,8 @@ int asCCompiler::FindPropertyAccessor(const asCString &name, asCExprContext *ctx
 
 		// Just change the type, the context must still maintain information
 		// about previous variable offset and the indicator of temporary variable.
+		// The receiver kind goes with the type the next lines replace
+		ctx->property_this = IsThisReceiver(ctx->type);
 		int offset = ctx->type.stackOffset;
 		bool isTemp = ctx->type.isTemporary;
 		ctx->type.Set(dt);
@@ -14814,6 +14836,7 @@ int asCCompiler::ProcessPropertySetAccessor(asCExprContext *ctx, asCExprContext 
 
 	ctx->property_get = 0;
 	ctx->property_set = 0;
+	ctx->property_this = false;
 	if( ctx->property_arg )
 	{
 		asDELETE(ctx->property_arg, asCExprContext);
@@ -14941,6 +14964,7 @@ int asCCompiler::ProcessPropertyGetSetAccessor(asCExprContext *ctx, asCExprConte
 	llctx.property_const  = lctx->property_const;
 	llctx.property_get    = lctx->property_get;
 	llctx.property_handle = lctx->property_handle;
+	llctx.property_this   = lctx->property_this;
 	llctx.property_ref    = lctx->property_ref;
 	llctx.property_set    = lctx->property_set;
 
@@ -15028,6 +15052,7 @@ int asCCompiler::ProcessPropertyGetAccessor(asCExprContext *ctx, asCScriptNode *
 	// Clear the property get/set ids
 	ctx->property_get = 0;
 	ctx->property_set = 0;
+	ctx->property_this = false;
 	if( ctx->property_arg )
 	{
 		asDELETE(ctx->property_arg, asCExprContext);
@@ -15205,6 +15230,9 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 
 			if( ctx->type.dataType.IsObject() )
 			{
+				// Read before the handle conversion below replaces the value
+				bool objectIsThis = IsThisReceiver(ctx->type);
+
 				// We need to look for get/set property accessors.
 				// If found, the context stores information on the get/set accessors
 				// until it is known which is to be used.
@@ -15254,6 +15282,8 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 				asCObjectProperty *prop = builder->GetObjectProperty(ctx->type.dataType, name.AddressOf(), &maskedPropAccessMask);
 				if( prop )
 				{
+					RecordPropertyRead(CastToObjectType(ctx->type.dataType.GetTypeInfo()), prop, objectIsThis);
+
 					// Is the property access allowed?
 					if( (prop->isPrivate || prop->isProtected) && (!outFunc || outFunc->objectType != ctx->type.dataType.GetTypeInfo()) )
 					{
@@ -15358,7 +15388,7 @@ int asCCompiler::CompileExpressionPostOp(asCScriptNode *node, asCExprContext *ct
 					{
 						asCString str;
 						if( maskedPropAccessMask )
-							str.Format(TXT_s_NOT_MEMBER_OF_s_MASK_x_vs_x, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf(), maskedPropAccessMask, builder->module ? builder->module->m_accessMask : 0);
+							str.Format(TXT_s_NOT_MEMBER_OF_s_MASK_x_vs_x, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf(), maskedPropAccessMask, builder->m_accessMask);
 						else
 							str.Format(TXT_s_NOT_MEMBER_OF_s, name.AddressOf(), ctx->type.dataType.Format(outFunc->nameSpace).AddressOf());
 						Error(str, node);
@@ -16113,7 +16143,7 @@ int asCCompiler::CompileOverloadedDualOperator2(asCScriptNode *node, const char 
 				(!isConst || func->IsReadOnly()) )
 			{
 				// Make sure the method is accessible by the module
-				if( builder->module->m_accessMask & func->accessMask )
+				if( builder->m_accessMask & func->accessMask )
 				{
 					// Skip script-defined-class methods (owning type is asOBJ_SCRIPT_OBJECT).
 					// Their accessMask is module-default 0xFFFFFFFF visibility noise; real usage
@@ -16305,6 +16335,14 @@ int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType
 	// whole object expression, so dropping it drops nothing else
 	void *objectLiteral = objectType ? StringLiteralOf(engine, ctx) : 0;
 
+	// The object expression is still ctx's value here; the call's
+	// receiver kind is read before anything replaces it. A pending property
+	// accessor's object was replaced by the property's type, so its kind
+	// was kept beside it.
+	bool isAccessorCall = funcId != 0 && (funcId == ctx->property_get || funcId == ctx->property_set);
+	bool receiverIsThis = objectType != 0 &&
+		(IsThisReceiver(ctx->type) || (isAccessorCall && ctx->property_this));
+
 	if( objectType )
 		Dereference(ctx, true);
 
@@ -16421,7 +16459,7 @@ int asCCompiler::MakeFunctionCall(asCExprContext *ctx, int funcId, asCObjectType
 
 	MoveArgsToStack(funcId, &ctx->bc, args, objectType ? true : false);
 
-	PerformFunctionCall(funcId, ctx, false, &args, 0, useVariable, stackOffset, funcPtrVar);
+	PerformFunctionCall(funcId, ctx, false, &args, 0, useVariable, stackOffset, funcPtrVar, receiverIsThis);
 	
 	return 0;
 }
@@ -18614,7 +18652,37 @@ void asCCompiler::CompileOperatorOnHandles(asCScriptNode *node, asCExprContext *
 }
 
 
-void asCCompiler::PerformFunctionCall(int funcId, asCExprContext *ctx, bool isConstructor, asCArray<asCExprContext*> *args, asCObjectType *objType, bool useVariable, int varOffset, int funcPtrVar)
+bool asCCompiler::IsThisReceiver(const asCExprValue &value) const
+{
+	// The type is not compared: a call to an inherited method or accessor
+	// retypes `this` as the base class it is declared in
+	return outFunc && outFunc->objectType &&
+	       value.isVariable && !value.isTemporary && value.stackOffset == 0;
+}
+
+void asCCompiler::RecordPropertyRead(asCObjectType *objectType, asCObjectProperty *prop, bool viaThis)
+{
+	// Only script classes: a registered type's properties are host memory,
+	// which the host's own declarations already describe
+	if( outFunc == 0 || objectType == 0 || prop == 0 || !(objectType->flags & asOBJ_SCRIPT_OBJECT) )
+	{
+		return;
+	}
+	for( asUINT n = 0; n < objectType->properties.GetLength(); n++ )
+	{
+		if( objectType->properties[n] == prop )
+		{
+			asSPropertyRead read;
+			read.objectType = objectType;
+			read.propertyIndex = n;
+			read.viaThis = viaThis;
+			asAddPropertyRead(outFunc->localPropertyReads, read);
+			return;
+		}
+	}
+}
+
+void asCCompiler::PerformFunctionCall(int funcId, asCExprContext *ctx, bool isConstructor, asCArray<asCExprContext*> *args, asCObjectType *objType, bool useVariable, int varOffset, int funcPtrVar, bool receiverIsThis)
 {
 	asCScriptFunction *descr = builder->GetFunctionDescription(funcId);
 
@@ -18792,9 +18860,21 @@ void asCCompiler::PerformFunctionCall(int funcId, asCExprContext *ctx, bool isCo
 			ctx->bc.Call(asBC_CALLBND , descr->id, argSize);
 		// TODO: Maybe we need two different byte codes
 		else if( descr->funcType == asFUNC_INTERFACE || descr->funcType == asFUNC_VIRTUAL )
+		{
 			ctx->bc.Call(asBC_CALLINTF, descr->id, argSize);
+			if( receiverIsThis )
+			{
+				ctx->bc.MarkLastCallReceiverIsThis();
+			}
+		}
 		else if( descr->funcType == asFUNC_SCRIPT )
+		{
 			ctx->bc.Call(asBC_CALL    , descr->id, argSize);
+			if( receiverIsThis )
+			{
+				ctx->bc.MarkLastCallReceiverIsThis();
+			}
+		}
 		else if( descr->funcType == asFUNC_SYSTEM )
 		{
 			// Check if we can use the faster asBC_Thiscall1 instruction, i.e. one of
@@ -19355,6 +19435,7 @@ void asCExprContext::Clear()
 	property_set = 0;
 	property_const = false;
 	property_handle = false;
+	property_this = false;
 	property_ref = false;
 	methodName = "";
 	enumValue = "";
@@ -19444,6 +19525,7 @@ void asCExprContext::Copy(asCExprContext *other)
 	property_set        = other->property_set;
 	property_const      = other->property_const;
 	property_handle     = other->property_handle;
+	property_this       = other->property_this;
 	property_ref        = other->property_ref;
 	property_arg        = other->property_arg;
 	exprNode            = other->exprNode;

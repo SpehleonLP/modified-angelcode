@@ -54,6 +54,7 @@ BEGIN_AS_NAMESPACE
 
 class asCScriptEngine;
 class asCScriptFunction;
+class asCObjectType;
 class asCByteInstruction;
 
 class asCByteCode
@@ -77,6 +78,9 @@ public:
 	// null) into the function's side table, in final bytecode order. See
 	// definition for the ordering contract.
 	void ExtractFuncdefCallTargets(asCScriptFunction *outFunc);
+	void ExtractCallReceivers(asCScriptFunction *outFunc);
+	void MarkLastCallReceiverIsThis();
+	void MarkLastCallCopyType(asCObjectType *type);
 	int  ResolveJumpAddresses();
 	int  FindLabel(int label, asCByteInstruction *from, asCByteInstruction **dest, int *positionDelta);
 
@@ -192,11 +196,19 @@ public:
 	asCByteInstruction *next;
 	asCByteInstruction *prev;
 
-	asEBCInstr op;
 	asQWORD arg;
 	short wArg[3];
+
+	// Testing
+	bool marked;
+	// For asBC_CALL and asBC_CALLINTF only: the call's receiver is the
+	// compiled method's own `this`
+	bool receiverIsThis;
+
+	asEBCInstr op;
 	int size;
 	int stackInc;
+	int  stackSize;
 
 	// For asBC_CallPtr only: the statically-known callee (asCScriptFunction*)
 	// if the compiler proved the value provenance, else 0 (unknown target).
@@ -205,9 +217,9 @@ public:
 	// initializer.
 	void *funcdefTarget;
 
-	// Testing
-	bool marked;
-	int  stackSize;
+	// For an asBC_CALLSYS to the script classes' default copy behaviour only:
+	// the static type of the object assigned to, or 0 when unknown
+	void *copyType;
 };
 
 END_AS_NAMESPACE

@@ -59,6 +59,12 @@ const int FUNC_IMPORTED = 0x40000000;
 // metadata was final before any other module could reference it.
 const asUINT asMODULE_SITE_DIVERGES = 0xFFFFFFFF;
 
+// A call site's receiver, for the property-read fold: the caller's own
+// `this`, or anything else (another object, a constructed one, none, or a
+// site the compiler did not mark)
+const asBYTE asRECEIVER_THIS  = 1;
+const asBYTE asRECEIVER_OTHER = 2;
+
 class asCScriptEngine;
 class asCCompiler;
 class asCBuilder;
@@ -115,6 +121,8 @@ public:
 	virtual int         CompileFunction(const char *sectionName, const char *code, int lineOffset, asDWORD reserved, asIScriptFunction **outFunc);
 	virtual int         CompileGlobalVar(const char *sectionName, const char *code, int lineOffset);
 	virtual int         CompileMethod(asITypeInfo *objectType, const char *sectionName, const char *code, int lineOffset, asIScriptFunction **outFunc);
+	virtual int         CompileFunction(const char *sectionName, const char *code, int lineOffset, asDWORD compileFlags, asDWORD accessMask, asIScriptFunction **outFunc);
+	virtual int         CompileMethod(asITypeInfo *objectType, const char *sectionName, const char *code, int lineOffset, asDWORD accessMask, asIScriptFunction **outFunc);
 	virtual asDWORD     SetAccessMask(asDWORD accessMask);
 	virtual int         SetDefaultNamespace(const char *nameSpace);
 	virtual const char *GetDefaultNamespace() const;
@@ -203,9 +211,15 @@ public:
 	// time. In particular it must never consume the per-function inputs it
 	// reads (asCScriptFunction::funcdefCallTargets).
 	void ComputeTransitiveFunctionMetadata();
-	// A CompileFunction product that was not added to the module: nothing
-	// calls it, so one memory-access scan against the stored results is final.
-	void ComputeMemoryAccessOfDetachedFunction(asCScriptFunction *func);
+	// A CompileFunction or CompileMethod product that was not added to the
+	// module: nothing calls it, so one fold and one memory-access scan against
+	// the stored results are final.
+	void ComputeDetachedFunctionMetadata(asCScriptFunction *func);
+	// The transitive fold for a function nothing calls (an init function or a
+	// detached product), against this module's settled results.
+	void FoldSourceFunctionMetadata(asCScriptFunction *func, const asCMap<int, asUINT> &funcIdToIndex);
+	// Maps the id of every m_scriptFunctions entry with a body to its index.
+	void BuildFuncIdToIndex(asCMap<int, asUINT> &outFuncIdToIndex) const;
 	// Every function a CALLINTF on `called` can dispatch to: the one dispatch
 	// walk, shared by BuildCalleeList and the memory-access scanner. Returns
 	// false when the set is open (a shared type, or a vtable that does not
@@ -222,7 +236,8 @@ public:
 	// Caller must dedup outCallees if desired. outExternalCallees receives
 	// call targets that live outside this module's function map but whose
 	// metadata is nevertheless final and foldable as a constant: shared
-	// script functions reached by asBC_CALL/asBC_ALLOC, and, at an
+	// script functions reached by asBC_CALL/asBC_ALLOC, natives reached by
+	// asBC_CALLSYS/asBC_Thiscall1, and, at an
 	// asBC_CallPtr site with a statically-known target, that target when it
 	// is a system function or a shared script function. The caller folds it
 	// like a resolved edge; it is not deduped (the fold is a join of
@@ -237,13 +252,42 @@ public:
 	// that never returns is on every path to a RET. Only single-target direct
 	// calls appear; virtual dispatch, imports, delegates and unresolved sites
 	// are deliberately absent, so they are always treated as returning.
+	//
+	// outCalleeReceivers and outExternalReceivers run parallel to outCallees
+	// and outExternalCallees: the asRECEIVER_* bits of every site that
+	// reaches that callee, for the property-read fold. Deduplicating
+	// outCallees merges the bits.
+	//
+	// outCopyReads receives what the script classes' native default copy
+	// reads at each of func's sites, and outReadsIncomplete is set when a
+	// site's reads cannot be derived; a user-written opAssign that copy runs
+	// is appended as a callee instead. See AddDefaultCopyEffects.
 	void BuildCalleeList(asCScriptFunction *func,
 	                     const asCMap<int, asUINT> &funcIdToIndex,
 	                     asCArray<asUINT> &outCallees,
+	                     asCArray<asBYTE> &outCalleeReceivers,
 	                     asCArray<asCScriptFunction*> &outExternalCallees,
+	                     asCArray<asBYTE> &outExternalReceivers,
 	                     bool &outUnresolved,
 	                     asCArray<asUINT> &outDirectSiteAddr,
-	                     asCArray<asUINT> &outDirectSiteIndex);
+	                     asCArray<asUINT> &outDirectSiteIndex,
+	                     asCArray<asSPropertyRead> &outCopyReads,
+	                     bool &outReadsIncomplete);
+	// The native default copy (asCScriptObject::CopyFromAs) assigning to an
+	// object of class `type`: it copies every property of the runtime class,
+	// recursing into value members, and runs a user-written opAssign where
+	// the class has one. With `staticType` the runtime class is `type` or any
+	// class deriving from it; a shared type can gain those in other modules,
+	// so it is incomplete.
+	void AddDefaultCopyEffects(asCObjectType *type, bool staticType,
+	                           const asCMap<int, asUINT> &funcIdToIndex,
+	                           asCArray<asUINT> &outCallees,
+	                           asCArray<asBYTE> &outCalleeReceivers,
+	                           asCArray<asCScriptFunction*> &outExternalCallees,
+	                           asCArray<asBYTE> &outExternalReceivers,
+	                           asCArray<asSPropertyRead> &outCopyReads,
+	                           asCArray<asCObjectType*> &visited,
+	                           bool &outReadsIncomplete);
 	int  AddScriptFunction(int sectionIdx, int declaredAt, int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asCString> &paramNames, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, bool isInterface, asCObjectType *objType = 0, bool isGlobalFunction = false, asSFunctionTraits funcTraits = asSFunctionTraits(), asSNameSpace *ns = 0);
 	int  AddScriptFunction(asCScriptFunction *func);
 	int  AddImportedFunction(int id, const asCString &name, const asCDataType &returnType, const asCArray<asCDataType> &params, const asCArray<asETypeModifiers> &inOutFlags, const asCArray<asCString *> &defaultArgs, asSFunctionTraits funcTraits, asSNameSpace *ns, const asCString &moduleName);

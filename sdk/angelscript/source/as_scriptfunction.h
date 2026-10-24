@@ -55,7 +55,23 @@ class asCConfigGroup;
 class asCGlobalProperty;
 class asCScriptNode;
 class asCFuncdefType;
+class asCObjectType;
 struct asSNameSpace;
+
+// One entry of a function's property-read report: a script-class property,
+// and whether the object it was read from is the function's own `this`
+struct asSPropertyRead
+{
+	asCObjectType *objectType;
+	asUINT         propertyIndex;
+	bool           viaThis;
+};
+
+// Adds `read` unless an equal entry is present. Reports whether it was added.
+bool asAddPropertyRead(asCArray<asSPropertyRead> &reads, const asSPropertyRead &read);
+// Puts a report in its canonical order (type name, property, viaThis), so
+// that saved bytecode does not depend on where the types were allocated
+void asSortPropertyReads(asCArray<asSPropertyRead> &reads);
 
 struct asSScriptVariable
 {
@@ -196,6 +212,12 @@ public:
 	bool                 GetTransitiveCallsDelegate() const override;
 	asEHalts             GetLocalHalts() const override;
 	asEHalts             GetTransitiveHalts() const override;
+	bool                 GetLocalLoops() const override;
+	bool                 GetTransitiveLoops() const override;
+	int                  SetLoops(bool loops) override;
+	asUINT               GetPropertyReadCount() const override;
+	int                  GetPropertyRead(asUINT index, asITypeInfo **objectType, asUINT *propertyIndex, bool *viaThis) const override;
+	bool                 GetPropertyReadsComplete() const override;
 	int                  SetMemoryAccess(asEMemoryAccess read, asEMemoryAccess write);
 	void                 GetMemoryAccess(asEMemoryAccess *read, asEMemoryAccess *write) const;
 	void                *GetAuxiliary() const;
@@ -370,6 +392,16 @@ public:
 	bool                         transitiveCallsDelegate;
 	int8_t                       localHalts;      // asEHalts
 	int8_t                       transitiveHalts; // asEHalts
+	bool                         localLoops;
+	bool                         transitiveLoops;
+	// The property-read report. The local one is what this function's own
+	// bytecode reads, written by the compiler; the transitive one folds in
+	// every modelled callee's, is overwritten whenever the module pass
+	// recomputes it, and is what the interface returns. Raw type pointers:
+	// the analysing module holds every function whose bytecode names them.
+	asCArray<asSPropertyRead>    localPropertyReads;
+	asCArray<asSPropertyRead>    propertyReads;
+	bool                         propertyReadsComplete;
 
 	// Namespace will be null for funcdefs that are declared as child funcdefs
 	// of a class. In this case the namespace shall be taken from the parentClass
@@ -431,6 +463,22 @@ public:
 		// re-run there would read destroyed state, but because it would be
 		// pure waste while the module is being torn down.
 		asCArray<asCScriptFunction*>    funcdefCallTargets;
+
+		// Compile-time metadata: one entry per asBC_CALL and asBC_CALLINTF in
+		// final bytecode order, true when the call's receiver is this
+		// function's own `this`. The property-read fold keeps a callee's
+		// `this` reads as `this` reads only through such a site. Serialized,
+		// so a restored function folds as precisely as the compiled one; a
+		// missing or short table reads as "not `this`", which only costs
+		// precision.
+		asCArray<bool>                  callReceiverIsThis;
+
+		// Compile-time metadata: one entry per asBC_CALLSYS to the script
+		// classes' default copy behaviour, in final bytecode order: the
+		// static type of the object assigned to. That native copies every
+		// property of the runtime type, so the property-read fold reads them
+		// from here. Serialized; a missing entry makes the report incomplete.
+		asCArray<asCObjectType*>        defaultCopyTypes;
 
 		// The stack needed to execute the function
 		int                             stackNeeded;
