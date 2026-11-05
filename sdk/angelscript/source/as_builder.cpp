@@ -1359,7 +1359,9 @@ asCGlobalProperty *asCBuilder::GetGlobalProperty(const char *prop, asSNameSpace 
 		}
 		else
 #endif
-		if( isAppProp )
+		// Test the value: callers always pass the pointer, and a script global carries the
+		// default 0xFFFFFFFF mask, which is no access restriction and must not be accumulated.
+		if( isAppProp && *isAppProp )
 		{
 			// Don't return the property if the module doesn't have access to it
 			if( !(m_accessMask & globProp->accessMask) )
