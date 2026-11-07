@@ -1345,7 +1345,7 @@ bool asCParser::IdentifierIs(const sToken &t, const char *str)
 	return script->TokenEquals(t.pos, t.length, str);
 }
 
-// BNF:6: FUNCATTR      ::= ('override' | 'final' | 'explicit' | 'property' | 'delete')*
+// BNF:6: FUNCATTR      ::= ('override' | 'final' | 'explicit' | 'property' | 'delete' | 'nodiscard')*
 void asCParser::ParseMethodAttributes(asCScriptNode *funcNode)
 {
 	sToken t1;
@@ -1359,7 +1359,8 @@ void asCParser::ParseMethodAttributes(asCScriptNode *funcNode)
 			IdentifierIs(t1, OVERRIDE_TOKEN) || 
 			IdentifierIs(t1, EXPLICIT_TOKEN) ||
 			IdentifierIs(t1, PROPERTY_TOKEN) ||
-			IdentifierIs(t1, DELETE_TOKEN) )
+			IdentifierIs(t1, DELETE_TOKEN) ||
+			IdentifierIs(t1, NODISCARD_TOKEN) )
 			funcNode->AddChildLast(ParseIdentifier());
 		else
 			break;
@@ -3279,7 +3280,8 @@ bool asCParser::IsFuncDecl(bool isMethod)
 					!IdentifierIs(t1, OVERRIDE_TOKEN) &&
 					!IdentifierIs(t1, EXPLICIT_TOKEN) &&
 					!IdentifierIs(t1, PROPERTY_TOKEN) &&
-					!IdentifierIs(t1, DELETE_TOKEN) )
+					!IdentifierIs(t1, DELETE_TOKEN) &&
+					!IdentifierIs(t1, NODISCARD_TOKEN) )
 				{
 					RewindTo(&t1);
 					break;

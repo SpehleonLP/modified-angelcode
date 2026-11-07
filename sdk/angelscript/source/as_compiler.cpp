@@ -6717,6 +6717,53 @@ void asCCompiler::CompileContinueStatement(asCScriptNode *node, asCByteCode *bc)
 	bc->InstrINT(asBC_JMP, continueLabels[continueLabels.GetLength()-1]);
 }
 
+// The statement's value is the result of a call: optionally parenthesized, a bare call, a method
+// call, or a call through a funcdef/opCall, with no operator applied to it. Operators and
+// assignments consume the result, so only this shape discards it.
+static bool IsCallStatement(asCScriptNode *node)
+{
+	for( ;; )
+	{
+		// ASSIGN -> CONDITION -> EXPR -> EXPRTERM, each with a single child when no operator is present
+		const eScriptNode chain[] = { snAssignment, snCondition, snExpression };
+		for( asUINT n = 0; n < 3; n++ )
+		{
+			if( node == 0 || node->nodeType != chain[n] || node->firstChild == 0 || node->firstChild != node->lastChild )
+			{
+				return false;
+			}
+			node = node->firstChild;
+		}
+		if( node->nodeType != snExprTerm || node->firstChild == 0 || node->firstChild->nodeType != snExprValue )
+		{
+			return false;
+		}
+
+		asCScriptNode *last = node->lastChild;
+		if( last->nodeType == snExprPostOp )
+		{
+			if( last->tokenType == ttOpenParenthesis )
+			{
+				return true;
+			}
+			return last->tokenType == ttDot && last->firstChild && last->firstChild->nodeType == snFunctionCall;
+		}
+
+		asCScriptNode *value = last->firstChild;
+		if( value && value->nodeType == snFunctionCall )
+		{
+			return true;
+		}
+		// Parentheses are not an escape hatch: '(f());' discards f's result just the same
+		if( value && value->nodeType == snAssignment )
+		{
+			node = value;
+			continue;
+		}
+		return false;
+	}
+}
+
 void asCCompiler::CompileExpressionStatement(asCScriptNode *enode, asCByteCode *bc)
 {
 	if( enode->firstChild )
@@ -6724,6 +6771,13 @@ void asCCompiler::CompileExpressionStatement(asCScriptNode *enode, asCByteCode *
 		// Compile the expression
 		asCExprContext expr(engine);
 		CompileAssignment(enode->firstChild, &expr);
+
+		if( expr.nodiscardCall && IsCallStatement(enode->firstChild) )
+		{
+			asCString msg;
+			msg.Format(TXT_NODISCARD_RESULT_DISCARDED_s, expr.nodiscardCall->GetDeclarationStr().AddressOf());
+			Error(msg, enode);
+		}
 
 		// Must not have unused ambiguous names
 		if( expr.IsClassMethod() || expr.IsGlobalFunc() )
@@ -18686,6 +18740,9 @@ void asCCompiler::PerformFunctionCall(int funcId, asCExprContext *ctx, bool isCo
 {
 	asCScriptFunction *descr = builder->GetFunctionDescription(funcId);
 
+	// Overwritten on every call, so a nodiscard call nested in an argument does not mark the outer call's value
+	ctx->nodiscardCall = (!isConstructor && descr->IsNoDiscard()) ? descr : 0;
+
 	// A shared object may not call non-shared functions
 	if( outFunc->IsShared() && !descr->IsShared() )
 	{
@@ -19445,6 +19502,7 @@ void asCExprContext::Clear()
 	isAnonymousInitList = false;
 	origCode = 0;
 	knownFuncdefTarget = 0;
+	nodiscardCall = 0;
 
 	if (next)
 		asDELETE(next, asCExprContext);
@@ -19536,6 +19594,7 @@ void asCExprContext::Copy(asCExprContext *other)
 	isAnonymousInitList = other->isAnonymousInitList;
 	origCode            = other->origCode;
 	knownFuncdefTarget  = other->knownFuncdefTarget;
+	nodiscardCall       = other->nodiscardCall;
 
 	// Do not copy the origExpr member
 }

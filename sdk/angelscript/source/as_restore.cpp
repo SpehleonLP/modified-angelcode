@@ -1182,6 +1182,7 @@ void asCReader::ReadFunctionSignature(asCScriptFunction *func, asCObjectType **p
 		func->SetOverride((b & 16) ? true : false);
 		func->SetExplicit((b & 32) ? true : false);
 		func->SetProperty((b & 64) ? true : false);
+		func->SetNoDiscard((b & 128) ? true : false);
 	}
 
 	if (!func->objectType)
@@ -1311,6 +1312,10 @@ asCScriptFunction *asCReader::ReadFunction(bool &isNew, bool addToModule, bool a
 			ReadData(&bits, 1);
 			func->SetShared((bits & 1) ? true : false);
 			func->SetExplicit((bits & 32) ? true : false);
+			if (bits & 64)
+			{
+				func->SetNoDiscard(true);
+			}
 			func->dontCleanUpOnException = (bits & 2) ? true : false;
 			if ((bits & 4) && isExternal)
 				*isExternal = true;
@@ -4379,6 +4384,7 @@ void asCWriter::WriteFunctionSignature(asCScriptFunction *func)
 		b += func->IsOverride() ? 16 : 0;
 		b += func->IsExplicit() ? 32 : 0;
 		b += func->IsProperty() ? 64 : 0;
+		b += func->IsNoDiscard() ? 128 : 0;
 		WriteData(&b, 1);
 	}
 
@@ -4464,6 +4470,7 @@ void asCWriter::WriteFunction(asCScriptFunction* func)
 		if (func->scriptData->tryCatchInfo.GetLength())
 			bits += 16;
 		bits += func->IsExplicit() ? 32 : 0;
+		bits += func->IsNoDiscard() ? 64 : 0;
 		WriteData(&bits, 1);
 
 		// For external shared functions the rest is not needed

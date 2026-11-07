@@ -1996,6 +1996,12 @@ bool asCScriptFunction::IsVariadic() const
 	return traits.GetTrait(asTRAIT_VARIADIC);
 }
 
+// interface
+bool asCScriptFunction::IsNoDiscard() const
+{
+	return traits.GetTrait(asTRAIT_NODISCARD);
+}
+
 // internal
 bool asCScriptFunction::IsFactory() const
 {

@@ -1563,6 +1563,15 @@ int asCBuilder::ParseFunctionDeclaration(asCObjectType *objType, const char *dec
 			func->SetExplicit(true);
 		else if( source.TokenEquals(n->tokenPos, n->tokenLength, PROPERTY_TOKEN))
 			func->SetProperty(true);
+		else if( source.TokenEquals(n->tokenPos, n->tokenLength, NODISCARD_TOKEN))
+		{
+			// There is no result to keep, so the mark could never fire; refuse it rather than accept a no-op
+			if( func->returnType.GetTokenType() == ttVoid && !func->returnType.IsReference() )
+			{
+				return asINVALID_DECLARATION;
+			}
+			func->SetNoDiscard(true);
+		}
 		else
 			return asINVALID_DECLARATION;
 
@@ -5134,6 +5143,7 @@ void asCBuilder::GetParsedFunctionDetails(asCScriptNode *node, asCScriptCode *fi
 	funcTraits.SetTrait(asTRAIT_OVERRIDE, false);
 	funcTraits.SetTrait(asTRAIT_EXPLICIT, false);
 	funcTraits.SetTrait(asTRAIT_PROPERTY, false);
+	funcTraits.SetTrait(asTRAIT_NODISCARD, false);
 	
 	if( n->next->next )
 	{
@@ -5158,6 +5168,15 @@ void asCBuilder::GetParsedFunctionDetails(asCScriptNode *node, asCScriptCode *fi
 				funcTraits.SetTrait(asTRAIT_PROPERTY, true);
 			else if (file->TokenEquals(decorator->tokenPos, decorator->tokenLength, DELETE_TOKEN))
 				funcTraits.SetTrait(asTRAIT_DELETED, true);
+			else if (file->TokenEquals(decorator->tokenPos, decorator->tokenLength, NODISCARD_TOKEN))
+			{
+				// There is no result to keep, so the mark could never fire; refuse it rather than accept a no-op
+				if (returnType.GetTokenType() == ttVoid && !returnType.IsReference())
+				{
+					WriteError(TXT_NODISCARD_ON_VOID_FUNCTION, file, decorator);
+				}
+				funcTraits.SetTrait(asTRAIT_NODISCARD, true);
+			}
 			else
 			{
 				asCString msg(&file->code[decorator->tokenPos], decorator->tokenLength);

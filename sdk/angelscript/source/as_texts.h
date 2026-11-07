@@ -302,6 +302,8 @@
 
 #define TXT_UNEXPECTED_END_OF_FILE             "Unexpected end of file"
 #define TXT_UNEXPECTED_TOKEN_s                 "Unexpected token '%s'"
+#define TXT_NODISCARD_RESULT_DISCARDED_s       "Discarding the result of nodiscard function '%s'"
+#define TXT_NODISCARD_ON_VOID_FUNCTION         "A nodiscard function must return a value"
 #define TXT_UNEXPECTED_VAR_DECL                "Unexpected variable declaration"
 #define TXT_UNINITIALIZED_GLOBAL_VAR_s         "Use of uninitialized global variable '%s'."
 #define TXT_UNKNOWN_SCOPE_s                    "Unknown scope '%s'"

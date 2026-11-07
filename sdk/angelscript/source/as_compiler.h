@@ -159,6 +159,8 @@ struct asCExprContext
 	// provably assigns exactly one function (see asGetConstFuncdefGlobalTarget).
 	// Consumed (and reset to 0) by PerformFunctionCall's funcdef branch.
 	asCScriptFunction *knownFuncdefTarget;
+	// The nodiscard function whose call produced this value, if the last call made into this context was one
+	asCScriptFunction *nodiscardCall;
 	int  property_get;
 	int  property_set;
 	bool property_const;   // If the object that is being accessed through property accessor is read-only
