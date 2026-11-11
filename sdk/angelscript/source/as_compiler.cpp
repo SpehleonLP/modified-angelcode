@@ -6067,6 +6067,25 @@ void asCCompiler::CompileForEachStatement(asCScriptNode* node, asCByteCode* bc)
 			iterTid = engine->scriptFunctions[opForBeginId]->GetReturnTypeId();
 	}
 
+	// A handle iterator may also be taken as `T &in` / `T &inout`: the call then borrows the
+	// object (the VM null-checks the handle) instead of handing the callee a reference.
+	// GetParam reports such a parameter by its object type, without the handle bits.
+	auto takesIterator = [iterTid](asIScriptFunction* f)
+	{
+		int paramTid;
+		asDWORD paramFlags;
+		if (f->GetParam(0, &paramTid, &paramFlags) < 0)
+		{
+			return false;
+		}
+		if (paramTid == iterTid)
+		{
+			return true;
+		}
+		return (iterTid & asTYPEID_OBJHANDLE) && (paramFlags & asTM_INREF) &&
+			paramTid == (iterTid & ~(asTYPEID_OBJHANDLE | asTYPEID_HANDLETOCONST));
+	};
+
 	if (iterTid)
 	{
 		asCArray<int> funcs;
@@ -6076,8 +6095,7 @@ void asCCompiler::CompileForEachStatement(asCScriptNode* node, asCByteCode* bc)
 		{
 			asIScriptFunction* f = engine->scriptFunctions[funcs[i]];
 			asDWORD flags;
-			int paramTid;
-			if (f->GetParamCount() == 1 && f->GetReturnTypeId(&flags) == asTYPEID_BOOL && !(flags & asTM_INOUTREF) && f->GetParam(0, &paramTid) >= 0 && paramTid == iterTid)
+			if (f->GetParamCount() == 1 && f->GetReturnTypeId(&flags) == asTYPEID_BOOL && !(flags & asTM_INOUTREF) && takesIterator(f))
 			{
 				if (opForEndId != 0 && !isConstRange)
 				{
@@ -6099,8 +6117,7 @@ void asCCompiler::CompileForEachStatement(asCScriptNode* node, asCByteCode* bc)
 		for (asUINT i = 0; i < funcs.GetLength(); i++)
 		{
 			asIScriptFunction* f = engine->scriptFunctions[funcs[i]];
-			int paramTid;
-			if (f->GetParamCount() == 1 && f->GetReturnTypeId() == iterTid && f->GetParam(0, &paramTid) >= 0 && paramTid == iterTid)
+			if (f->GetParamCount() == 1 && f->GetReturnTypeId() == iterTid && takesIterator(f))
 			{
 				if (opForNextId != 0 && !isConstRange)
 				{
@@ -6139,8 +6156,7 @@ void asCCompiler::CompileForEachStatement(asCScriptNode* node, asCByteCode* bc)
 				for (asUINT j = 0; j < funcs.GetLength(); j++)
 				{
 					asIScriptFunction* f = engine->scriptFunctions[funcs[j]];
-					int paramTid;
-					if (f->GetParamCount() == 1 && f->GetParam(0, &paramTid) >= 0 && paramTid == iterTid)
+					if (f->GetParamCount() == 1 && takesIterator(f))
 					{
 						if (opForValueIdN != 0 && !isConstRange)
 						{
